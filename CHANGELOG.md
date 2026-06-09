@@ -5,6 +5,48 @@ Python port of the Conferencing Audio Pipeline. Format based on
 project they were ported from. The JSON **config schema** (`CONFIG_VERSION` = 1,
 camelCase keys) is identical to the TS version, so configs interoperate.
 
+## [1.9.0] - 2026-06-09
+
+**Placement simulation & recommendation** — a Python-only addition (no TS
+counterpart) that recommends where to mount/steer a microphone array and where a
+talker should sit, by optimising a fast geometric acoustic model with an optional
+physics-validation step. Additive: the JSON config schema is unchanged (still v2).
+
+### Added
+- **Simulation engine** (`conf_pipeline/sim/`, pure stdlib — no numpy):
+  - `scoring.py` — four objectives blended into one score: direct-path level/SNR
+    (inverse-distance spreading + main-lobe rolloff), direct-to-reverberant ratio
+    (Sabine RT60 → critical distance), coverage/on-axis (gaussian lobe gated by
+    pickup/exclusion zones), and multi-talker fairness (mean/worst/variance
+    aggregate). `estimated_rt60`, `score_placement`.
+  - `search.py` — `recommend_placement` (joint array-pose + seat, coarse-to-fine,
+    steer derived not searched, min-separation from other talkers) and
+    `score_heatmap` (where-to-mount-the-array grid).
+  - `validate.py` — pluggable physics backends: `farfield` (numpy plane-wave UCA
+    delay-and-sum) and `pyroomacoustics` (image-source RIR: physical DRR + beam
+    SNR). `available_backends`, `numpy_available`, `validate_recommendation`.
+  - Public API on `conf_pipeline`: `recommend_placement`, `score_heatmap`,
+    `score_placement`, `estimated_rt60`, `validate_recommendation`,
+    `available_backends`, `numpy_available`, `SimParams`, `Recommendation`,
+    `PlacementScore`, `Heatmap`, `Candidate` (and `SimValidationResult`).
+- **PySide6 GUI**: a **Simulate** inspector tab (target talker, grid step, RT60
+  auto/manual, four objective-weight sliders, heatmap toggle, **Recommend**,
+  **Apply to layout** as one undo step, and a backend-aware **Validate top pick**
+  that runs off the GUI thread). The canvas gains a score-heatmap overlay (2D) and
+  recommended array/seat/steer markers (2D + 3D).
+- **Room measurements**: per-wall length labels on the canvas plus an always-on
+  `Room W × D × H m` readout in the status bar.
+- **Optional extras** (`pyproject.toml`): `sim` (numpy → far-field validation),
+  `sim-rir` (pyroomacoustics → image-source RIR validation). The base engine and
+  GUI need neither.
+- pytest coverage for the engine (numpy-free; the validator path is exercised when
+  the optional extras are installed) — 91 tests total.
+
+### Notes
+- The engine stays a planning model: numpy/pyroomacoustics are imported only inside
+  the validation functions, behind availability gates, so importing `conf_pipeline`
+  has no new dependencies.
+
 ## [1.8.0] - 2026-06-09
 
 Mirrors TypeScript 1.8.0 — Designer-inspired workflow features, vendor-neutral

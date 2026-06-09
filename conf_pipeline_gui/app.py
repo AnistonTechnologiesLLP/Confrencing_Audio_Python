@@ -234,6 +234,8 @@ class MainWindow(QMainWindow):
     def _build_statusbar(self):
         self.coord_label = QLabel("x — , y —")
         self.val_label = QLabel("")
+        self.room_label = QLabel("")
+        self.statusBar().addPermanentWidget(self.room_label)
         self.statusBar().addPermanentWidget(self.coord_label)
         self.statusBar().addWidget(self.val_label)
 
@@ -362,6 +364,15 @@ class MainWindow(QMainWindow):
         self._refresh_rooms()
         res = cp.validate(self.state.config)
         self.val_label.setText(("✓ Valid" if res.ok else f"✗ {len(res.errors)} error(s)") + f" · {len(res.warnings)} warn")
+        room = self.state.config.room
+        if room and room.vertices:
+            xs = [v.x for v in room.vertices]
+            ys = [v.y for v in room.vertices]
+            self.room_label.setText(
+                f"Room {max(xs) - min(xs):.1f} × {max(ys) - min(ys):.1f} × {room.height:.1f} m"
+            )
+        else:
+            self.room_label.setText("No room")
 
     def _toggle_theme(self):
         self._light = not self._light

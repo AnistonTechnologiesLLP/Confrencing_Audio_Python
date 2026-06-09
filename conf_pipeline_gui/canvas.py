@@ -41,6 +41,25 @@ def _zone_style(ztype: str):
     return (_qc("#6d8bff", 38), _qc("#6d8bff"), [5, 4], "▢")
 
 
+REC_COLOR = "#3ddc97"  # placement-recommendation accent (green)
+
+
+def _lerp(a, b, t):
+    return a + (b - a) * t
+
+
+def _heat_color(t: float, alpha: int = 110) -> QColor:
+    """Score ``t`` in ``[0,1]`` -> blue (low) → teal → amber (high)."""
+    t = 0.0 if t < 0 else 1.0 if t > 1 else t
+    if t < 0.5:
+        u = t / 0.5
+        r, g, b = _lerp(40, 40, u), _lerp(70, 200, u), _lerp(160, 180, u)
+    else:
+        u = (t - 0.5) / 0.5
+        r, g, b = _lerp(40, 245, u), _lerp(200, 200, u), _lerp(180, 70, u)
+    return QColor(int(r), int(g), int(b), alpha)
+
+
 class Canvas(QWidget):
     def __init__(self, state: AppState):
         super().__init__()
@@ -305,6 +324,89 @@ class Canvas(QWidget):
             mx_, my_ = (a.x() + tb.x()) / 2, (a.y() + tb.y()) / 2
             self._label(p, mx_ - 26, my_, f"{round(ang.off_nadir_deg)}° · {ang.distance:.1f}m", "#7fe3ff")
 
+    # ---- placement-simulation overlays ----
+    def _paint_heatmap(self, p, v):
+        if not self.state.sim_show_heatmap:
+            return
+        hm = self.state.sim_heatmap
+        if not hm or hm.nx == 0 or hm.ny == 0:
+            return
+        rng = max(hm.vmax - hm.vmin, 1e-6)
+        half = hm.step_m / 2.0
+        for iy in range(hm.ny):
+            for ix in range(hm.nx):
+                val = hm.at(ix, iy)
+                if val is None:
+                    continue
+                wx = hm.origin.x + ix * hm.step_m
+                wy = hm.origin.y + iy * hm.step_m
+                a = self.w2s(Point2D(wx - half, wy - half), v)
+                b = self.w2s(Point2D(wx + half, wy + half), v)
+                p.fillRect(QRectF(a.x(), a.y(), b.x() - a.x(), b.y() - a.y()), _heat_color((val - hm.vmin) / rng))
+
+    def _paint_recommendation(self, p, v=None, project=None, cam=None):
+        rec = self.state.sim_recommendation
+        if not rec:
+            return
+
+        def to_screen(pt2, elev):
+            if pt2 is None:
+                return None
+            if project is not None:
+                s = project(Point3D(pt2.x, elev, pt2.y), cam)
+                return QPointF(s[0], s[1]) if s else None
+            return self.w2s(pt2, v)
+
+        a = to_screen(rec.array_pos, rec.array_elev)
+        seat = to_screen(rec.talker_pos, DEFAULT_TALKER_ELEV) if rec.talker_pos else None
+        col = QColor(REC_COLOR)
+        # steer ray array -> seat
+        if a and seat:
+            pen = QPen(col, 1.6)
+            pen.setDashPattern([5, 4])
+            p.setPen(pen)
+            p.drawLine(a, seat)
+        # array reticle (double ring + crosshair)
+        if a:
+            p.setBrush(Qt.NoBrush)
+            p.setPen(QPen(col, 2))
+            p.drawEllipse(a, 12, 12)
+            p.drawEllipse(a, 5, 5)
+            p.drawLine(QPointF(a.x() - 16, a.y()), QPointF(a.x() + 16, a.y()))
+            p.drawLine(QPointF(a.x(), a.y() - 16), QPointF(a.x(), a.y() + 16))
+            tilt = "" if rec.talker_pos is None else f"  {round(rec.steer_off_nadir_deg)}°"
+            self._label(p, a.x() + 15, a.y() - 11, f"★ array{tilt}", REC_COLOR)
+        # seat marker
+        if seat:
+            p.setBrush(_qc(REC_COLOR, 60))
+            p.setPen(QPen(col, 2))
+            p.drawEllipse(seat, 9, 9)
+            lbl = "★ seat"
+            if rec.validated is not None:
+                lbl += f"  {rec.validated.predicted_snr_db:.1f} dB"
+            self._label(p, seat.x() + 12, seat.y() + 4, lbl, REC_COLOR)
+
+    def _paint_room_dims(self, p, v):
+        """Label each room wall with its length, plus the ceiling height."""
+        verts = self._room_verts_live()
+        if not verts or len(verts) < 2:
+            return
+        cx = sum(pt.x for pt in verts) / len(verts)
+        cy = sum(pt.y for pt in verts) / len(verts)
+        n = len(verts)
+        for i in range(n):
+            a, b = verts[i], verts[(i + 1) % n]
+            length = math.hypot(b.x - a.x, b.y - a.y)
+            if length < 0.05:
+                continue
+            midx, midy = (a.x + b.x) / 2, (a.y + b.y) / 2
+            ox, oy = midx - cx, midy - cy
+            olen = math.hypot(ox, oy) or 1.0
+            s = self.w2s(Point2D(midx + ox / olen * 0.35, midy + oy / olen * 0.35), v)
+            self._label(p, s.x() - 16, s.y() + 2, f"{length:.2f} m", "#a8b6e6")
+        s0 = self.w2s(verts[0], v)
+        self._label(p, s0.x() + 6, s0.y() - 7, f"H {self._room_h():.2f} m", "#8b95bd")
+
     # ---- 2D ----
     def _paint2d(self, p):
         v = self.view2d()
@@ -315,6 +417,7 @@ class Canvas(QWidget):
         for y in range(math.ceil(miny), math.floor(maxy) + 1):
             p.setPen(self._grid_pen(y == 0))
             p.drawLine(self.w2s(Point2D(minx, y), v), self.w2s(Point2D(maxx, y), v))
+        self._paint_heatmap(p, v)
         # room
         verts = self._room_verts_live()
         if verts and len(verts) >= 2:
@@ -328,6 +431,7 @@ class Canvas(QWidget):
                 for p2 in verts:
                     s = self.w2s(p2, v)
                     p.drawEllipse(s, 4, 4)
+        self._paint_room_dims(p, v)
         # zones
         for d in self.cfg.devices:
             if d.type != "microphoneArray":
@@ -395,6 +499,7 @@ class Canvas(QWidget):
             p.setPen(Qt.NoPen)
             p.drawEllipse(QPointF(s.x() + 8, s.y() - 9), 3.2, 3.2)
             self._label(p, s.x() + 12, s.y() + 4, t.label, "#ffd6ea")
+        self._paint_recommendation(p, v=v)
         # connect pending
         if self.state.tool == "connect" and self.connect_from and isinstance(self.hover, QPointF):
             d = next((x for x in self.cfg.devices if x.id == self.connect_from), None)
@@ -539,6 +644,7 @@ class Canvas(QWidget):
                 p.setPen(Qt.NoPen)
                 p.drawEllipse(QPointF(s[0] + r * 0.9, s[1] - r), 3, 3)
                 self._label(p, s[0] + r + 3, s[1] + 4, obj.label, "#ffd6ea")
+        self._paint_recommendation(p, project=self.project, cam=cam)
 
     def _draw_routes_3d(self, p, cam):
         err, _ = self._error_refs()

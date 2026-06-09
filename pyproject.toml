@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "conferencing-audio-pipeline"
-version = "1.8.0"
+version = "1.9.0"
 description = "Configuration, routing, and validation control plane for a networked-conferencing audio system, with a PySide6 2D/3D layout editor. Not a real-time DSP engine."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -13,12 +13,14 @@ dependencies = ["PySide6>=6.6"]
 
 [project.optional-dependencies]
 dev = ["pytest>=7"]
+sim = ["numpy>=1.24"]                                        # far-field validation backend
+sim-rir = ["pyroomacoustics>=0.7", "numpy>=1.24", "scipy>=1.7"]  # image-source RIR backend
 
 [project.scripts]
 conf-pipeline-gui = "conf_pipeline_gui.app:main"
 
 [tool.setuptools]
-packages = ["conf_pipeline", "conf_pipeline_gui"]
+packages = ["conf_pipeline", "conf_pipeline.sim", "conf_pipeline_gui"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

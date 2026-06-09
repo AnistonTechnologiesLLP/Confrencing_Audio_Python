@@ -8,7 +8,9 @@ mixer → AEC references + automixer → outputs — and validates correctness (
 all the **AEC self-reference rule**). It does **not** process, mix, cancel, or
 stream real audio; AEC/automix/NLP are configuration + validation logic, and the
 device models are generic (Dante is a transport *label* only). Coverage geometry
-and steering angles are planning abstractions, not acoustic simulations.
+and steering angles are planning abstractions; the optional **placement simulator**
+(see below) adds a heuristic acoustic *model* for recommending array/seat
+placement, with an opt-in physics-validation backend — still no real-time DSP.
 
 The engine is a faithful port of the TypeScript version and writes the **same
 JSON schema** (`version` 1, camelCase keys), so configs interoperate between the
@@ -27,13 +29,14 @@ conf_pipeline/        the engine (pure dataclasses + functions, no Qt)
   devices.py          generic device factories
   persistence.py      serialize / deserialize (TS-compatible)
   api.py              public builder API, auto_configure, talkers, angles, coverage
+  sim/                placement simulation (scoring, search, pluggable validation)
 conf_pipeline_gui/    the PySide6 app
   state.py            AppState (undo/redo, selection, tool, camera)
   canvas.py           2D + 3D editor (QPainter, orbit camera, hit-testing)
-  inspector.py        Build / AEC-DSP / Issues / JSON tabs
+  inspector.py        Build / AEC-DSP / Routing / Issues / Simulate / JSON tabs
   scenarios.py        sample configs (boardroom, huddle)
   app.py              main window + toolbar
-tests/                pytest suite (53 tests)
+tests/                pytest suite (91 tests)
 run_gui.py            launcher
 ```
 
@@ -96,11 +99,12 @@ print(cp.serialize(c, pretty=True))
 .venv\Scripts\python -m pytest -q
 ```
 
-53 tests cover: the AEC self-reference rule (plain + reinforced-shared + the
+The suite covers: the AEC self-reference rule (plain + reinforced-shared + the
 dedicated far-end-only fix), coverage limits + exclusion zones, mode-switch port
 regeneration + orphaned-route detection, matrix ops, automixer ranges, the worked
-boardroom integration scenario, steering-angle math, talker coverage, and
-lossless JSON round-trips.
+boardroom integration scenario, steering-angle math, talker coverage, lossless
+JSON round-trips, and the placement-simulation engine (scoring, joint search,
+fairness, optional physics validation).
 
 ## Device profiles & DSP blocks (1.7.0)
 
@@ -116,6 +120,47 @@ a profile selector and a **Processing blocks** editor.
 
 **Schema version 2** (interoperable with the TS version); v1 JSON migrates
 automatically. The AEC self-reference rule is unchanged.
+
+## Placement simulation & recommendation (1.9.0)
+
+A Python-only extension that turns the planning geometry into an **optimiser**:
+given a room, an array, and talkers, it recommends the best array position +
+steer and the best **seat** for a talker. Pure-stdlib engine in `conf_pipeline/sim/`:
+
+```python
+import conf_pipeline as cp
+from conf_pipeline.model import Point2D
+
+c = cp.create_config("Boardroom", "2026-06-09T00:00:00Z")
+c = cp.set_room(c, cp.rectangular_room(8, 6, 3))
+c = cp.add_device(c, cp.create_microphone_array("A", "Ceiling Array"))
+c = cp.add_talker(c, cp.create_talker("T1", "Presenter", Point2D(5, 3)))
+
+rec = cp.recommend_placement(c, "A", talker_id="T1")   # joint array + seat
+print(rec.array_pos, rec.array_elev, rec.steer_off_nadir_deg, rec.talker_pos)
+print(rec.score.total, rec.score.snr, rec.score.drr, rec.score.coverage, rec.score.fairness)
+
+hm = cp.score_heatmap(c, "A")          # grid of "where to mount the array" scores
+print(cp.estimated_rt60(c))            # Sabine RT60 from room volume
+```
+
+It blends four objectives — **direct-path SNR**, **direct-to-reverberant ratio**,
+**coverage/on-axis**, and **multi-talker fairness** — weighted via `SimParams`. The
+search derives the optimal steer analytically and runs coarse-to-fine, so it is
+interactive (no numpy required).
+
+**Optional physics validation** of the single top pick (`validate_recommendation`)
+adds a pluggable backend: install `[sim]` for a numpy far-field delay-and-sum SNR,
+or `[sim-rir]` for a pyroomacoustics image-source RIR (physical DRR + beam SNR):
+
+```bash
+.venv\Scripts\python -m pip install -e ".[sim]"      # or ".[sim-rir]"
+```
+
+In the desktop app, the **Simulate** tab drives all of this: choose the target
+talker, tune the weights, toggle the **score heatmap** overlay, press **Recommend**
+(★ markers + steer ray appear on the 2D/3D canvas), **Apply to layout** (one undo
+step), and **Validate top pick** (runs off the GUI thread, backends auto-detected).
 
 ## Designer-inspired workflow (1.8.0)
 

@@ -34,6 +34,12 @@ class AppState(QObject):
         self.cam = {"yaw": -0.7, "pitch": 0.62, "dist": 16.0}
         self._zone_seq = 1
         self._talker_seq = 1
+        # ---- placement simulation (transient view state; never in history) ----
+        self.sim_params = cp.SimParams()
+        self.sim_target_id: Optional[str] = None      # talker id, or None for array-only
+        self.sim_recommendation = None                # cp.Recommendation | None
+        self.sim_heatmap = None                       # cp.Heatmap | None
+        self.sim_show_heatmap = False
 
     # ---- history ----
     def set_config(self, new, record: bool = True) -> None:

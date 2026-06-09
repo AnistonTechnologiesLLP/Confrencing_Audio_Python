@@ -121,6 +121,23 @@ from .validation import (  # noqa: F401
 )
 from .persistence import DeserializeError, deserialize, serialize  # noqa: F401
 
+# ---- placement simulation / recommendation ----
+from .sim import (  # noqa: F401
+    Candidate,
+    Heatmap,
+    PlacementScore,
+    Recommendation,
+    SimParams,
+    ValidationResult as SimValidationResult,
+    available_backends,
+    estimated_rt60,
+    numpy_available,
+    recommend_placement,
+    score_heatmap,
+    score_placement,
+    validate_recommendation,
+)
+
 # ---- 1.8.0: deployment, naming, routing, templates, projects ----
 from .deployment import DeploymentDiff, deployment_diff, mark_deployed, set_deployment_status  # noqa: F401
 from .naming import TYPE_LABEL, apply_naming_scheme, label_collisions, suggested_label  # noqa: F401
