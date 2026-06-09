@@ -18,6 +18,7 @@ class DeviceCapabilities:
     mute: bool
     supported_blocks: list[DspBlockKind]
     max_coverage_zones: int
+    coverage_angle_deg: Optional[float] = None  # full pickup cone (arrays only); None = no coverage geometry
 
 
 @dataclass
@@ -29,13 +30,16 @@ class DeviceProfile:
     port_defaults: dict = field(default_factory=dict)
 
 
-def _cap(aec, automix, mute, blocks, zones):
-    return DeviceCapabilities(aec=aec, automix=automix, mute=mute, supported_blocks=list(blocks), max_coverage_zones=zones)
+def _cap(aec, automix, mute, blocks, zones, coverage_angle=None):
+    return DeviceCapabilities(
+        aec=aec, automix=automix, mute=mute, supported_blocks=list(blocks),
+        max_coverage_zones=zones, coverage_angle_deg=coverage_angle,
+    )
 
 
 DEVICE_PROFILES: dict[str, DeviceProfile] = {
-    "generic-ceiling-array": DeviceProfile("generic-ceiling-array", "Generic ceiling array", ["microphoneArray"], _cap(True, True, True, _MIC, 8), {"danteOutputs": 1}),
-    "generic-table-array": DeviceProfile("generic-table-array", "Generic table array", ["microphoneArray"], _cap(True, True, True, _MIC, 8), {"danteOutputs": 1}),
+    "generic-ceiling-array": DeviceProfile("generic-ceiling-array", "Generic ceiling array", ["microphoneArray"], _cap(True, True, True, _MIC, 8, coverage_angle=120.0), {"danteOutputs": 1}),
+    "generic-table-array": DeviceProfile("generic-table-array", "Generic table array", ["microphoneArray"], _cap(True, True, True, _MIC, 8, coverage_angle=130.0), {"danteOutputs": 1}),
     "generic-wireless-mic": DeviceProfile("generic-wireless-mic", "Generic wireless mic", ["wirelessMic"], _cap(True, True, True, ["gain", "mute", "peq4"], 0), {"danteOutputs": 1}),
     "generic-wired-mic": DeviceProfile("generic-wired-mic", "Generic wired mic", ["wiredMic"], _cap(True, True, True, ["gain", "mute", "peq4"], 0), {"analogOutputs": 1}),
     "generic-hardware-dsp": DeviceProfile("generic-hardware-dsp", "Generic hardware DSP", ["processor"], _cap(True, True, True, _FULL, 0), {"danteInputs": 8, "danteOutputs": 8, "analogInputs": 2, "analogOutputs": 2}),

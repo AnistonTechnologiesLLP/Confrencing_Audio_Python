@@ -23,6 +23,7 @@ from .model import (
     Point2D,
     Processor,
     Route,
+    RoomBackground,
     RoomLayout,
     SystemConfig,
     Talker,
@@ -32,6 +33,7 @@ from .model import (
     is_mic_device,
     is_processor,
     point_in_shape,
+    to_jsonable,
 )
 
 # --------------------------------------------------------------------------- #
@@ -123,6 +125,60 @@ def rectangular_room(width: float, depth: float, height: float = 3.0) -> RoomLay
         units="meters",
         objects=[],
     )
+
+
+# ---- floor-plan background image ----
+def set_room_background(config: SystemConfig, path: str, image_width_px: int, image_height_px: int,
+                        scale_m_per_px: Optional[float] = None, origin: Optional[Point2D] = None,
+                        opacity: Optional[float] = None) -> SystemConfig:
+    if config.room is None:
+        raise ValueError("No room to attach a floor-plan background to.")
+    room = copy.copy(config.room)
+    room.background = RoomBackground(
+        path=path, image_width_px=image_width_px, image_height_px=image_height_px,
+        scale_m_per_px=scale_m_per_px,
+        origin=origin if origin is not None else Point2D(0.0, 0.0),
+        opacity=0.5 if opacity is None else max(0.0, min(1.0, opacity)),
+    )
+    return _clone(config, room=room)
+
+
+def set_room_background_scale(config: SystemConfig, scale_m_per_px: float) -> SystemConfig:
+    if config.room is None or config.room.background is None:
+        raise ValueError("No floor-plan background to scale.")
+    room = copy.copy(config.room)
+    bg = copy.copy(room.background)
+    bg.scale_m_per_px = scale_m_per_px
+    room.background = bg
+    return _clone(config, room=room)
+
+
+def set_room_background_opacity(config: SystemConfig, opacity: float) -> SystemConfig:
+    if config.room is None or config.room.background is None:
+        raise ValueError("No floor-plan background.")
+    room = copy.copy(config.room)
+    bg = copy.copy(room.background)
+    bg.opacity = max(0.0, min(1.0, opacity))
+    room.background = bg
+    return _clone(config, room=room)
+
+
+def clear_room_background(config: SystemConfig) -> SystemConfig:
+    if config.room is None or config.room.background is None:
+        return config
+    room = copy.copy(config.room)
+    room.background = None
+    return _clone(config, room=room)
+
+
+def calibrated_scale(scale_old: float, world_dist: float, real_len: float) -> float:
+    """New metres-per-pixel from a calibration drag: ``scale_old · real_len / world_dist``.
+
+    ``world_dist`` is the on-floor length the drawn line currently spans at
+    ``scale_old``; ``real_len`` is the true distance the user entered."""
+    if world_dist <= 1e-6:
+        raise ValueError("Calibration distance is too small.")
+    return scale_old * real_len / world_dist
 
 
 def set_device_position(config: SystemConfig, device_id: str, position: Point2D) -> SystemConfig:
@@ -431,9 +487,13 @@ def auto_configure(config: SystemConfig) -> SystemConfig:
         for b in dsp.processor_input_buses_for_device(new, processor, codec.id):
             far_end_input_buses.add(b)
 
-    picked = _pick_unused_dante_output_buses(new, processor, 2)
-    ref_bus = picked[0] if len(picked) > 0 else None
-    automix_bus = picked[1] if len(picked) > 1 else None
+    # Reuse already-assigned reference / automix buses so re-running is idempotent
+    # (a fresh design has neither, so first-run behaviour is unchanged).
+    existing_ref = next((m.aec.reference_bus_id for m in mics if m.aec.enabled and m.aec.reference_bus_id), None)
+    existing_automix = config.automixer.output_bus_id
+    pick_iter = iter(_pick_unused_dante_output_buses(new, processor, 2))
+    ref_bus = existing_ref or next(pick_iter, None)
+    automix_bus = existing_automix or next((b for b in pick_iter if b != ref_bus), None)
 
     if ref_bus and far_end_input_buses:
         for in_bus in far_end_input_buses:
@@ -462,3 +522,103 @@ def auto_configure(config: SystemConfig) -> SystemConfig:
                     new = route(new, automix_bus, near_end_in.id)
 
     return configure_automixer(new, processor.id, am)
+
+
+# --------------------------------------------------------------------------- #
+# Auto-route (one-click optimize) + change summary
+# --------------------------------------------------------------------------- #
+@dataclass
+class AutoRouteResult:
+    config: SystemConfig
+    changes: list[str] = field(default_factory=list)
+    counts: dict = field(default_factory=dict)
+
+
+def _pick_program_bus(processor: Processor, transport: str, forbidden: set[str]):
+    """First processor output bus whose port matches ``transport`` and is not a
+    forbidden column (any AEC reference / the automix bus). Returns the Bus or None."""
+    for bus in processor.matrix.output_buses:
+        port = next((p for p in processor.ports if p.id == bus.port_id), None)
+        if port is None or port.transport != transport:
+            continue
+        if bus.id in forbidden:
+            continue
+        return bus
+    return None
+
+
+def auto_route(config: SystemConfig) -> AutoRouteResult:
+    """One-click optimize. Runs :func:`auto_configure` (AEC references, automixer,
+    near-end send), then feeds the far-end to the loudspeakers and links mic mutes,
+    returning the new config plus a human-readable summary.
+
+    Invariant: never routes a mic into an AEC reference bus, so
+    ``validate(result.config).errors`` stays empty (the AEC self-reference rule).
+    """
+    processor = dsp.get_primary_processor(config)
+    if processor is None:
+        return AutoRouteResult(config, ["No processor in the design — nothing to route."], {})
+
+    changes: list[str] = []
+    counts = {"crosspoints": 0, "routes": 0, "mute_links": 0}
+
+    new = auto_configure(config)
+    proc = dsp.get_primary_processor(new)
+    pid = proc.id
+    mics = [d for d in new.devices if is_mic_device(d)]
+    codecs = [d for d in new.devices if d.type == "codec"]
+    speakers = [d for d in new.devices if d.type == "loudspeaker"]
+
+    aec_mics = [m.id for m in mics if m.aec.enabled]
+    if aec_mics:
+        changes.append(f"AEC enabled on {len(aec_mics)} mic(s), referencing the far-end bus")
+    if new.automixer.channels:
+        changes.append(f"Automixer configured with {len(new.automixer.channels)} channel(s)")
+    if new.automixer.output_bus_id and codecs:
+        changes.append("Mic mix routed to the codec (near-end send)")
+    if not codecs:
+        changes.append("No codec in the design — far-end / AEC routing skipped")
+
+    # Never reinforce into an AEC reference bus or the near-end mix bus.
+    forbidden = {m.aec.reference_bus_id for m in mics if m.aec.enabled and m.aec.reference_bus_id}
+    if new.automixer.output_bus_id:
+        forbidden.add(new.automixer.output_bus_id)
+
+    far_end_in: set[str] = set()
+    for codec in codecs:
+        for b in dsp.processor_input_buses_for_device(new, proc, codec.id):
+            far_end_in.add(b)
+
+    # Far-end audio -> loudspeakers (so remote participants are heard in the room).
+    if speakers and far_end_in:
+        for spk in speakers:
+            in_port = next((p for p in spk.ports if p.kind == "input"), None)
+            if in_port is None:
+                continue
+            bus = _pick_program_bus(dsp.get_primary_processor(new), in_port.transport, forbidden)
+            if bus is None:
+                continue
+            for fe in far_end_in:
+                if not matrix_for(new, pid).is_active(fe, bus.id):
+                    new = matrix_for(new, pid).route(fe, bus.id)
+                    counts["crosspoints"] += 1
+            had = any(r.id == _route_id(bus.port_id, in_port.id) for r in new.routes)
+            new = route(new, bus.port_id, in_port.id)
+            if not had:
+                counts["routes"] += 1
+                changes.append(f"Fed far-end audio to {spk.label}")
+    elif speakers and not far_end_in:
+        changes.append("Loudspeakers present but no codec/far-end source to feed them")
+
+    # Link mic mutes to the near-end mix so a room mute syncs (mics are mute-capable).
+    if new.automixer.output_bus_id and mics:
+        link_id = f"ml:auto:{new.automixer.output_bus_id}"
+        if not any(lk.id == link_id for lk in new.mute_links):
+            link = dsp.create_mute_link(link_id, new.automixer.output_bus_id, [m.id for m in mics], sync_to_codec=bool(codecs))
+            new = _clone(new, mute_links=[*new.mute_links, link])
+            counts["mute_links"] += 1
+            changes.append(f"Linked mute across {len(mics)} mic(s)" + (" (synced to codec)" if codecs else ""))
+
+    if to_jsonable(new) == to_jsonable(config):
+        return AutoRouteResult(config, ["No changes — the design is already routed."], {"crosspoints": 0, "routes": 0, "mute_links": 0})
+    return AutoRouteResult(new, changes, counts)

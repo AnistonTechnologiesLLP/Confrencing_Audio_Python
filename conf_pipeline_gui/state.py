@@ -40,6 +40,8 @@ class AppState(QObject):
         self.sim_recommendation = None                # cp.Recommendation | None
         self.sim_heatmap = None                       # cp.Heatmap | None
         self.sim_show_heatmap = False
+        self.show_coverage = False                    # draw array coverage circles on the canvas
+        self.calibrating = False                      # floor-plan scale calibration drag in progress
 
     # ---- history ----
     def set_config(self, new, record: bool = True) -> None:

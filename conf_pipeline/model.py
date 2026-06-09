@@ -241,11 +241,26 @@ class RoomObject:
 
 
 @dataclass
+class RoomBackground:
+    """A floor-plan image laid under the room. ``path`` is a file reference (not
+    embedded); ``image_width_px``/``image_height_px`` persist so the world rect is
+    reconstructable even if the file is missing. ``scale_m_per_px`` is None until
+    calibrated; ``origin`` is the world coord (m) of the image's top-left."""
+    path: str
+    image_width_px: int
+    image_height_px: int
+    scale_m_per_px: Optional[float] = None
+    origin: Point2D = field(default_factory=lambda: Point2D(0.0, 0.0))
+    opacity: float = 0.5
+
+
+@dataclass
 class RoomLayout:
     vertices: list[Point2D]
     height: float
     units: Literal["meters"] = "meters"
     objects: list[RoomObject] = field(default_factory=list)
+    background: Optional[RoomBackground] = None
 
 
 @dataclass
@@ -537,12 +552,24 @@ def _mute(d: dict[str, Any]) -> MuteLink:
     return MuteLink(id=d["id"], processor_output_bus_id=d["processorOutputBusId"], linked_device_ids=list(d["linkedDeviceIds"]), sync_to_codec=d["syncToCodec"], muted=d["muted"])
 
 
+def _bg(d: dict[str, Any]) -> RoomBackground:
+    return RoomBackground(
+        path=d["path"],
+        image_width_px=d["imageWidthPx"],
+        image_height_px=d["imageHeightPx"],
+        scale_m_per_px=d.get("scaleMPerPx"),
+        origin=_pt(d["origin"]) if d.get("origin") else Point2D(0.0, 0.0),
+        opacity=d.get("opacity", 0.5),
+    )
+
+
 def _room(d: dict[str, Any]) -> RoomLayout:
     return RoomLayout(
         vertices=[_pt(p) for p in d["vertices"]],
         height=d["height"],
         units=d.get("units", "meters"),
         objects=[RoomObject(id=o["id"], kind=o["kind"], position=_pt(o["position"]), meta=o.get("meta")) for o in d.get("objects", [])],
+        background=_bg(d["background"]) if d.get("background") is not None else None,
     )
 
 

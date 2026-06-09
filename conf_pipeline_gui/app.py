@@ -186,9 +186,21 @@ class MainWindow(QMainWindow):
         auto = QAction("Auto-configure", self)
         auto.triggered.connect(self._auto)
         tb.addAction(auto)
+        auto_route = QAction("Auto-Route", self)
+        auto_route.triggered.connect(self._auto_route)
+        tb.addAction(auto_route)
         rect = QAction("Rect room", self)
         rect.triggered.connect(self._rect_room)
         tb.addAction(rect)
+        self.act_coverage = QAction("Show coverage", self, checkable=True)
+        self.act_coverage.triggered.connect(self._toggle_coverage)
+        tb.addAction(self.act_coverage)
+        plan = QAction("Floor plan…", self)
+        plan.triggered.connect(self._import_floor_plan)
+        tb.addAction(plan)
+        calib = QAction("Calibrate…", self)
+        calib.triggered.connect(self._calibrate_scale)
+        tb.addAction(calib)
         tb.addSeparator()
 
         self.scenario = QComboBox()
@@ -224,8 +236,11 @@ class MainWindow(QMainWindow):
         exp.triggered.connect(self._export)
         imp = QAction("Import JSON", self)
         imp.triggered.connect(self._import)
+        rep = QAction("Export report", self)
+        rep.triggered.connect(self._export_report)
         tb.addAction(exp)
         tb.addAction(imp)
+        tb.addAction(rep)
         tb.addSeparator()
         theme = QAction("◐ Theme", self)
         theme.triggered.connect(self._toggle_theme)
@@ -274,8 +289,45 @@ class MainWindow(QMainWindow):
         self.state.set_config(cp.auto_configure(self.state.config))
         self.toast("Auto-configured")
 
+    def _auto_route(self):
+        res = cp.auto_route(self.state.config)
+        self.state.set_config(res.config)  # one undo step
+        QMessageBox.information(self, "Auto-Route", "\n".join(f"• {c}" for c in res.changes) or "No changes.")
+        self.toast("Auto-Route complete")
+
     def _rect_room(self):
         self.state.set_config(cp.set_room(self.state.config, cp.rectangular_room(9, 7, 3)))
+
+    def _toggle_coverage(self, on):
+        self.state.show_coverage = bool(on)
+        self.canvas.update()
+
+    def _import_floor_plan(self):
+        path, _ = QFileDialog.getOpenFileName(self, "Floor plan image", "", "Images (*.png *.jpg *.jpeg *.bmp *.gif)")
+        if not path:
+            return
+        cfg = self.state.config
+        if cfg.room is None:
+            cfg = cp.set_room(cfg, cp.rectangular_room(9, 7, 3))
+            self.toast("Added a default room for the floor plan")
+        from PySide6.QtGui import QImageReader
+        sz = QImageReader(path).size()
+        w_px, h_px = (sz.width(), sz.height()) if sz.isValid() else (0, 0)
+        if w_px <= 0 or h_px <= 0:
+            return self.toast("Could not read that image.")
+        xs = [v.x for v in cfg.room.vertices]
+        ys = [v.y for v in cfg.room.vertices]
+        room_w = (max(xs) - min(xs)) or 9.0
+        cfg = cp.set_room_background(cfg, path, w_px, h_px, scale_m_per_px=room_w / w_px, origin=cp.Point2D(min(xs), min(ys)))
+        self.state.set_config(cfg)
+        self.toast("Floor plan added — use Calibrate to set the true scale")
+
+    def _calibrate_scale(self):
+        if self.state.config.room is None or self.state.config.room.background is None:
+            return self.toast("Import a floor plan first.")
+        self._set_view("2d", sync=True)
+        self.state.calibrating = True
+        self.toast("Drag a line over a known distance, then enter its length.")
 
     def _delete_selection(self):
         sel = self.state.selection
@@ -314,6 +366,16 @@ class MainWindow(QMainWindow):
             with open(path, "w", encoding="utf-8") as f:
                 f.write(cp.serialize(self.state.config, pretty=True))
             self.toast("Exported")
+
+    def _export_report(self):
+        path, sel = QFileDialog.getSaveFileName(self, "Export design report", "design-report.md",
+                                                "Markdown (*.md);;HTML (*.html)")
+        if not path:
+            return
+        fmt = "html" if (path.lower().endswith(".html") or "html" in sel.lower()) else "markdown"
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(cp.design_report(self.state.config, fmt))
+        self.toast("Report exported")
 
     def _import(self):
         path, _ = QFileDialog.getOpenFileName(self, "Import config", "", "JSON (*.json)")

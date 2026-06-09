@@ -5,6 +5,35 @@ Python port of the Conferencing Audio Pipeline. Format based on
 project they were ported from. The JSON **config schema** (`CONFIG_VERSION` = 1,
 camelCase keys) is identical to the TS version, so configs interoperate.
 
+## [1.10.0] - 2026-06-09
+
+**Shure-Designer-inspired features** (Python-only, offline, vendor-neutral). Four
+capabilities that mirror Designer 6, all preserving the TS-compatible JSON schema.
+
+### Added
+- **Coverage areas + checks** (`conf_pipeline/coverage_check.py`): each array's
+  floor coverage circle from mount height × profile cone angle
+  (`array_coverage_radius`, `array_coverage_circle`), plus `coverage_report`
+  (covered / uncovered / overlapping arrays). A `coverage_angle_deg` was added to
+  `DeviceCapabilities` (ceiling 120°, table 130°). GUI: a **Show coverage** toggle
+  draws the circles on the 2D canvas, and the Issues tab gains a coverage summary.
+- **Auto-Route** (`cp.auto_route → AutoRouteResult`): one-click optimize layered on
+  `auto_configure` — adds far-end → loudspeaker feeds and a synced mic mute-link,
+  returns a human-readable change list, and is **idempotent** (re-running is a
+  no-op). `auto_configure` is now idempotent too (reuses existing reference/automix
+  buses). Never violates the AEC self-reference rule (locked by a zero-errors test).
+  GUI: an **Auto-Route** toolbar button with a summary dialog (one undo step).
+- **Floor-plan import + scale** (`RoomLayout.background` / `RoomBackground`):
+  load a floor-plan image (stored by path) under the room in 2D, with builders
+  `set_room_background` / `set_room_background_scale` / `clear_room_background` and
+  a unit-tested `calibrated_scale`. GUI: **Floor plan…** import + a **Calibrate…**
+  drag-a-known-distance gesture; missing image files degrade gracefully.
+- **Design report export** (`conf_pipeline/report.py`): `design_report(config,
+  fmt)` produces a shareable **Markdown or HTML** doc (room + RT60, device/channel
+  table, routing, AEC references, coverage status, validation) with no new
+  dependency (stdlib `html.escape`). GUI: an **Export report** toolbar action.
+- pytest coverage for all four (engine-only) — 139 tests total.
+
 ## [1.9.0] - 2026-06-09
 
 **Placement simulation & recommendation** — a Python-only addition (no TS

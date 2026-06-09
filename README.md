@@ -28,15 +28,17 @@ conf_pipeline/        the engine (pure dataclasses + functions, no Qt)
   validation.py       validate() + code catalog
   devices.py          generic device factories
   persistence.py      serialize / deserialize (TS-compatible)
-  api.py              public builder API, auto_configure, talkers, angles, coverage
+  api.py              public builder API, auto_configure, auto_route, talkers, angles, coverage, floor-plan
+  coverage_check.py   array coverage circles + covered/uncovered/overlap report
+  report.py           shareable design report (Markdown / HTML)
   sim/                placement simulation (scoring, search, pluggable validation)
 conf_pipeline_gui/    the PySide6 app
   state.py            AppState (undo/redo, selection, tool, camera)
-  canvas.py           2D + 3D editor (QPainter, orbit camera, hit-testing)
+  canvas.py           2D + 3D editor (QPainter, orbit camera, floor-plan image, coverage circles)
   inspector.py        Build / AEC-DSP / Routing / Issues / Simulate / JSON tabs
   scenarios.py        sample configs (boardroom, huddle, meeting, conference, training, lecture, U-shape)
-  app.py              main window + toolbar
-tests/                pytest suite (109 tests)
+  app.py              main window + toolbar (Auto-Route, Show coverage, Floor plan, Export report)
+tests/                pytest suite (139 tests)
 run_gui.py            launcher
 ```
 
@@ -170,6 +172,24 @@ In the desktop app, the **Simulate** tab drives all of this: choose the target
 talker, tune the weights, toggle the **score heatmap** overlay, press **Recommend**
 (★ markers + steer ray appear on the 2D/3D canvas), **Apply to layout** (one undo
 step), and **Validate top pick** (runs off the GUI thread, backends auto-detected).
+
+## Designer-style features (1.10.0)
+
+Four capabilities modelled on **Shure Designer 6**, all offline and vendor-neutral:
+
+- **Coverage areas** — each array's floor coverage circle (mount height × profile
+  cone angle) drawn on the 2D canvas via **Show coverage**; `cp.coverage_report(c)`
+  returns covered / uncovered / overlapping arrays (also shown in the Issues tab).
+- **Auto-Route** — one-click optimize (`cp.auto_route`): AEC references + automixer
+  + near-end send (from `auto_configure`), then far-end → loudspeaker feeds and a
+  synced mic mute-link, with a change summary. Idempotent and never breaks the AEC
+  self-reference rule. Toolbar **Auto-Route** button shows what changed.
+- **Floor-plan import** — load a floor-plan image under the room (**Floor plan…**),
+  then **Calibrate…** by dragging a line over a known distance and entering its
+  length (`cp.set_room_background`, `cp.calibrated_scale`). Stored by path.
+- **Design report** — `cp.design_report(config, "markdown"|"html")` produces a
+  shareable doc (room + RT60, devices, routing, AEC, coverage, validation);
+  **Export report** writes `.md`/`.html`.
 
 ## Designer-inspired workflow (1.8.0)
 

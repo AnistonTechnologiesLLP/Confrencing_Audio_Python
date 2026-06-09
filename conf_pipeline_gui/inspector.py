@@ -238,6 +238,13 @@ class Inspector(QWidget):
         self.issue_list = QListWidget()
         self.issue_list.itemClicked.connect(self._on_issue_click)
         lay.addWidget(self.issue_list)
+        sep = QFrame()
+        sep.setFrameShape(QFrame.HLine)
+        lay.addWidget(sep)
+        lay.addWidget(QLabel("Coverage (array pickup circles)"))
+        self.coverage_lbl = QLabel()
+        self.coverage_lbl.setWordWrap(True)
+        lay.addWidget(self.coverage_lbl)
         return w
 
     def _json_tab(self):
@@ -673,6 +680,18 @@ class Inspector(QWidget):
             it.setForeground(QColor(ic["error"] if i.severity == "error" else ic["warning"]))
             it.setData(Qt.UserRole, i.refs)
             self.issue_list.addItem(it)
+        # coverage
+        rep = cp.coverage_report(cfg)
+        if not cfg.talkers:
+            self.coverage_lbl.setText("No talkers placed.")
+        else:
+            label_of = {t.id: t.label for t in cfg.talkers}
+            parts = [f"{len(rep.covered)}/{len(cfg.talkers)} talkers covered"]
+            if rep.uncovered:
+                parts.append("uncovered: " + ", ".join(label_of.get(t, t) for t in rep.uncovered))
+            if rep.overlaps:
+                parts.append(f"{len(rep.overlaps)} array overlap(s)")
+            self.coverage_lbl.setText("  ·  ".join(parts))
         # routing
         s = cp.routing_summary(cfg)
         self.routing_summary_lbl.setText(f"{s['total']} route(s) · {s['dante']} Dante · {s['analog']} analog")

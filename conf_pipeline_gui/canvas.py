@@ -74,6 +74,8 @@ class Canvas(QWidget):
         self.hover = None         # world point (room tool) / screen point (connect)
         self.connect_from = None
         self.coord_cb = None      # optional callback(str) for coordinate readout
+        self._bg_pixmap = None    # cached floor-plan QPixmap
+        self._bg_pixmap_key = None
         state.changed.connect(self.update)
 
     # ----------------------------------------------------------------- helpers
@@ -407,10 +409,56 @@ class Canvas(QWidget):
         s0 = self.w2s(verts[0], v)
         self._label(p, s0.x() + 6, s0.y() - 7, f"H {self._room_h():.2f} m", "#8b95bd")
 
+    def _bg_pixmap_for(self, bg):
+        from PySide6.QtGui import QPixmap
+        if bg is None:
+            self._bg_pixmap = None
+            self._bg_pixmap_key = None
+            return None
+        if self._bg_pixmap_key != bg.path:
+            pm = QPixmap(bg.path)
+            self._bg_pixmap = None if pm.isNull() else pm
+            self._bg_pixmap_key = bg.path
+        return self._bg_pixmap
+
+    def _paint_background(self, p, v):
+        """Floor-plan image under the grid (2D), scaled into its world rect."""
+        bg = self.cfg.room.background if self.cfg.room else None
+        pm = self._bg_pixmap_for(bg)
+        if pm is None or not bg or not bg.scale_m_per_px:
+            return
+        tl = self.w2s(bg.origin, v)
+        br = self.w2s(Point2D(bg.origin.x + bg.image_width_px * bg.scale_m_per_px,
+                              bg.origin.y + bg.image_height_px * bg.scale_m_per_px), v)
+        p.setOpacity(bg.opacity)
+        p.drawPixmap(QRectF(tl, br), pm, QRectF(pm.rect()))
+        p.setOpacity(1.0)
+
+    def _paint_coverage(self, p, v):
+        """Dashed coverage-area circles for each placed array (2D)."""
+        if not self.state.show_coverage:
+            return
+        color = DEVICE_STYLE["microphoneArray"][0]
+        for d in self.cfg.devices:
+            if d.type != "microphoneArray":
+                continue
+            circ = cp.array_coverage_circle(self.cfg, d.id)
+            if not circ:
+                continue
+            center, radius = circ
+            c_s = self.w2s(center, v)
+            r_s = radius * v[0]
+            p.setBrush(_qc(color, 16))
+            pen = QPen(_qc(color, 150), 1.3)
+            pen.setDashPattern([5, 4])
+            p.setPen(pen)
+            p.drawEllipse(c_s, r_s, r_s)
+
     # ---- 2D ----
     def _paint2d(self, p):
         v = self.view2d()
         minx, miny, maxx, maxy = v[3], v[4], v[5], v[6]
+        self._paint_background(p, v)
         for x in range(math.ceil(minx), math.floor(maxx) + 1):
             p.setPen(self._grid_pen(x == 0))
             p.drawLine(self.w2s(Point2D(x, miny), v), self.w2s(Point2D(x, maxy), v))
@@ -454,6 +502,7 @@ class Canvas(QWidget):
                     p.setBrush(QColor("#ffffff"))
                     p.setPen(QPen(stroke, 1))
                     p.drawRect(QRectF(br.x() - 4, br.y() - 4, 8, 8))
+        self._paint_coverage(p, v)
         self._draw_routes_2d(p, v)
         self._angle_rays(p, v=v)
         # in-progress zone
@@ -509,6 +558,16 @@ class Canvas(QWidget):
                 pen.setDashPattern([6, 5])
                 p.setPen(pen)
                 p.drawLine(a, self.hover)
+        # floor-plan calibration rubber-band
+        if self.drag and self.drag.get("kind") == "calibrate":
+            ca, cb = self.drag["a"], self.drag["b"]
+            pen = QPen(QColor("#ffd24a"), 2)
+            pen.setDashPattern([6, 4])
+            p.setPen(pen)
+            p.drawLine(ca, cb)
+            aw = self.s2w(ca.x(), ca.y(), v)
+            bw = self.s2w(cb.x(), cb.y(), v)
+            self._label(p, cb.x() + 8, cb.y(), f"{math.hypot(bw.x - aw.x, bw.y - aw.y):.2f} m", "#ffd24a")
 
     def _highlight(self, p, s, did, err, warn):
         if did in err or did in warn:
@@ -761,6 +820,9 @@ class Canvas(QWidget):
         return None
 
     def _down2d(self, pos):
+        if self.state.calibrating:
+            self.drag = {"kind": "calibrate", "a": pos, "b": pos}
+            return self.update()
         v = self.view2d()
         w = self.s2w(pos.x(), pos.y(), v)
         psnap = Point2D(self.snap(w.x), self.snap(w.y))
@@ -806,6 +868,9 @@ class Canvas(QWidget):
             self._toast(str(exc))
 
     def _move2d(self, pos):
+        if self.drag and self.drag.get("kind") == "calibrate":
+            self.drag["b"] = pos
+            return self.update()
         v = self.view2d()
         w = self.s2w(pos.x(), pos.y(), v)
         self._coord(w)
@@ -837,6 +902,8 @@ class Canvas(QWidget):
         self.drag = None
         if not d:
             return
+        if d["kind"] == "calibrate":
+            return self._finish_calibrate(d)
         try:
             k = d["kind"]
             if k == "device":
@@ -866,6 +933,28 @@ class Canvas(QWidget):
         except Exception as exc:
             self._toast(str(exc))
             self.update()
+
+    def _finish_calibrate(self, d):
+        from PySide6.QtWidgets import QInputDialog
+        self.state.calibrating = False
+        v = self.view2d()
+        aw = self.s2w(d["a"].x(), d["a"].y(), v)
+        bw = self.s2w(d["b"].x(), d["b"].y(), v)
+        world_dist = math.hypot(bw.x - aw.x, bw.y - aw.y)
+        bg = self.cfg.room.background if self.cfg.room else None
+        if bg is None or not bg.scale_m_per_px or world_dist < 1e-6:
+            self._toast("Calibration needs a placed floor plan and a longer line.")
+            return self.update()
+        val, ok = QInputDialog.getDouble(self, "Calibrate scale", "Real length of the drawn line (m):", 1.0, 0.01, 10000.0, 2)
+        if not ok:
+            return self.update()
+        try:
+            new_scale = cp.calibrated_scale(bg.scale_m_per_px, world_dist, val)
+            self.state.set_config(cp.set_room_background_scale(self.cfg, new_scale))
+            self._toast(f"Scale set: 1 px = {new_scale:.4f} m")
+        except Exception as exc:
+            self._toast(str(exc))
+        self.update()
 
     # ---- 3D input ----
     def _pick3d(self, pos, cam):

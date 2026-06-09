@@ -33,6 +33,7 @@ from .model import (  # noqa: F401
     Port,
     Processor,
     RectShape,
+    RoomBackground,
     RoomLayout,
     RoomObject,
     Route,
@@ -121,6 +122,17 @@ from .validation import (  # noqa: F401
 )
 from .persistence import DeserializeError, deserialize, serialize  # noqa: F401
 
+# ---- geometric coverage check (array pickup circles) ----
+from .coverage_check import (  # noqa: F401
+    CoverageReport,
+    array_coverage_circle,
+    array_coverage_radius,
+    coverage_report,
+)
+
+# ---- design report export ----
+from .report import design_report  # noqa: F401
+
 # ---- placement simulation / recommendation ----
 from .sim import (  # noqa: F401
     Candidate,
@@ -167,6 +179,7 @@ from .project import (  # noqa: F401
 
 # ---- public builder API ----
 from .api import (  # noqa: F401
+    AutoRouteResult,
     MatrixAccessor,
     TalkerCoverage,
     add_coverage_zone,
@@ -179,6 +192,7 @@ from .api import (  # noqa: F401
     update_dsp_block,
     array_to_talker_angles,
     auto_configure,
+    auto_route,
     clear_device_elevation,
     clear_device_position,
     clear_room,
@@ -198,6 +212,11 @@ from .api import (  # noqa: F401
     set_device_elevation,
     set_device_position,
     set_room,
+    set_room_background,
+    set_room_background_opacity,
+    set_room_background_scale,
+    clear_room_background,
+    calibrated_scale,
     set_talker_elevation,
     set_talker_position,
     set_zone_shape,
