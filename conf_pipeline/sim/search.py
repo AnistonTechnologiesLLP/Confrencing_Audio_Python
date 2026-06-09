@@ -150,8 +150,8 @@ def _eval(
     fair_inputs: list[float] = []
     for t in fixed_talkers:
         elev = _talker_elev(t, params)
-        on, az = _derive_steer(array_pos, array_elev, t.position, elev)
-        ps = scoring.talker_quality(array_pos, array_elev, on, az, t.position, elev, array, dc, params)
+        # each talker is served by whichever array (this one or the others) covers best
+        ps = scoring.talker_best_quality(config, array, array_pos, array_elev, t.position, elev, dc, params)
         per_talker[t.id] = ps
         fair_inputs.append(ps.total)
     fairness = scoring.fairness_aggregate(fair_inputs)
@@ -200,9 +200,8 @@ def _best_seat(
     def _scan(require_separation: bool) -> Optional[tuple[Point2D, float, PlacementScore]]:
         best: Optional[tuple[Point2D, float, PlacementScore]] = None
         for sp in candidates:
-            _, in_exclusion = scoring.zone_membership(array, sp)
-            if in_exclusion:
-                continue  # never recommend seating someone in a no-pickup zone
+            if scoring.point_in_any_exclusion(config, sp):
+                continue  # never seat inside any array's no-pickup zone
             if require_separation and sep > 0 and any(
                 math.hypot(sp.x - o.position.x, sp.y - o.position.y) < sep for o in others
             ):
@@ -220,6 +219,19 @@ def _best_seat(
         ps = scoring.talker_quality(array_pos, array_elev, on, az, talker.position, elev, array, dc, params)
         best = (talker.position, elev, ps)
     return best
+
+
+def _seat_candidates(config: SystemConfig, candidates: list[Point2D], params: SimParams) -> list[Point2D]:
+    """Where a person may be seated: drop exclusion zones, and — when any pickup
+    zone (a "table"/seating area) is defined — keep only seats inside one, so the
+    recommendation sits people at the table rather than on open floor. Relaxes to
+    the whole (non-excluded) floor if no candidate lands in a pickup zone."""
+    non_excluded = [p for p in candidates if not scoring.point_in_any_exclusion(config, p)]
+    if params.seat_in_pickup_zones and scoring.has_any_pickup_zone(config):
+        at_table = [p for p in non_excluded if scoring.point_in_any_pickup(config, p)]
+        if at_table:
+            return at_table
+    return non_excluded
 
 
 # --------------------------------------------------------------------------- #
@@ -241,6 +253,7 @@ def recommend_placement(
     fixed = [t for t in config.talkers if t.id != talker_id]
 
     grid, _step = grid_points(config, params.grid_step_m, params.max_cells)
+    seat_grid = _seat_candidates(config, grid, params)  # seats at the table / off exclusion zones
 
     note = ""
     if not config.talkers:
@@ -252,7 +265,7 @@ def recommend_placement(
     best = None  # (total, array_pos, seat_pos, seat_elev, per_talker, seat_score, steer_on, steer_az)
     for ap in grid:
         if selected is not None:
-            seat_pos, seat_elev, _ = _best_seat(config, array, ap, array_elev, grid, selected, dc, params)
+            seat_pos, seat_elev, _ = _best_seat(config, array, ap, array_elev, seat_grid, selected, dc, params)
         else:
             seat_pos, seat_elev = None, params.talker_height_m
         total, _fair, per_talker, seat_ps, on, az = _eval(
@@ -277,7 +290,9 @@ def recommend_placement(
     # refine the seat with the refined array held fixed — keep it only if it
     # does not regress the coarse/array-refined optimum (e.g. a fallback seat)
     if selected is not None and seat_pos is not None:
-        local = _local_grid(seat_pos, config, params.refine_step_m, params.refine_radius_m)
+        local = _seat_candidates(
+            config, _local_grid(seat_pos, config, params.refine_step_m, params.refine_radius_m), params
+        )
         cand_seat, cand_elev, _ = _best_seat(config, array, array_pos, array_elev, local, selected, dc, params)
         cand_total, _f, cand_pt, cand_sps, cand_on, cand_az = _eval(
             config, array, array_pos, array_elev, cand_seat, cand_elev, fixed, dc, params

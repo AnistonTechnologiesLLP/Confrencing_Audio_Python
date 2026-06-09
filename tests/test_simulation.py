@@ -186,6 +186,44 @@ def test_score_placement_matches_recommend_after_relocation():
 
 
 # --------------------------------------------------------------------------- #
+# 9. table-aware seating + multi-array fairness
+# --------------------------------------------------------------------------- #
+def test_seat_lands_at_the_table_when_pickup_zone_defined():
+    # a "table" is modelled as a pickup zone; the presenter should be seated in it
+    c = _config(width=12, depth=8)
+    table = cp.dynamic_zone("A-tbl", "Table", RectShape(origin=Point2D(4, 3), width=4, height=2))
+    c = cp.add_coverage_zone(c, "A", table)
+    c = cp.add_talker(c, cp.create_talker("T1", "Presenter", Point2D(1, 7)))  # currently off the table
+    rec = cp.recommend_placement(c, "A", talker_id="T1")
+    assert point_in_shape(rec.talker_pos, table.shape)
+
+
+def test_no_pickup_zone_leaves_seating_unconstrained():
+    # without any pickup zone, seating is the whole (non-excluded) room
+    c = _config(width=10, depth=8)
+    c = cp.add_talker(c, cp.create_talker("T1", "P", Point2D(8, 6)))
+    rec = cp.recommend_placement(c, "A", talker_id="T1")
+    from conf_pipeline.model import point_in_polygon
+    assert point_in_polygon(rec.talker_pos, c.room.vertices)
+
+
+def test_multi_array_fairness_uses_best_covering_array():
+    c = cp.create_config("ma", "x")
+    c = cp.set_room(c, cp.rectangular_room(12, 6, 3))
+    c = cp.add_device(c, cp.create_microphone_array("A1", "A1", "automatic"))
+    c = cp.add_device(c, cp.create_microphone_array("A2", "A2", "automatic"))
+    c = cp.set_device_position(c, "A2", Point2D(10, 3))  # A2 fixed directly above the far talker
+    c = cp.add_talker(c, cp.create_talker("T1", "near A1", Point2D(2, 3)))
+    c = cp.add_talker(c, cp.create_talker("T2", "near A2", Point2D(10, 3)))
+    # array-only mode (talkers fixed) so a single array can't just cluster everyone
+    multi = cp.recommend_placement(c, "A1", talker_id=None)
+    single = cp.recommend_placement(c, "A1", talker_id=None, params=cp.SimParams(consider_all_arrays=False))
+    # A2 already covers T2 well, so considering all arrays rates T2 far better than
+    # judging it by A1-only coverage (where one array must stretch to reach both)
+    assert multi.per_talker["T2"].total > single.per_talker["T2"].total + 0.15
+
+
+# --------------------------------------------------------------------------- #
 # 7. heatmap shape
 # --------------------------------------------------------------------------- #
 def test_heatmap_covers_grid():

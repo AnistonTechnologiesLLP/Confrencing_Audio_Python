@@ -20,7 +20,7 @@ import conf_pipeline as cp
 
 from .canvas import Canvas
 from .inspector import Inspector
-from .scenarios import boardroom, huddle
+from .scenarios import SCENARIOS
 from .state import AppState, now_iso
 
 # "Conduit" design system, translated to QSS (a constrained CSS subset: no
@@ -193,8 +193,8 @@ class MainWindow(QMainWindow):
 
         self.scenario = QComboBox()
         self.scenario.addItem("Load sample…", "")
-        self.scenario.addItem("Boardroom (reference AEC)", "boardroom")
-        self.scenario.addItem("Huddle (auto-configured)", "huddle")
+        for key, label, _fn in SCENARIOS:
+            self.scenario.addItem(label, key)
         self.scenario.addItem("Empty", "empty")
         self.scenario.currentIndexChanged.connect(self._load_scenario)
         tb.addWidget(self.scenario)
@@ -298,14 +298,15 @@ class MainWindow(QMainWindow):
         if not which:
             return
         self.scenario.setCurrentIndex(0)
+        self.state.selection = None
         if which == "empty":
-            self.state.selection = None
             self.state.set_config(cp.create_config("Untitled", now_iso()))
-        elif which == "boardroom":
-            self.state.set_config(boardroom())
-            self.toast("Loaded Boardroom — select the Presenter to see angles")
-        elif which == "huddle":
-            self.state.set_config(huddle())
+            return
+        entry = next((e for e in SCENARIOS if e[0] == which), None)
+        if entry is not None:
+            _key, label, builder = entry
+            self.state.set_config(builder())
+            self.toast(f"Loaded {label} — open the Simulate tab to optimise placement")
 
     def _export(self):
         path, _ = QFileDialog.getSaveFileName(self, "Export config", "config.json", "JSON (*.json)")

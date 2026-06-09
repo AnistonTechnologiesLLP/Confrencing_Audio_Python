@@ -34,9 +34,9 @@ conf_pipeline_gui/    the PySide6 app
   state.py            AppState (undo/redo, selection, tool, camera)
   canvas.py           2D + 3D editor (QPainter, orbit camera, hit-testing)
   inspector.py        Build / AEC-DSP / Routing / Issues / Simulate / JSON tabs
-  scenarios.py        sample configs (boardroom, huddle)
+  scenarios.py        sample configs (boardroom, huddle, meeting, conference, training, lecture, U-shape)
   app.py              main window + toolbar
-tests/                pytest suite (91 tests)
+tests/                pytest suite (109 tests)
 run_gui.py            launcher
 ```
 
@@ -55,9 +55,12 @@ python -m venv .venv
 
 Toolbar: tools **Select / Connect / Room / Zone / Talker**, a **2D / 3D** toggle,
 undo/redo, auto-configure, a rectangular-room shortcut, sample scenarios, and
-JSON export/import. Load **Boardroom** and select the **Presenter** talker to see
-steering-angle rays from each ceiling array (azimuth / down-tilt / off-nadir /
-distance) and the per-talker capture status (recorded / excluded / not covered).
+JSON export/import. The **Load sample…** picker has seven rooms — boardroom,
+huddle, meeting, conference (3 arrays), training/classroom, lecture hall, and a
+U-shape boardroom (polygon table). Load **Boardroom** and select the **Presenter**
+talker to see steering-angle rays from each ceiling array (azimuth / down-tilt /
+off-nadir / distance) and the per-talker capture status (recorded / excluded /
+not covered).
 
 ### Editor
 
@@ -148,6 +151,12 @@ It blends four objectives — **direct-path SNR**, **direct-to-reverberant ratio
 **coverage/on-axis**, and **multi-talker fairness** — weighted via `SimParams`. The
 search derives the optimal steer analytically and runs coarse-to-fine, so it is
 interactive (no numpy required).
+
+When the room has **multiple arrays**, each talker is scored by whichever array
+covers it best (`SimParams.consider_all_arrays`). When a **table** is defined — a
+table is modelled as a pickup/coverage zone — recommended **seats are placed at the
+table** rather than on open floor (`SimParams.seat_in_pickup_zones`). Both are
+toggle-able in the Simulate tab.
 
 **Optional physics validation** of the single top pick (`validate_recommendation`)
 adds a pluggable backend: install `[sim]` for a numpy far-field delay-and-sum SNR,

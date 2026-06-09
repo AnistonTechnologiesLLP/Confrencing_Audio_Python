@@ -286,6 +286,16 @@ class Inspector(QWidget):
             wl.addRow(label, sl)
         lay.addWidget(wbox)
 
+        self.sim_all_arrays = QCheckBox("Consider all arrays (talker served by best-covering array)")
+        self.sim_all_arrays.setChecked(self.state.sim_params.consider_all_arrays)
+        self.sim_all_arrays.toggled.connect(lambda *_a: None if self._refreshing else self._schedule_heatmap())
+        lay.addWidget(self.sim_all_arrays)
+
+        self.sim_seat_table = QCheckBox("Seat talkers at the table (pickup zones)")
+        self.sim_seat_table.setChecked(self.state.sim_params.seat_in_pickup_zones)
+        self.sim_seat_table.toggled.connect(lambda *_a: None if self._refreshing else self._schedule_heatmap())
+        lay.addWidget(self.sim_seat_table)
+
         self.sim_heat_chk = QCheckBox("Show score heatmap (where to mount the array)")
         self.sim_heat_chk.toggled.connect(self._toggle_heatmap)
         lay.addWidget(self.sim_heat_chk)
@@ -342,6 +352,8 @@ class Inspector(QWidget):
             w_drr=self.sim_w["drr"].value() / 100.0,
             w_coverage=self.sim_w["cov"].value() / 100.0,
             w_fairness=self.sim_w["fair"].value() / 100.0,
+            consider_all_arrays=self.sim_all_arrays.isChecked(),
+            seat_in_pickup_zones=self.sim_seat_table.isChecked(),
         )
 
     def _sim_array_id(self):

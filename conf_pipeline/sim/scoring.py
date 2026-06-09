@@ -195,6 +195,70 @@ def zone_membership(array: MicrophoneArray, point: Point2D) -> tuple[bool, bool]
 
 
 # --------------------------------------------------------------------------- #
+# multi-array helpers: the "table" (pickup zones) and best-covering array
+# --------------------------------------------------------------------------- #
+def microphone_arrays(config: SystemConfig) -> list[MicrophoneArray]:
+    return [d for d in config.devices if d.type == "microphoneArray"]  # type: ignore[misc]
+
+
+def has_any_pickup_zone(config: SystemConfig) -> bool:
+    """True if any array defines a pickup/dedicated zone (i.e. a seating area)."""
+    return any(z.type != "exclusion" for a in microphone_arrays(config) for z in a.zones)
+
+
+def point_in_any_pickup(config: SystemConfig, p: Point2D) -> bool:
+    return any(
+        z.type != "exclusion" and point_in_shape(p, z.shape)
+        for a in microphone_arrays(config) for z in a.zones
+    )
+
+
+def point_in_any_exclusion(config: SystemConfig, p: Point2D) -> bool:
+    return any(
+        z.type == "exclusion" and point_in_shape(p, z.shape)
+        for a in microphone_arrays(config) for z in a.zones
+    )
+
+
+def _array_actual_elev(config: SystemConfig, array: MicrophoneArray) -> float:
+    if array.elevation is not None:
+        return array.elevation
+    room_height = config.room.height if config.room is not None else 3.0
+    return default_elevation(array, room_height)
+
+
+def quality_from_array(
+    array: MicrophoneArray, array_pos: Point2D, array_elev: float,
+    talker_pos: Point2D, talker_elev: float, dc: Optional[float], params: SimParams,
+) -> PlacementScore:
+    """One array's capture quality for a talker, steered straight at the talker."""
+    ang = steering_angles(
+        Point3D(array_pos.x, array_pos.y, array_elev), Point3D(talker_pos.x, talker_pos.y, talker_elev)
+    )
+    return talker_quality(
+        array_pos, array_elev, ang.off_nadir_deg, ang.azimuth_deg, talker_pos, talker_elev, array, dc, params
+    )
+
+
+def talker_best_quality(
+    config: SystemConfig, target_array: MicrophoneArray, target_pos: Point2D, target_elev: float,
+    talker_pos: Point2D, talker_elev: float, dc: Optional[float], params: SimParams,
+) -> PlacementScore:
+    """Best capture across the array under edit (at ``target_pos``) and every other
+    *placed* array held at its current pose — a talker is served by whichever array
+    covers them best. With ``consider_all_arrays=False`` only the target array counts."""
+    best = quality_from_array(target_array, target_pos, target_elev, talker_pos, talker_elev, dc, params)
+    if params.consider_all_arrays:
+        for a in microphone_arrays(config):
+            if a.id == target_array.id or a.position is None:
+                continue
+            q = quality_from_array(a, a.position, _array_actual_elev(config, a), talker_pos, talker_elev, dc, params)
+            if q.total > best.total:
+                best = q
+    return best
+
+
+# --------------------------------------------------------------------------- #
 # combiners
 # --------------------------------------------------------------------------- #
 def geom_quality(snr: float, drr: float, coverage: float, params: SimParams) -> float:
@@ -303,15 +367,9 @@ def score_placement(
     dc = _critical_distance(config, params)
 
     def quality_at(pos: Point2D, elev: float) -> PlacementScore:
-        # each talker is captured with the array steered straight at it
-        ang = steering_angles(
-            Point3D(candidate.array_pos.x, candidate.array_pos.y, candidate.array_elev),
-            Point3D(pos.x, pos.y, elev),
-        )
-        return talker_quality(
-            candidate.array_pos, candidate.array_elev,
-            ang.off_nadir_deg, ang.azimuth_deg,
-            pos, elev, array, dc, params,
+        # each talker is captured by whichever array covers them best
+        return talker_best_quality(
+            config, array, candidate.array_pos, candidate.array_elev, pos, elev, dc, params
         )
 
     seated_id = talker_id

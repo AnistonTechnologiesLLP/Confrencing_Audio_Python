@@ -21,7 +21,10 @@ physics-validation step. Additive: the JSON config schema is unchanged (still v2
     aggregate). `estimated_rt60`, `score_placement`.
   - `search.py` — `recommend_placement` (joint array-pose + seat, coarse-to-fine,
     steer derived not searched, min-separation from other talkers) and
-    `score_heatmap` (where-to-mount-the-array grid).
+    `score_heatmap` (where-to-mount-the-array grid). **Multi-array aware**: each
+    talker is scored by the best-covering array (`consider_all_arrays`); when a
+    pickup zone (a "table") is defined, seats are placed at the table
+    (`seat_in_pickup_zones`). Both are toggle-able in the Simulate tab.
   - `validate.py` — pluggable physics backends: `farfield` (numpy plane-wave UCA
     delay-and-sum) and `pyroomacoustics` (image-source RIR: physical DRR + beam
     SNR). `available_backends`, `numpy_available`, `validate_recommendation`.
@@ -36,11 +39,16 @@ physics-validation step. Additive: the JSON config schema is unchanged (still v2
   recommended array/seat/steer markers (2D + 3D).
 - **Room measurements**: per-wall length labels on the canvas plus an always-on
   `Room W × D × H m` readout in the status bar.
+- **Five more sample rooms** in the **Load sample…** picker — meeting room,
+  conference room (3 arrays), training room / classroom, lecture hall / auditorium,
+  and a U-shape boardroom (polygon table) — each validates and round-trips, driven
+  by a `SCENARIOS` registry.
 - **Optional extras** (`pyproject.toml`): `sim` (numpy → far-field validation),
   `sim-rir` (pyroomacoustics → image-source RIR validation). The base engine and
   GUI need neither.
 - pytest coverage for the engine (numpy-free; the validator path is exercised when
-  the optional extras are installed) — 91 tests total.
+  the optional extras are installed) — 109 tests total (incl. per-scenario
+  validation, round-trip, and simulation smoke).
 
 ### Notes
 - The engine stays a planning model: numpy/pyroomacoustics are imported only inside

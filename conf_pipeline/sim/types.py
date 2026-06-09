@@ -35,6 +35,15 @@ class SimParams:
     talker_height_m: float = DEFAULT_TALKER_ELEVATION_M  # 1.2 m mouth height
     min_talker_separation_m: float = 0.6    # don't recommend a seat on top of another talker
 
+    # --- modelling scope ---
+    # Score each talker by the BEST-covering array (the one being placed plus any
+    # other placed arrays held fixed), instead of only the array under edit.
+    consider_all_arrays: bool = True
+    # Restrict recommended seats to the pickup/dedicated zones (the "table" /
+    # seating area) when any are defined — so people are seated at the table, not
+    # on open floor. Falls back to the whole room when no pickup zone exists.
+    seat_in_pickup_zones: bool = True
+
     # --- acoustics ---
     rt60_s: Optional[float] = None  # None -> Sabine estimate from room volume
     absorption: float = 0.18        # average Sabine absorption coeff (used only when rt60 estimated)
