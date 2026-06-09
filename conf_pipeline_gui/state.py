@@ -25,6 +25,7 @@ class AppState(QObject):
         self._idx = 0
         self.rooms = [{"id": "room-1", "config": self.config, "history": [self.config], "idx": 0, "last_deployed": None}]
         self.active_room = 0
+        self.theme = "dark"
         self.tool = "select"          # select | connect | room | zone | talker
         self.view = "2d"              # 2d | 3d
         self.snap = 0.25

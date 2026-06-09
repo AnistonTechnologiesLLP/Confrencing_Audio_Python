@@ -46,7 +46,7 @@ class Canvas(QWidget):
         super().__init__()
         self.state = state
         self.setMouseTracking(True)
-        self.setMinimumSize(560, 460)
+        self.setMinimumSize(360, 280)
         self.setFocusPolicy(Qt.StrongFocus)
         self.drag = None          # active drag preview
         self.orbit = None         # {"x","y"} during 3D orbit

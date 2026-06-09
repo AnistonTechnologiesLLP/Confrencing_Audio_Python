@@ -1,7 +1,8 @@
 """Inspector side panel: Build / AEC-DSP / Issues / JSON tabs."""
 from __future__ import annotations
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
+from PySide6.QtGui import QColor, QFont
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -16,6 +17,7 @@ from PySide6.QtWidgets import (
     QListWidgetItem,
     QPlainTextEdit,
     QPushButton,
+    QScrollArea,
     QTabWidget,
     QVBoxLayout,
     QWidget,
@@ -35,6 +37,10 @@ DEVICE_TYPES = [
     ("Codec (far-end)", "codec"),
 ]
 
+ISSUE_COLORS = {
+    "dark": {"error": "#ff6b81", "warning": "#f7c948"},
+    "light": {"error": "#e23b59", "warning": "#b8860b"},
+}
 BLOCK_LABELS = {"gain": "Gain", "mute": "Mute", "peq4": "PEQ (4-band)", "agc": "AGC",
                 "compressor": "Compressor", "delay": "Delay", "noiseReduction": "Noise reduction", "deverb": "Dereverb"}
 BLOCK_PARAM_SCHEMA = {
@@ -48,11 +54,28 @@ BLOCK_PARAM_SCHEMA = {
 }
 
 
+class NoWheelDoubleSpinBox(QDoubleSpinBox):
+    """A spin box that ignores mouse-wheel scrolling.
+
+    Scrolling the inspector then scrolls the panel instead of changing the value
+    — and, crucially, never fires valueChanged mid-wheel, which would rebuild the
+    selection card and destroy this very widget inside its own event (a crash).
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.setFocusPolicy(Qt.StrongFocus)
+
+    def wheelEvent(self, event):  # noqa: N802 (Qt override)
+        event.ignore()
+
+
 class Inspector(QWidget):
     def __init__(self, state: AppState):
         super().__init__()
         self.state = state
         self._refreshing = False
+        self._refresh_pending = False
         self._dsp_seq = 1
         self.setMinimumWidth(380)
 
@@ -61,14 +84,36 @@ class Inspector(QWidget):
         self.tabs = QTabWidget()
         root.addWidget(self.tabs)
 
-        self.tabs.addTab(self._build_tab(), "Build")
-        self.tabs.addTab(self._dsp_tab(), "AEC / DSP")
+        self.tabs.addTab(self._scroll(self._build_tab()), "Build")
+        self.tabs.addTab(self._scroll(self._dsp_tab()), "AEC / DSP")
         self.tabs.addTab(self._routing_tab(), "Routing")
         self.tabs.addTab(self._issues_tab(), "Issues")
         self.tabs.addTab(self._json_tab(), "JSON")
 
-        state.changed.connect(self.refresh)
+        state.changed.connect(self._schedule_refresh)
         self.refresh()
+
+    def _schedule_refresh(self):
+        """Coalesce rebuilds onto the next event-loop tick so the inspector is
+        never rebuilt synchronously inside a child widget's input event."""
+        if self._refresh_pending:
+            return
+        self._refresh_pending = True
+        QTimer.singleShot(0, self._do_refresh)
+
+    def _do_refresh(self):
+        self._refresh_pending = False
+        self.refresh()
+
+    def _scroll(self, inner: QWidget) -> QScrollArea:
+        """Wrap a tab page so stacked content scrolls instead of forcing a tall
+        window minimum (keeps the app usable on small / high-DPI screens)."""
+        sa = QScrollArea()
+        sa.setWidgetResizable(True)
+        sa.setFrameShape(QFrame.NoFrame)
+        sa.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        sa.setWidget(inner)
+        return sa
 
     # ------------------------------------------------------------- Build tab
     def _build_tab(self):
@@ -83,6 +128,7 @@ class Inspector(QWidget):
         self.dev_transport = QComboBox()
         self.dev_transport.addItems(["dante", "analog"])
         add_btn = QPushButton("Add")
+        add_btn.setProperty("accent", "true")
         add_btn.clicked.connect(self._add_device)
         f.addWidget(self.dev_type, 2)
         f.addWidget(self.dev_transport, 1)
@@ -90,6 +136,7 @@ class Inspector(QWidget):
         lay.addWidget(add)
 
         self.dev_list = QListWidget()
+        self.dev_list.setMaximumHeight(240)
         self.dev_list.itemClicked.connect(self._on_device_click)
         lay.addWidget(QLabel("Devices"))
         lay.addWidget(self.dev_list, 1)
@@ -124,9 +171,11 @@ class Inspector(QWidget):
         people = QGroupBox("People (talkers)")
         pl = QVBoxLayout(people)
         addt = QPushButton("+ Add talker")
+        addt.setProperty("accent", "true")
         addt.clicked.connect(self._add_talker)
         pl.addWidget(addt)
         self.talker_list = QListWidget()
+        self.talker_list.setMaximumHeight(200)
         self.talker_list.itemClicked.connect(self._on_talker_click)
         pl.addWidget(self.talker_list)
         lay.addWidget(people)
@@ -150,7 +199,7 @@ class Inspector(QWidget):
         lay.addWidget(QLabel("Signal flow (Dante hub / routing):"))
         self.routing_view = QPlainTextEdit()
         self.routing_view.setReadOnly(True)
-        self.routing_view.setStyleSheet("font-family: Consolas, monospace; font-size: 11px;")
+        self.routing_view.setFont(QFont("Consolas", 10))
         lay.addWidget(self.routing_view)
         return w
 
@@ -169,7 +218,7 @@ class Inspector(QWidget):
         lay = QVBoxLayout(w)
         self.json_view = QPlainTextEdit()
         self.json_view.setReadOnly(True)
-        self.json_view.setStyleSheet("font-family: Consolas, monospace; font-size: 11px;")
+        self.json_view.setFont(QFont("Consolas", 10))
         lay.addWidget(self.json_view)
         return w
 
@@ -300,9 +349,10 @@ class Inspector(QWidget):
         res = cp.validate(cfg)
         self.issue_badge.setText(("✓ Valid" if res.ok else f"✗ {len(res.errors)} error(s)") + f" · {len(res.warnings)} warning(s)")
         self.issue_list.clear()
+        ic = ISSUE_COLORS[getattr(self.state, "theme", "dark")]
         for i in [*res.errors, *res.warnings]:
             it = QListWidgetItem(f"[{i.code}] {i.message}")
-            it.setForeground(Qt.red if i.severity == "error" else Qt.yellow)
+            it.setForeground(QColor(ic["error"] if i.severity == "error" else ic["warning"]))
             it.setData(Qt.UserRole, i.refs)
             self.issue_list.addItem(it)
         # routing
@@ -317,8 +367,13 @@ class Inspector(QWidget):
         while lay.count():
             item = lay.takeAt(0)
             wdg = item.widget()
-            if wdg:
+            if wdg is not None:
+                wdg.setParent(None)
                 wdg.deleteLater()
+            else:
+                child = item.layout()
+                if child is not None:
+                    self._clear_layout(child)  # recurse into nested form/row layouts
 
     def _refresh_selection(self):
         self._clear_layout(self.sel_layout)
@@ -410,7 +465,7 @@ class Inspector(QWidget):
         self.sel_layout.addWidget(rm)
 
     def _spin(self, value, cb):
-        s = QDoubleSpinBox()
+        s = NoWheelDoubleSpinBox()
         s.setRange(-1000, 1000)
         s.setSingleStep(0.1)
         s.setDecimals(2)
@@ -502,7 +557,7 @@ class Inspector(QWidget):
 
     def _block_widget(self, d, b):
         box = QFrame()
-        box.setStyleSheet("QFrame { border: 1px solid #283250; border-radius: 7px; }")
+        box.setProperty("card", "true")
         v = QVBoxLayout(box)
         head = QHBoxLayout()
         en = QCheckBox(BLOCK_LABELS.get(b.kind, b.kind))
@@ -536,7 +591,7 @@ class Inspector(QWidget):
             row = QHBoxLayout()
             for key, label, lo, hi, step in BLOCK_PARAM_SCHEMA.get(b.kind, []):
                 row.addWidget(QLabel(label))
-                sp = QDoubleSpinBox()
+                sp = NoWheelDoubleSpinBox()
                 sp.setRange(lo, hi)
                 sp.setSingleStep(step)
                 sp.setDecimals(2)
@@ -551,7 +606,7 @@ class Inspector(QWidget):
         for i, band in enumerate(bands):
             row = QHBoxLayout()
             for key, lo, hi, dec in [("freqHz", 20, 20000, 0), ("gainDb", -15, 15, 1), ("q", 0.1, 10, 2)]:
-                sp = QDoubleSpinBox()
+                sp = NoWheelDoubleSpinBox()
                 sp.setRange(lo, hi)
                 sp.setDecimals(dec)
                 sp.setValue(float(band.get(key, 0)))
