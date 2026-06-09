@@ -117,6 +117,17 @@ a profile selector and a **Processing blocks** editor.
 **Schema version 2** (interoperable with the TS version); v1 JSON migrates
 automatically. The AEC self-reference rule is unchanged.
 
+## Designer-inspired workflow (1.8.0)
+
+Vendor-neutral, config/validation-only features (no audio/Dante/discovery/
+firmware/network I/O): **Projects** (multi-room `create_project` / `add_room` /
+`serialize_project` …), **Deployment** (`mark_deployed`, `deployment_diff`),
+**Naming** (`apply_naming_scheme` + duplicate/empty-label warnings), **Routing
+views** (`routing_summary`, `dante_subscriptions`, `signal_flow_report`), and
+**Device templates** (`device_template` / `instantiate_template`). The PySide6 app
+gains a room selector, **+/− Room**, **Auto-name**, **Deploy**, and a **Routing**
+tab. JSON stays interoperable with the TypeScript version.
+
 ## Scope
 
 This is a **configuration and signal-routing control plane**, not a DSP engine.
