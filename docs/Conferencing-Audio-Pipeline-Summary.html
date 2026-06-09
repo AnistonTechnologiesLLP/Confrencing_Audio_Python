@@ -1,0 +1,379 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Conferencing Audio Pipeline — Work Summary</title>
+<style>
+  :root{
+    --bg:#0e1417; --panel:#141d22; --panel2:#1b262d; --ink:#e6eef1;
+    --muted:#8fa6b0; --line:#26343c; --accent:#3fb6cf; --accent2:#1f7a8c;
+    --pink:#ff7eb6; --green:#5ddf9e; --amber:#ffcc6b; --code:#0b1114;
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{
+    margin:0; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    background:var(--bg); color:var(--ink); line-height:1.6; font-size:15px;
+  }
+  a{color:var(--accent); text-decoration:none}
+  code{font-family:"SF Mono",ui-monospace,"Cascadia Code",Consolas,monospace; font-size:.85em;
+    background:#1d2a31; color:#ff9ecb; padding:2px 6px; border-radius:5px; white-space:nowrap}
+  pre{background:var(--code); border-left:3px solid var(--accent2); border-radius:8px;
+    padding:14px 16px; overflow-x:auto; font-size:13px; line-height:1.5; margin:14px 0}
+  pre code{background:none; color:#cfe7ee; padding:0; white-space:pre; font-size:13px}
+
+  /* progress bar */
+  #progress{position:fixed; top:0; left:0; height:3px; width:0%; z-index:200;
+    background:linear-gradient(90deg,var(--accent),var(--green))}
+
+  .layout{display:grid; grid-template-columns:270px 1fr; min-height:100vh}
+
+  /* sidebar */
+  aside{position:sticky; top:0; align-self:start; height:100vh; overflow-y:auto;
+    background:var(--panel); border-right:1px solid var(--line); padding:22px 18px}
+  aside h2{font-size:13px; letter-spacing:.12em; text-transform:uppercase; color:var(--muted);
+    margin:0 0 14px}
+  .brand{font-weight:700; font-size:17px; color:#fff; margin-bottom:2px}
+  .ver{display:inline-block; font-size:12px; background:var(--accent2); color:#fff;
+    padding:2px 9px; border-radius:20px; margin-bottom:18px; font-weight:600}
+  nav a{display:block; padding:8px 12px; border-radius:8px; color:var(--muted);
+    font-size:14px; margin-bottom:3px; border-left:3px solid transparent; transition:.15s}
+  nav a:hover{background:var(--panel2); color:var(--ink)}
+  nav a.active{background:var(--panel2); color:#fff; border-left-color:var(--accent)}
+  .searchbox{width:100%; background:var(--panel2); border:1px solid var(--line); color:var(--ink);
+    border-radius:8px; padding:9px 12px; font-size:13px; margin-bottom:18px; outline:none}
+  .searchbox:focus{border-color:var(--accent)}
+
+  /* main */
+  main{padding:42px 48px 90px; max-width:980px}
+  header.hero{margin-bottom:32px}
+  header.hero h1{font-size:30px; margin:0 0 12px; line-height:1.25;
+    background:linear-gradient(90deg,#fff,var(--accent)); -webkit-background-clip:text;
+    background-clip:text; -webkit-text-fill-color:transparent}
+  .lede{color:#c4d4db; font-size:16px}
+  .stats{display:flex; gap:14px; flex-wrap:wrap; margin:24px 0 8px}
+  .stat{background:var(--panel); border:1px solid var(--line); border-radius:12px;
+    padding:14px 18px; min-width:120px; flex:1}
+  .stat .n{font-size:24px; font-weight:700; color:var(--accent)}
+  .stat .l{font-size:12px; color:var(--muted); text-transform:uppercase; letter-spacing:.06em}
+
+  section{margin-top:34px; scroll-margin-top:20px}
+  .sectiontitle{font-size:13px; letter-spacing:.14em; text-transform:uppercase;
+    color:var(--accent); margin:0 0 14px}
+
+  /* collapsible cards */
+  details{background:var(--panel); border:1px solid var(--line); border-radius:14px;
+    margin-bottom:14px; overflow:hidden}
+  details[open]{border-color:var(--accent2)}
+  summary{cursor:pointer; padding:18px 22px; list-style:none; display:flex; align-items:center;
+    gap:14px; user-select:none}
+  summary::-webkit-details-marker{display:none}
+  .chev{transition:.2s; color:var(--muted); font-size:13px}
+  details[open] .chev{transform:rotate(90deg); color:var(--accent)}
+  .badge{font-size:11px; font-weight:700; padding:3px 9px; border-radius:6px; letter-spacing:.04em}
+  .b-feat{background:#143b33; color:var(--green)}
+  .b-fix{background:#3b2f14; color:var(--amber)}
+  .b-task{background:#16323b; color:var(--accent)}
+  summary .t{font-weight:600; font-size:16px; flex:1}
+  summary .v{font-size:12px; color:var(--muted)}
+  .body{padding:4px 22px 22px 22px; border-top:1px solid var(--line)}
+  .body ul{padding-left:20px} .body li{margin:5px 0}
+
+  blockquote{margin:14px 0; padding:12px 18px; background:#10242a; border-left:4px solid var(--accent);
+    border-radius:8px; color:#bfe0e9; font-style:italic}
+
+  table{border-collapse:collapse; width:100%; margin:14px 0; font-size:13.5px}
+  th{background:var(--panel2); text-align:left; padding:10px 12px; border-bottom:2px solid var(--accent2);
+    color:#fff}
+  td{padding:9px 12px; border-bottom:1px solid var(--line); vertical-align:top; color:#cfdbe1}
+  tr:hover td{background:#16222880}
+
+  .pill{display:inline-block; font-size:12px; background:var(--panel2); border:1px solid var(--line);
+    padding:3px 10px; border-radius:20px; margin:3px 4px 3px 0; color:#bcd}
+  .principle{background:var(--panel); border:1px solid var(--line); border-radius:12px;
+    padding:14px 18px; margin-bottom:10px}
+  .principle b{color:#fff}
+  .controls{display:flex; gap:10px; margin-bottom:16px}
+  .btn{background:var(--panel2); border:1px solid var(--line); color:var(--ink); border-radius:8px;
+    padding:8px 14px; font-size:13px; cursor:pointer; transition:.15s}
+  .btn:hover{border-color:var(--accent); color:#fff}
+  .hidden{display:none !important}
+  mark{background:var(--amber); color:#1a1a1a; border-radius:3px; padding:0 2px}
+  @media(max-width:820px){
+    .layout{grid-template-columns:1fr} aside{display:none} main{padding:28px 20px 70px}
+  }
+</style>
+</head>
+<body>
+<div id="progress"></div>
+<div class="layout">
+  <aside>
+    <div class="brand">Conferencing Audio Pipeline</div>
+    <span class="ver">v1.10.0 · 139 tests passing</span>
+    <input class="searchbox" id="search" placeholder="🔍 Filter sections…">
+    <h2>Contents</h2>
+    <nav id="nav">
+      <a href="#overview">Overview</a>
+      <a href="#principles">Architecture principles</a>
+      <a href="#task1">Task 1 · Placement sim</a>
+      <a href="#task2">Task 2 · Room measurements</a>
+      <a href="#task3">Task 3 · Multi-array sim</a>
+      <a href="#task4">Task 4 · Sample scenarios</a>
+      <a href="#task5">Task 5 · Shure-6 features</a>
+      <a href="#files">Files touched</a>
+      <a href="#errors">Errors fixed</a>
+      <a href="#verify">Verification</a>
+      <a href="#run">How to run</a>
+    </nav>
+  </aside>
+
+  <main>
+    <header class="hero" id="overview">
+      <h1>Conferencing Audio Pipeline — Work Summary</h1>
+      <p class="lede">A vendor-neutral, <b>Shure-Designer-style offline audio-configuration control plane</b>: a pure-Python engine (<code>conf_pipeline</code>) plus a PySide6 2D/3D layout editor (<code>conf_pipeline_gui</code>). It models a networked conferencing audio system — mic coverage zones → matrix mixer → AEC references + automixer → outputs — and validates correctness, above all the <b>AEC self-reference rule</b>. It does <b>not</b> process, mix, cancel, or stream real audio.</p>
+      <div class="stats">
+        <div class="stat"><div class="n">1.10.0</div><div class="l">Version</div></div>
+        <div class="stat"><div class="n">139</div><div class="l">Tests passing</div></div>
+        <div class="stat"><div class="n">7</div><div class="l">Built-in scenarios</div></div>
+        <div class="stat"><div class="n">v2</div><div class="l">JSON schema</div></div>
+      </div>
+      <div style="margin-top:8px">
+        <span class="pill">Project root: c:\Work\conferencing-audio-pipeline-py</span>
+        <span class="pill">numpy-free engine</span>
+        <span class="pill">camelCase keys · TS-interoperable</span>
+      </div>
+    </header>
+
+    <div class="controls">
+      <button class="btn" onclick="setAll(true)">Expand all</button>
+      <button class="btn" onclick="setAll(false)">Collapse all</button>
+    </div>
+
+    <section id="principles">
+      <p class="sectiontitle">Architectural principles (held throughout)</p>
+      <div class="principle"><b>Immutable builders.</b> Every engine function returns a <i>new</i> <code>SystemConfig</code>; nothing is mutated in place. The GUI commits a change via <code>state.set_config(new)</code>, which is exactly one undo step.</div>
+      <div class="principle"><b>TS-compatible JSON round-trip.</b> <code>to_jsonable</code> / <code>config_from_dict</code> convert to camelCase; optional <code>None</code> fields are auto-omitted unless listed in <code>_NULLABLE_KEYS</code>.</div>
+      <div class="principle"><b>AEC self-reference rule (cardinal invariant).</b> A mic's AEC reference bus must never contain that mic's own signal. Enforced by <code>analyze_aec_reference</code> / <code>contains_own_signal</code>; error codes <code>AEC_SELF_REFERENCE</code> and <code>AEC_REINFORCED_SHARED_REFERENCE</code>.</div>
+      <div class="principle"><b>Processor bus convention.</b> A processor output bus has <code>bus.id == bus.port_id</code>, so a bus id works both as a matrix output column and as a route from-port.</div>
+      <div class="principle"><b>Pure stdlib engine.</b> No numpy/Qt in the engine. numpy / pyroomacoustics are imported only inside the optional physics-validation backends, behind availability gates.</div>
+    </section>
+
+    <section id="tasks">
+      <p class="sectiontitle">Tasks &amp; Features</p>
+
+      <details open id="task1">
+        <summary><span class="chev">▶</span><span class="badge b-task">TASK 1</span><span class="t">Placement simulation &amp; recommendation</span><span class="v">v1.9.0</span></summary>
+        <div class="body">
+          <blockquote>"Add simulations that tell me the best possible angle to place my mic setup and where the person should sit."</blockquote>
+          <p><b>Decisions:</b> hybrid fidelity (fast heuristic sweep + optional physics validation of the top pick), joint optimization (array placement <b>and</b> seat), all four objectives, GUI panel + engine API, pluggable validation backend.</p>
+          <p>New package <code>conf_pipeline/sim/</code>:</p>
+          <ul>
+            <li><b><code>scoring.py</code></b> — four objectives blended into one score: direct-path level/SNR (inverse-distance spreading + main-lobe rolloff); direct-to-reverberant ratio (Sabine RT60 → critical distance); coverage / on-axis (gaussian lobe gated by pickup/exclusion zones); multi-talker fairness (mean / worst / variance). Plus <code>estimated_rt60</code>, <code>score_placement</code>.</li>
+            <li><b><code>search.py</code></b> — <code>recommend_placement</code> (joint array-pose + seat, coarse-to-fine, steer derived analytically, min-separation from other talkers) and <code>score_heatmap</code> (where-to-mount-the-array grid).</li>
+            <li><b><code>validate.py</code></b> — pluggable physics backends: <code>farfield</code> (numpy plane-wave UCA delay-and-sum) and <code>pyroomacoustics</code> (image-source RIR: physical DRR + beam SNR). Plus <code>available_backends</code>, <code>numpy_available</code>, <code>validate_recommendation</code>.</li>
+          </ul>
+          <p><b>Public API</b> (<code>cp.*</code>):</p>
+          <div>
+            <span class="pill">recommend_placement</span><span class="pill">score_heatmap</span><span class="pill">score_placement</span><span class="pill">estimated_rt60</span><span class="pill">validate_recommendation</span><span class="pill">available_backends</span><span class="pill">numpy_available</span><span class="pill">SimParams</span><span class="pill">Recommendation</span><span class="pill">PlacementScore</span><span class="pill">Heatmap</span><span class="pill">Candidate</span><span class="pill">SimValidationResult</span>
+          </div>
+          <p style="margin-top:14px"><b>GUI:</b> a <b>Simulate</b> inspector tab (target talker, grid step, RT60 auto/manual, four objective-weight sliders, heatmap toggle, <b>Recommend</b>, <b>Apply to layout</b> as one undo step, backend-aware <b>Validate top pick</b> running off the GUI thread). Canvas gains a score-heatmap overlay (2D) and recommended array/seat/steer markers (2D + 3D).</p>
+        </div>
+      </details>
+
+      <details id="task2">
+        <summary><span class="chev">▶</span><span class="badge b-task">TASK 2</span><span class="t">Room measurements display</span><span class="v">v1.9.0</span></summary>
+        <div class="body">
+          <blockquote>"Why can I not see the measurements of the room?"</blockquote>
+          <ul>
+            <li>Per-wall length labels on the canvas (<code>_paint_room_dims</code>).</li>
+            <li>An always-on <code>Room W × D × H m</code> readout in the status bar (<code>room_label</code> in app.py).</li>
+          </ul>
+        </div>
+      </details>
+
+      <details id="task3">
+        <summary><span class="chev">▶</span><span class="badge b-task">TASK 3</span><span class="t">Multi-array &amp; table-aware simulation</span><span class="v">v1.9.0</span></summary>
+        <div class="body">
+          <blockquote>"The simulation only considers a single array, and when there's a table how does it show that attendees sit on it? Check the simulation parameters and repair it."</blockquote>
+          <ul>
+            <li><code>SimParams</code> gained <code>consider_all_arrays=True</code>, <code>seat_in_pickup_zones=True</code>, <code>min_talker_separation_m=0.6</code>; recalibrated <code>drr_window_db=(-15, 3)</code>.</li>
+            <li><code>talker_best_quality</code> — each talker scored by whichever array covers it best.</li>
+            <li><code>_seat_candidates</code> — restricts recommended seats to pickup zones (a "table") when one is defined, so people are seated at the table, not on open floor.</li>
+            <li><code>_local_grid</code> capped at <code>max_n=48</code> (fixes a <code>refine_step_m=0</code> hang).</li>
+            <li>Both behaviours are toggle-able in the Simulate tab.</li>
+          </ul>
+        </div>
+      </details>
+
+      <details id="task4">
+        <summary><span class="chev">▶</span><span class="badge b-task">TASK 4</span><span class="t">More sample scenarios</span><span class="v">v1.9.0</span></summary>
+        <div class="body">
+          <blockquote>"Make more samples that include meeting rooms, conference rooms, and other different samples."</blockquote>
+          <p><code>conf_pipeline_gui/scenarios.py</code> — a <code>_wire()</code> helper plus five new scenarios behind a <code>SCENARIOS</code> registry, joining the existing boardroom + huddle:</p>
+          <ol>
+            <li><b>meeting_room</b></li>
+            <li><b>conference_room</b> (3 arrays)</li>
+            <li><b>training_room</b> / classroom</li>
+            <li><b>lecture_hall</b> / auditorium</li>
+            <li><b>u_shape_boardroom</b> (polygon table via <code>PolygonShape</code>)</li>
+          </ol>
+          <p>All seven scenarios validate with zero errors and round-trip losslessly.</p>
+        </div>
+      </details>
+
+      <details id="task5">
+        <summary><span class="chev">▶</span><span class="badge b-feat">TASK 5</span><span class="t">Four Shure-Designer-6-inspired features</span><span class="v">v1.10.0</span></summary>
+        <div class="body">
+          <blockquote>"Any more changes that can be implemented? [Shure Designer URL] — check this website and consider the changes."</blockquote>
+          <p>Researched Shure Designer 6, identified four gaps, the user chose all four. Implementation order <b>F3 → F2 → F1 → F4</b>.</p>
+
+          <h3 style="color:var(--green)">F3 — Coverage areas + checks</h3>
+          <ul>
+            <li><b><code>conf_pipeline/profiles.py</code></b> — added <code>coverage_angle_deg: Optional[float] = None</code> to <code>DeviceCapabilities</code> (ceiling array 120°, table array 130°; not serialized — catalog is static).</li>
+            <li><b><code>conf_pipeline/coverage_check.py</code> (new)</b> — geometric coverage:
+              <ul>
+                <li><code>array_coverage_radius(mount, target, angle)</code> = <code>max(mount−target, 0)·tan(angle/2)</code></li>
+                <li><code>array_coverage_circle(config, array_id) -> (center, radius)</code></li>
+                <li><code>coverage_report(config) -> CoverageReport(covered, uncovered, overlaps)</code></li>
+                <li>Reuses <code>default_elevation</code>, <code>point_in_shape</code>, <code>device_capabilities</code>; mirrors the exclusion-zone logic of <code>talker_coverage</code>.</li>
+              </ul>
+            </li>
+            <li><b>GUI</b> — <code>AppState.show_coverage</code>; a checkable <b>Show coverage</b> toolbar action; <code>_paint_coverage</code> draws dashed circles in each array's style colour; Issues tab gains a read-only <b>Coverage</b> group. Advisory only — <i>not</i> new <code>validate()</code> codes.</li>
+          </ul>
+
+          <h3 style="color:var(--green)">F2 — Auto-Route (one-click optimize) + summary</h3>
+          <ul>
+            <li><b><code>conf_pipeline/api.py</code></b> — <code>AutoRouteResult</code> dataclass, <code>_pick_program_bus</code>, <code>auto_route(config)</code>. Layered on <code>auto_configure</code>: feeds far-end → loudspeakers, matrix-routes far_end → program bus, routes <code>bus.port_id</code> → speaker input, creates a deterministic synced mic mute-link (<code>ml:auto:{bus}</code>), returns a human-readable change list. Returns "No changes." when re-run on its own output.</li>
+            <li><b>AEC-safe</b> — a <code>forbidden</code> output-column set keeps the AEC self-reference rule intact; locked by a zero-errors test.</li>
+            <li><b>Idempotency fix to <code>auto_configure</code></b> — it now reuses any existing reference/automix buses instead of picking fresh ones on re-run:</li>
+          </ul>
+          <pre><code>existing_ref = next((m.aec.reference_bus_id for m in mics
+                     if m.aec.enabled and m.aec.reference_bus_id), None)
+existing_automix = config.automixer.output_bus_id
+pick_iter = iter(_pick_unused_dante_output_buses(new, processor, 2))
+ref_bus = existing_ref or next(pick_iter, None)
+automix_bus = existing_automix or next((b for b in pick_iter if b != ref_bus), None)</code></pre>
+          <ul><li><b>GUI</b> — an <b>Auto-Route</b> toolbar button → <code>_auto_route</code> commits one undo step and shows a <code>QMessageBox</code> summary of what changed.</li></ul>
+
+          <h3 style="color:var(--green)">F1 — Floor-plan import + scale calibration</h3>
+          <ul>
+            <li><b><code>conf_pipeline/model.py</code></b> — <code>RoomBackground</code> dataclass (<code>path</code>, <code>image_width_px</code>, <code>image_height_px</code>, <code>scale_m_per_px=None</code>, <code>origin=Point2D(0,0)</code>, <code>opacity=0.5</code>); <code>RoomLayout.background</code>; <code>_bg(d)</code> deserializer. <b>Stored by path, not base64</b> — to avoid bloating every JSON, undo snapshot, and diff. Pixel dims persisted so the world rect survives a missing file.</li>
+            <li><b><code>conf_pipeline/api.py</code></b> — builders <code>set_room_background</code>, <code>set_room_background_scale</code>, <code>set_room_background_opacity</code>, <code>clear_room_background</code>, plus the pure, unit-tested <code>calibrated_scale(old, world_dist, real_len)</code> = <code>old · real_len / world_dist</code>.</li>
+            <li><b>GUI</b> — <code>canvas.py</code> caches a <code>QPixmap</code> by path; <code>_paint_background</code> draws it under the grid in 2D (opacity is sticky and must be reset). <b>Floor plan…</b> imports an image; <b>Calibrate…</b> is a drag-a-known-distance gesture, zoom-independent via <code>s2w</code>. Missing image files degrade gracefully.</li>
+          </ul>
+
+          <h3 style="color:var(--green)">F4 — Design report export (Markdown + HTML)</h3>
+          <ul>
+            <li><b><code>conf_pipeline/report.py</code> (new)</b> — <code>design_report(config, fmt="markdown"|"html")</code>. Markdown is the source of truth; a tiny in-module converter emits self-contained HTML using only stdlib <code>html.escape</code> (no new dependency). Sections: room + lazy <code>estimated_rt60</code>, device/channel table, routing, AEC references, coverage, validation. Every interpolated label HTML-escaped.</li>
+            <li><b>GUI</b> — an <b>Export report</b> toolbar action writes <code>.md</code> / <code>.html</code>.</li>
+          </ul>
+        </div>
+      </details>
+    </section>
+
+    <section id="files">
+      <p class="sectiontitle">Files touched (Task 5)</p>
+      <table>
+        <thead><tr><th>File</th><th>Change</th></tr></thead>
+        <tbody>
+          <tr><td><code>conf_pipeline/profiles.py</code></td><td><code>coverage_angle_deg</code> capability</td></tr>
+          <tr><td><code>conf_pipeline/coverage_check.py</code></td><td><b>new</b> — coverage geometry + report</td></tr>
+          <tr><td><code>conf_pipeline/api.py</code></td><td><code>AutoRouteResult</code>, <code>auto_route</code>, <code>auto_configure</code> idempotency, floor-plan builders, <code>calibrated_scale</code></td></tr>
+          <tr><td><code>conf_pipeline/model.py</code></td><td><code>RoomBackground</code>, <code>RoomLayout.background</code>, <code>_bg</code> reader</td></tr>
+          <tr><td><code>conf_pipeline/report.py</code></td><td><b>new</b> — Markdown/HTML design report</td></tr>
+          <tr><td><code>conf_pipeline/__init__.py</code></td><td>re-exports for all new public symbols</td></tr>
+          <tr><td><code>conf_pipeline_gui/state.py</code></td><td><code>show_coverage</code>, <code>calibrating</code> transient flags</td></tr>
+          <tr><td><code>conf_pipeline_gui/canvas.py</code></td><td>background pixmap, coverage circles, calibration gesture, room-dim labels</td></tr>
+          <tr><td><code>conf_pipeline_gui/app.py</code></td><td>toolbar actions (Show coverage, Floor plan, Calibrate, Auto-Route, Export report), room status readout</td></tr>
+          <tr><td><code>conf_pipeline_gui/inspector.py</code></td><td>Issues-tab Coverage group</td></tr>
+          <tr><td><code>conf_pipeline_gui/scenarios.py</code></td><td>five new scenarios + registry</td></tr>
+          <tr><td><code>pyproject.toml</code></td><td>version 1.9.0 → 1.10.0</td></tr>
+          <tr><td><code>README.md</code>, <code>CHANGELOG.md</code></td><td>docs + v1.10.0 entries</td></tr>
+        </tbody>
+      </table>
+      <p><b>Tests added:</b> <code>test_coverage_check.py</code> (9), <code>test_auto_route.py</code> (8), <code>test_room_background.py</code> (8), <code>test_report.py</code> (5), plus earlier <code>test_simulation.py</code> and <code>test_scenarios.py</code>.</p>
+    </section>
+
+    <section id="errors">
+      <p class="sectiontitle">Errors found &amp; fixed</p>
+      <details open>
+        <summary><span class="chev">▶</span><span class="badge b-fix">FIXES</span><span class="t">Six issues resolved during development</span></summary>
+        <div class="body">
+          <ul>
+            <li><b>Auto-route not idempotent</b> — re-running produced changes because <code>_pick_unused_dante_output_buses</code> saw previously-picked buses as "used". Fixed by reusing existing reference/automix buses. First-run behaviour unchanged.</li>
+            <li><b>GUI smoke hung / no output</b> — <code>_auto_route</code>'s modal <code>QMessageBox.information</code> blocks in headless mode. Correct for interactive use; the smoke test patches it out.</li>
+            <li><b>Multi-array fairness test gave equal scores</b> with a free seat → switched the test to array-only mode (talkers fixed).</li>
+            <li><b><code>refine_step_m=0</code> hang</b> → capped <code>max_n=48</code> in <code>_local_grid</code>.</li>
+            <li><b>Seat placed on top of a talker</b> → added <code>min_talker_separation_m</code>.</li>
+            <li><b>DRR pinned to 0</b> → recalibrated <code>drr_window_db</code>.</li>
+            <li>Six adversarial multi-agent-review findings fixed.</li>
+          </ul>
+        </div>
+      </details>
+    </section>
+
+    <section id="verify">
+      <p class="sectiontitle">Verification (final state)</p>
+      <div class="principle">✅ <b>Full suite:</b> 139 passed (numpy-free, ~18 s).</div>
+      <div class="principle">✅ <b>Headless GUI smoke:</b> Auto-Route → valid config + single undo; coverage label "6/6 covered · 3 overlaps"; floor-plan pixmap renders (2D + 3D, no crash); HTML report generated (~2.9 KB).</div>
+      <div class="principle">✅ <b>All seven built-in scenarios</b> validate with zero errors and round-trip losslessly.</div>
+    </section>
+
+    <section id="run">
+      <p class="sectiontitle">How to run</p>
+      <pre><code>cd c:\Work\conferencing-audio-pipeline-py
+.venv\Scripts\python -m pip install -e ".[dev]"   # PySide6 + pytest
+.venv\Scripts\python run_gui.py                    # desktop app
+.venv\Scripts\python -m pytest -q                  # tests</code></pre>
+      <p>Optional physics-validation extras: <code>.venv\Scripts\python -m pip install -e ".[sim]"</code> (numpy far-field) or <code>".[sim-rir]"</code> (pyroomacoustics image-source RIR).</p>
+    </section>
+  </main>
+</div>
+
+<script>
+  // progress bar
+  const prog = document.getElementById('progress');
+  window.addEventListener('scroll', ()=>{
+    const h = document.documentElement.scrollHeight - innerHeight;
+    prog.style.width = (scrollY / h * 100) + '%';
+  });
+
+  // expand / collapse all
+  function setAll(open){ document.querySelectorAll('details').forEach(d=>d.open=open); }
+
+  // scrollspy
+  const links = [...document.querySelectorAll('#nav a')];
+  const ids = links.map(a=>a.getAttribute('href').slice(1));
+  const targets = ids.map(id=>document.getElementById(id)).filter(Boolean);
+  const spy = new IntersectionObserver((entries)=>{
+    entries.forEach(e=>{
+      if(e.isIntersecting){
+        links.forEach(l=>l.classList.remove('active'));
+        const l = links.find(a=>a.getAttribute('href')==='#'+e.target.id);
+        if(l) l.classList.add('active');
+      }
+    });
+  },{rootMargin:'-20% 0px -70% 0px'});
+  targets.forEach(t=>spy.observe(t));
+
+  // clicking a nav item auto-opens its <details>
+  links.forEach(a=>a.addEventListener('click',()=>{
+    const el = document.getElementById(a.getAttribute('href').slice(1));
+    if(el && el.tagName==='DETAILS') el.open=true;
+    const d = el && el.closest('details'); if(d) d.open=true;
+  }));
+
+  // search filter — matches details summaries & section content
+  const search = document.getElementById('search');
+  search.addEventListener('input', ()=>{
+    const q = search.value.toLowerCase().trim();
+    document.querySelectorAll('details').forEach(d=>{
+      const hit = d.textContent.toLowerCase().includes(q);
+      d.classList.toggle('hidden', q && !hit);
+      if(q && hit) d.open = true;
+    });
+  });
+</script>
+</body>
+</html>
