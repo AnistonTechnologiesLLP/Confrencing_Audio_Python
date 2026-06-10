@@ -48,6 +48,16 @@ become beamformer weights. Additive — the JSON config schema is unchanged.
     geometry), with diagonal loading trading directivity for robustness. Now the
     **default** mode (`MODE_SUPERDIRECTIVE`); the live per-FFT-bin runtime applies
     it broadband. GUI: a **Beamformer** group (Mode + Focus↔robust slider).
+  - **Lobe analysis + leakage + out-of-zone suppression** (`analyze_lobes` →
+    `LobeReport`, `talker_leakage_db`, `design_zone_beams(suppress_outside_talkers=
+    …)`): count/locate a beam's main + side + grating lobes (so you see where
+    off-target voices leak in), report each placed talker's pickup level
+    (`[pickup]`/`[OUTSIDE]`), and **null every talker outside the pickup zone** as an
+    extra interferer (on top of exclusion zones, up to `n_active−1`) — an out-of-area
+    voice drops from a side-lobe level (~−23 dB) to a deep null (−120 dB). The null
+    set flows to the live runtime via `BeamDesign.null_dirs`. GUI: lobe count +
+    grating warning + per-talker leakage in the design readout, and a **Null talkers
+    outside the pickup zone** toggle.
 - **PySide6 GUI**: a **Live** inspector tab — array + capsule-radius + design-freq
   selectors, per-capsule **active checkboxes** + a **Detect silent capsules** probe
   (captures briefly off the GUI thread and unchecks dead channels), **Design beam
@@ -57,9 +67,38 @@ become beamformer weights. Additive — the JSON config schema is unchanged.
   headphones), **Connect/Disconnect**, a **Mute** toggle, a **Gain** slider, and a
   dB-scaled level meter driven by a `QTimer`. Falls back to the simulated controller
   (with a banner) when the extra is absent, so the workflow is fully usable offline.
-- **Optional extra** (`pyproject.toml`): `control` (numpy + sounddevice). The base
-  engine and GUI need neither.
-- pytest coverage for the design layer (numpy-free) — 174 tests total
+- **OCTOVOX bridge** (`conf_pipeline_control/octovox_bridge.py`,
+  `octovox_monitor.py`): connect the spatial front-end to the **OCTOVOX** voice-
+  cleaning pipeline over HTTP. `zone_azimuths` maps an array's pickup zone →
+  OCTOVOX `target_az` and exclusion zones → `interferer_az` (with
+  `to_octovox_azimuth` handling the compass→math azimuth convention and a
+  mounting-offset calibration). `OctovoxClient.clean_8ch` resamples the raw 8-ch
+  clip 44100→48000, uploads it, runs `/api/clean` steered at those azimuths, and
+  fetches the cleaned mono — so OCTOVOX does the cleaning while this app supplies
+  the direction. `CleanMonitor` adds a **near-live cleaned monitor** (rolling
+  chunks → clean → delayed playback; ~4–5 s latency, not real-time) — chunks
+  **overlap and are equal-power crossfaded with level-matching** so OCTOVOX's
+  per-chunk peak-normalisation and neural-stage edge transients don't click/pump at
+  the seams, and a **speech gate** (`speech_gate`, noise-floor tracker) plays
+  silence for noise-only chunks instead of OCTOVOX's normalised-up noise floor —
+  fixing the "only noise, no voice" pumping in a quiet room. Direction steering is
+  **opt-in** (`CleanMonitor` passes `target_az` only when enabled): by default
+  OCTOVOX auto-beamforms, which is reliable on a small / front-back-ambiguous array;
+  forcing a wrong azimuth could otherwise null the voice. The dead capsule is
+  repaired (`repair_dead_channels`) from its ring-neighbours before sending, since
+  OCTOVOX has no active-capsule mask. GUI: a **Clean via OCTOVOX** group in the Live
+  tab (server URL, **Steer to pickup zone** toggle, azimuth offset, chunk).
+- **A/B measurement harness** (`conf_pipeline_control/ab_test.py`): record a raw
+  8-ch clip and beamform it offline **omni / delay-sum / superdirective /
+  aggressive / nulled** (`ab_compare`, `apply_design_offline`), returning mono
+  signals + a dB report (DI, WNG, per-talker leakage); `save_ab_report` writes the
+  WAVs + `report.txt` so the steering effect is audible and measurable. GUI: an
+  **A/B test — record & compare** button and an **Aggressive preset** (max
+  superdirectivity, safe given the SBM100B's 80 dBA SNR).
+- **Optional extras** (`pyproject.toml`): `control` (numpy + sounddevice) and
+  `octovox` (adds requests + scipy for the bridge). The base engine and GUI need
+  none of them.
+- pytest coverage for the design layer (numpy-free) — 195 tests total
   (+29: steering geometry, steering-vector/main-lobe/LCMV-null math, zone-driven
   design, the active-capsule mask, and the controller/simulated backend).
 

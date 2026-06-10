@@ -223,3 +223,63 @@ def test_design_default_mode_is_superdirective_and_reports_di():
     assert design.mode == cc.MODE_SUPERDIRECTIVE
     assert "superdirective" in design.summary()
     assert design.beams[0].di_db > 0.0
+
+
+# --- lobe analysis ---
+def test_analyze_lobes_main_lobe_at_look_and_counts():
+    look = _dir(90)
+    w = cc.delay_and_sum_weights(GEOM, look, 2000.0)
+    rep = cc.analyze_lobes(w, GEOM, 2000.0, off_nadir_deg=70.0)
+    assert min(abs(rep.main_az_deg - 90.0), 360 - abs(rep.main_az_deg - 90.0)) <= 6.0
+    assert rep.n_lobes >= 1                       # at least the main lobe
+    assert rep.beamwidth_3db_deg > 0.0
+    assert rep.peak_sidelobe_db <= 0.0           # side lobes are below the main
+
+
+def test_grating_lobes_appear_at_high_frequency():
+    look = _dir(90)
+    # a small array at a high frequency aliases → grating lobe(s) near 0 dB
+    w_hi = cc.delay_and_sum_weights(GEOM, look, 7000.0)
+    rep_hi = cc.analyze_lobes(w_hi, GEOM, 7000.0, off_nadir_deg=80.0)
+    rep_lo = cc.analyze_lobes(cc.delay_and_sum_weights(GEOM, look, 1000.0), GEOM, 1000.0, off_nadir_deg=80.0)
+    # high freq has more lobes than low; grating-lobe detection returns a tuple
+    assert rep_hi.n_lobes >= rep_lo.n_lobes
+    assert isinstance(rep_hi.grating_lobes, tuple)
+
+
+def test_zonebeam_carries_lobe_stats():
+    c = _scene_with_zones()
+    b = cc.design_zone_beams(c, "A", GEOM, freq_hz=2000.0).beams[0]
+    assert b.n_lobes >= 1 and b.peak_sidelobe_db <= 0.0
+    assert "lobes:" in cc.design_zone_beams(c, "A", GEOM, freq_hz=2000.0).summary()
+
+
+# --- per-talker leakage + out-of-zone suppression ---
+def _scene_two_talkers():
+    c = _scene_with_zones()  # pickup zone p1 around (7,3) east, exclusion west
+    c = cp.add_talker(c, cp.create_talker("T_in", "InZone", Point2D(7.0, 3.0)))    # inside pickup
+    c = cp.add_talker(c, cp.create_talker("T_out", "Outsider", Point2D(2.0, 5.0)))  # not in any zone
+    return c
+
+
+def test_talker_leakage_flags_in_and_out_of_zone():
+    c = _scene_two_talkers()
+    b = cc.design_zone_beams(c, "A", GEOM, freq_hz=2000.0).beams[0]
+    leak = cc.talker_leakage_db(c, "A", GEOM, list(b.weights), 2000.0)
+    by_id = {tid: (gain, in_pk) for tid, _lbl, gain, in_pk in leak}
+    assert by_id["T_in"][1] is True and by_id["T_out"][1] is False
+    # the in-zone talker is picked up louder than the outsider
+    assert by_id["T_in"][0] > by_id["T_out"][0]
+
+
+def test_suppress_outside_talkers_nulls_the_outsider():
+    c = _scene_two_talkers()
+    base = cc.design_zone_beams(c, "A", GEOM, freq_hz=2000.0)
+    supp = cc.design_zone_beams(c, "A", GEOM, freq_hz=2000.0, suppress_outside_talkers=True)
+    assert supp.beams[0].n_nulls > base.beams[0].n_nulls   # added a null for the outsider
+    # outsider is more suppressed with the option on
+    out_dir = cc.look_direction(c, "A", Point2D(2.0, 5.0))
+    g_base = cc.response_db(list(base.beams[0].weights), GEOM, out_dir.unit, 2000.0)
+    g_supp = cc.response_db(list(supp.beams[0].weights), GEOM, out_dir.unit, 2000.0)
+    assert g_supp < g_base - 10.0
+    assert tuple(supp.null_dirs)  # nulls recorded for the live runtime

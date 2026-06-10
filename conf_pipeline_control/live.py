@@ -92,7 +92,8 @@ class LiveBeamController(MicController):
         freqs = np.fft.rfftfreq(_FRAME, d=1.0 / self.samplerate)  # (n_bins,)
 
         looks = [b.look for b in self._design.beams]
-        nulls = list(self._design.exclusion_dirs)
+        # ALL nulls applied in the design (exclusion zones + out-of-zone talkers)
+        nulls = list(self._design.null_dirs or self._design.exclusion_dirs)
         active = np.array(geom.active_indices(), dtype=int)   # capsules in use
         na = max(1, len(active))
         superd = self._design.mode == "superdirective"

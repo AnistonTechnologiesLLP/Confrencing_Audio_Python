@@ -82,6 +82,25 @@ class _ProbeWorker(QRunnable):
         except Exception as exc:
             self.signals.failed.emit(str(exc))
 
+
+class _ABWorker(QRunnable):
+    """Record a clip and run the A/B beamformer comparison off the GUI thread."""
+
+    def __init__(self, config, array_id, geom, device, sr, seconds, out_dir, freq):
+        super().__init__()
+        self._args = (config, array_id, geom, device, sr, seconds, out_dir, freq)
+        self.signals = _ProbeSignals()  # done(object) / failed(str)
+
+    def run(self):  # noqa: D401 (Qt override)
+        try:
+            config, array_id, geom, device, sr, seconds, out_dir, freq = self._args
+            y8 = cc.record_clip(device, sr, seconds, channels=geom.n_channels)
+            report = cc.ab_compare(config, array_id, geom, y8, sr, freq_hz=freq)
+            paths = cc.save_ab_report(report, out_dir)
+            self.signals.done.emit((report.summary, out_dir, len(paths)))
+        except Exception as exc:
+            self.signals.failed.emit(str(exc))
+
 DEVICE_TYPES = [
     ("Processor (DSP)", "processor"),
     ("Microphone array", "microphoneArray"),
@@ -145,6 +164,8 @@ class Inspector(QWidget):
         self._live_design = None         # last cc.BeamDesign built from zones
         self._live_dev_rates = {}        # device index -> native samplerate
         self._probe_workers = set()      # strong refs to capsule-probe runnables
+        self._ab_workers = set()         # strong refs to A/B-test runnables
+        self._clean_monitor = None       # CleanMonitor while OCTOVOX cleaning is live
 
         self.tabs.addTab(self._scroll(self._build_tab()), "Build")
         self.tabs.addTab(self._scroll(self._dsp_tab()), "AEC / DSP")
@@ -390,12 +411,38 @@ class Inspector(QWidget):
         rob_row.addWidget(self.live_robust, 1)
         rob_row.addWidget(self.live_robust_lbl)
         bf.addRow("Focus ↔ robust", rob_row)
+        self.live_suppress_outside = QCheckBox("Null talkers outside the pickup zone")
+        self.live_suppress_outside.setToolTip(
+            "Add every placed talker that is not inside a pickup zone as a beam null, "
+            "so out-of-area voices are actively subtracted (up to the array's null budget)."
+        )
+        self.live_suppress_outside.toggled.connect(
+            lambda *_a: None if self._refreshing else (self._live_design_from_zones() if self._live_design is not None else None)
+        )
+        bf.addRow("Out-of-zone", self.live_suppress_outside)
+        preset = QPushButton("Aggressive preset (low-noise studio mics)")
+        preset.setToolTip(
+            "Push the beam to maximum directivity. Safe here because your SBM100B mics "
+            "are 80 dBA SNR — the extra self-noise from aggressive superdirectivity stays "
+            "below audibility (would hiss on ordinary MEMS). Watch the WNG in the readout."
+        )
+        preset.clicked.connect(self._live_aggressive_preset)
+        bf.addRow("Preset", preset)
         lay.addWidget(bf_gb)
 
         design_btn = QPushButton("Design beam from zones")
         design_btn.setProperty("accent", "true")
         design_btn.clicked.connect(self._live_design_from_zones)
         lay.addWidget(design_btn)
+
+        self.live_ab_btn = QPushButton("A/B test — record & compare beamformers")
+        self.live_ab_btn.setToolTip(
+            "Record a clip from the array, process it omni / delay-sum / superdirective / "
+            "aggressive / nulled, and save mono WAVs + a dB report so you can hear and "
+            "measure the difference."
+        )
+        self.live_ab_btn.clicked.connect(self._live_ab_test)
+        lay.addWidget(self.live_ab_btn)
 
         self.live_design_view = QPlainTextEdit()
         self.live_design_view.setReadOnly(True)
@@ -425,6 +472,45 @@ class Inspector(QWidget):
         self.live_out_device = QComboBox()
         df.addRow("Output", self.live_out_device)
         lay.addWidget(dgb)
+
+        # --- clean via OCTOVOX (near-live cleaned monitor) ---
+        ov_gb = QGroupBox("Clean via OCTOVOX (near-live)")
+        ov_gb.setToolTip(
+            "Send rolling chunks of the raw array to a running OCTOVOX server "
+            "(beamform + dereverb + DeepFilterNet3), steered by the zone azimuths, "
+            "and play the cleaned result back. Delayed by ~chunk + processing; "
+            "not real-time talkback."
+        )
+        ovf = QFormLayout(ov_gb)
+        ovf.setRowWrapPolicy(QFormLayout.WrapLongRows)
+        ovf.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+        self.live_octovox = QCheckBox("Enable (use headphones)")
+        ovf.addRow("OCTOVOX", self.live_octovox)
+        self.live_octovox_url = QLineEdit(cc.OCTOVOX_DEFAULT_URL)
+        ovf.addRow("Server", self.live_octovox_url)
+        self.live_octovox_steer = QCheckBox("Steer to pickup zone (needs azimuth calibration)")
+        self.live_octovox_steer.setToolTip(
+            "OFF (default): OCTOVOX auto-finds the voice — reliable on a small/front-back-"
+            "ambiguous array. ON: force OCTOVOX to steer at the pickup-zone azimuth; only "
+            "use once the Azimuth offset is calibrated, or it can null the voice (noise only)."
+        )
+        ovf.addRow("Direction", self.live_octovox_steer)
+        self.live_az_offset = NoWheelDoubleSpinBox()
+        self.live_az_offset.setRange(-180.0, 180.0)
+        self.live_az_offset.setSingleStep(5.0)
+        self.live_az_offset.setValue(0.0)
+        self.live_az_offset.setSuffix("°")
+        ovf.addRow("Azimuth offset", self.live_az_offset)
+        self.live_chunk = NoWheelDoubleSpinBox()
+        self.live_chunk.setRange(1.0, 8.0)
+        self.live_chunk.setSingleStep(0.5)
+        self.live_chunk.setValue(3.0)
+        self.live_chunk.setSuffix(" s")
+        ovf.addRow("Chunk", self.live_chunk)
+        self.live_octovox_status = QLabel("")
+        self.live_octovox_status.setWordWrap(True)
+        ovf.addRow(self.live_octovox_status)
+        lay.addWidget(ov_gb)
 
         # --- transport controls ---
         row = QHBoxLayout()
@@ -566,6 +652,57 @@ class Inspector(QWidget):
         self._live_design = None
         self.live_design_view.clear()
 
+    def _live_aggressive_preset(self):
+        """Max-directivity superdirective — safe thanks to the 80 dBA studio mics."""
+        i = self.live_mode.findData(cc.MODE_SUPERDIRECTIVE)
+        if i >= 0:
+            self.live_mode.setCurrentIndex(i)
+        self.live_robust.setValue(26)          # ≈ 0.005 loading (low → aggressive)
+        if self._live_array_id():
+            self._live_design_from_zones()
+
+    def _live_ab_test(self):
+        """Record a clip and compare beamformers → WAVs + report (off the GUI thread)."""
+        if not cc.controls_available():
+            self.live_status.setText("A/B test needs the [control] extra (numpy + sounddevice).")
+            return
+        aid = self._live_array_id()
+        if not aid:
+            self.live_status.setText("Select a placed array first.")
+            return
+        if self._live_ctl is not None or self._clean_monitor is not None:
+            self.live_status.setText("Disconnect before running the A/B test.")
+            return
+        from PySide6.QtWidgets import QFileDialog
+        out_dir = QFileDialog.getExistingDirectory(self, "Save A/B WAVs + report to…")
+        if not out_dir:
+            return
+        geom = self._live_geometry()
+        sr = self.live_rate.currentData() or 44100
+        self.live_ab_btn.setEnabled(False)
+        self.live_status.setText("A/B: recording 10 s — speak from the pickup zone…")
+        worker = _ABWorker(self.state.config, aid, geom, self.live_device.currentData(),
+                           int(sr), 10.0, out_dir, float(self.live_freq.value()))
+        worker.signals.done.connect(self._on_ab_done)
+        worker.signals.failed.connect(self._on_ab_failed)
+        self._ab_workers.add(worker)
+        QThreadPool.globalInstance().start(worker)
+
+    def _on_ab_done(self, payload):
+        summary, out_dir, n = payload
+        self.live_ab_btn.setEnabled(True)
+        self._ab_workers.clear()
+        self.live_design_view.setPlainText(
+            summary + f"\n\nSaved {n} files to:\n{out_dir}\n"
+            "Listen: omni.wav vs superdirective_aggressive.wav vs nulled.wav."
+        )
+        self.live_status.setText(f"A/B done — {n} files in {out_dir}")
+
+    def _on_ab_failed(self, msg):
+        self.live_ab_btn.setEnabled(True)
+        self._ab_workers.clear()
+        self.live_status.setText(f"A/B failed: {msg}")
+
     def _on_live_device_changed(self):
         """Select the device's native sample rate so Connect doesn't fail on a
         rate the hardware can't open (e.g. a 44100-only array vs a 48000 default)."""
@@ -646,6 +783,7 @@ class Inspector(QWidget):
                 freq_hz=float(self.live_freq.value()),
                 mode=self._live_mode(),
                 loading=self._live_loading(),
+                suppress_outside_talkers=self.live_suppress_outside.isChecked(),
             )
         except ValueError as exc:
             self.live_design_view.setPlainText(f"Cannot design: {exc}")
@@ -659,6 +797,14 @@ class Inspector(QWidget):
             # compact azimuth pattern of the first beam, as a text sparkline
             pat = cc.beam_pattern_azimuth(list(design.beams[0].weights), geom, design.freq_hz, steps=36)
             text += "\n\nAzimuth response (beam 1), 0°→350°:\n" + self._sparkline([db for _a, db in pat])
+            # per-talker leakage: how loudly each placed person is captured
+            if self.state.config.talkers:
+                leak = cc.talker_leakage_db(self.state.config, aid, geom, list(design.beams[0].weights), design.freq_hz)
+                leak.sort(key=lambda r: -r[2])
+                text += "\n\nTalker pickup (beam 1):"
+                for _tid, label, gain, in_pk in leak:
+                    tag = "pickup" if in_pk else "OUTSIDE"
+                    text += f"\n  {label or _tid}: {gain:+.0f} dB  [{tag}]"
         self.live_design_view.setPlainText(text)
         if self._live_ctl is not None:
             try:
@@ -676,8 +822,11 @@ class Inspector(QWidget):
         return "".join(out)
 
     def _live_toggle_connect(self):
-        if self._live_ctl is not None:
+        if self._live_ctl is not None or self._clean_monitor is not None:
             self._live_disconnect()
+            return
+        if self.live_octovox.isChecked():
+            self._octovox_connect()
             return
         aid = self._live_array_id()
         geom = self._live_geometry()
@@ -714,7 +863,63 @@ class Inspector(QWidget):
             f"Connected ({ctl.backend}, {st.active_channels}/{st.n_channels} capsules{beams}{mon})."
         )
 
+    def _octovox_connect(self):
+        """Start the near-live OCTOVOX cleaned monitor (raw array → server → play)."""
+        if not cc.octovox_deps_available():
+            self.live_octovox_status.setText("Needs the [octovox] extra (requests + scipy + sounddevice).")
+            return
+        aid = self._live_array_id()
+        if not aid:
+            self.live_octovox_status.setText("Select a placed array first.")
+            return
+        client = cc.OctovoxClient(self.live_octovox_url.text().strip() or cc.OCTOVOX_DEFAULT_URL)
+        if not client.is_up():
+            self.live_octovox_status.setText(f"OCTOVOX server not reachable at {client.base_url}. Start it (run.py).")
+            return
+        # Only force a steering direction when the user opts in (and has calibrated
+        # the azimuth offset). Otherwise let OCTOVOX auto-beamform — reliable on a
+        # small / front-back-ambiguous array, and never nulls the voice.
+        steer = self.live_octovox_steer.isChecked()
+        za = cc.zone_azimuths(self.state.config, aid, azimuth_offset_deg=float(self.live_az_offset.value()))
+        target_az = za.target_az if steer else None
+        interferer_az = za.interferer_az if steer else None
+        rate = self.live_rate.currentData() or 44100
+        try:
+            mon = cc.CleanMonitor(
+                client,
+                input_device=self.live_device.currentData(),
+                samplerate=int(rate),
+                chunk_seconds=float(self.live_chunk.value()),
+                target_az=target_az,
+                interferer_az=interferer_az,
+                output_device=self.live_out_device.currentData(),
+                nr="dfn",
+                active=self._live_active_mask(),  # repair dead capsules for OCTOVOX
+            )
+            mon.start()
+        except Exception as exc:
+            self.live_octovox_status.setText(f"Could not start: {exc}")
+            return
+        self._clean_monitor = mon
+        self.live_connect.setText("Disconnect")
+        if steer:
+            mode = f"steered to {za.target_az:.0f}°, {len(za.interferer_az)} excluded" if za.target_az is not None else "steered (no pickup zone)"
+        else:
+            mode = "auto-beam (OCTOVOX finds the voice)"
+        self.live_status.setText(
+            f"OCTOVOX cleaning live · {mode} · ~{self.live_chunk.value():.0f}s delay (headphones)."
+        )
+        self.live_octovox_status.setText(
+            "Auto-beam: OCTOVOX locates the talker. Enable 'Steer to pickup zone' only after calibrating the azimuth offset."
+            if not steer else (za.note or "Steering to the pickup-zone azimuth.")
+        )
+
     def _live_disconnect(self):
+        if self._clean_monitor is not None:
+            try:
+                self._clean_monitor.stop()
+            finally:
+                self._clean_monitor = None
         if self._live_ctl is not None:
             try:
                 self._live_ctl.disconnect()
@@ -740,6 +945,21 @@ class Inspector(QWidget):
         """Update the level meter on a dB scale (−60 dB → 0 %, 0 dB → 100 %), so
         normal speech picked up by a ceiling array is clearly visible rather than
         a sliver on a linear scale."""
+        if self._clean_monitor is not None:
+            st = self._clean_monitor.state()
+            # meter shows playback buffer fill (0..~chunk seconds); status shows progress
+            self.live_meter.setValue(int(min(1.0, st.buffered_s / max(0.5, self.live_chunk.value())) * 100))
+            msg = f"OCTOVOX: {st.chunks_played} cleaned / {st.chunks_sent} sent"
+            if st.gated:
+                msg += f", {st.gated} silent-gated"
+            if st.dropped:
+                msg += f", {st.dropped} dropped"
+            if st.last_elapsed_s:
+                msg += f" · {st.last_elapsed_s:.1f}s/chunk"
+            if st.error:
+                msg += f" · ERROR: {st.error[:50]}"
+            self.live_octovox_status.setText(msg)
+            return
         if self._live_ctl is not None and self._live_ctl.connected:
             lvl = self._live_ctl.read_level()  # linear 0..1, post gain + mute
             if lvl <= 1e-6:

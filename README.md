@@ -44,7 +44,10 @@ conf_pipeline_control/ host-side array-microphone control (optional [control] ex
   beamformer.py       delay-and-sum + LCMV null-steering + beam pattern (pure stdlib)
   control.py          MicController interface + SimulatedMicController
   audio.py / live.py  real-time capture + beamforming (numpy + sounddevice)
-tests/                pytest suite (174 tests)
+  octovox_bridge.py   zones → azimuths + HTTP client to the OCTOVOX clean server
+  octovox_monitor.py  near-live cleaned monitor (rolling chunk → clean → playback)
+  ab_test.py          A/B harness: record → beamform N ways → WAVs + dB report
+tests/                pytest suite (195 tests)
 run_gui.py            launcher
 ```
 
@@ -233,11 +236,36 @@ and capsule mismatch (raise it if the beam hisses). `mode="delaysum"` selects th
 robust delay-and-sum instead. In the GUI: the **Beamformer** group (Mode +
 **Focus ↔ robust** slider).
 
+**Lobes + leakage — where off-target voices get in.** A beam isn't a clean cone:
+it has one **main lobe** (toward the talker) plus **side lobes** (smaller pickup
+peaks elsewhere) and, on a sparse array at high frequency, **grating lobes**
+(near-full pickup in another direction). `cc.analyze_lobes(...)` counts and locates
+them (main width, side-lobe levels, grating-lobe warnings); `cc.talker_leakage_db`
+reports how loudly each *placed talker* is currently captured (target ≈ 0 dB,
+everyone else below). On the 8-capsule / 0.05 m array this is 2–3 lobes with
+−12…−17 dB side-lobes in the 0.5–2 kHz speech band, growing to ~8 lobes at 4–8 kHz.
+
+**Subtract out-of-area voices.** `design_zone_beams(..., suppress_outside_talkers=
+True)` adds every placed talker that is **not** inside a pickup zone as a beam null
+(on top of the exclusion-zone nulls), up to the array's null budget (`n_active−1`).
+A talker outside the zone drops from a side-lobe level (e.g. −23 dB) to a deep null
+(−120 dB). GUI: **Null talkers outside the pickup zone** in the Beamformer group;
+the design readout lists each talker's pickup level and `[pickup]`/`[OUTSIDE]` tag.
+
+**Hear and measure it — A/B harness.** `cc.ab_compare(config, array, geom, y8, sr)`
+runs a recorded clip through **omni / delay-sum / superdirective / aggressive /
+nulled** and returns mono signals + a dB report (DI, WNG, per-talker leakage);
+`cc.save_ab_report` writes the WAVs + `report.txt`. GUI: **A/B test — record &
+compare** records from the array and saves the set so you can *listen* to the
+difference. An **Aggressive preset** pushes superdirectivity to the limit — safe
+because the SBM100B capsules are **80 dBA SNR** (studio-grade), so the extra
+self-noise from low diagonal loading stays inaudible where ordinary MEMS would hiss.
+
 **Two layers, split by dependency:**
 
 - **Design (always available, pure stdlib):** geometry, zone→direction, weights,
   and beam-pattern verification. Importing `conf_pipeline_control` pulls no
-  numpy/sounddevice; the full 174-test suite runs without them.
+  numpy/sounddevice; the full 195-test suite runs without them.
 - **Live (optional `[control]` extra):** capture the array's channels and apply
   the weights in real time — a frequency-domain (per-FFT-bin), Hann-windowed
   overlap-add beamformer — with a live output level, mute, gain, and optional WAV
@@ -270,6 +298,35 @@ channel doesn't corrupt the beam (`cc.with_active_channels(geom, mask)`).
 > silenced, and a planar array separates areas mainly by **azimuth / horizontal
 > offset** (two areas on the same bearing are hard to tell apart). This is the
 > physics of the hardware, surfaced rather than hidden.
+
+## OCTOVOX integration — clean the steered voice (1.11.0)
+
+This app does the **spatial** front-end (room + drawn zones → which direction to
+listen); [OCTOVOX](../New_OCTOVOX) does the **cleaning** (calibration, dereverb,
+DeepFilterNet3, residual suppression, VAD automix, EQ/AGC). The bridge hands
+OCTOVOX the **raw 8 channels + the zone-derived azimuths**, so OCTOVOX runs its
+own direction-aware beamform-then-clean chain steered at the talker you picked and
+nulling the areas you excluded — no redundant beamforming.
+
+```python
+import conf_pipeline_control as cc
+za = cc.zone_azimuths(config, "A1")            # pickup zone → target_az, exclusions → interferer_az
+client = cc.OctovoxClient("http://127.0.0.1:5050")
+res = client.clean_8ch(y8, 44100, target_az=za.target_az, interferer_az=za.interferer_az)
+# res.mono is the cleaned voice @ 48 kHz (input auto-resampled 44100 → 48000)
+```
+
+- **Azimuth mapping** — this app's compass bearing (0°=+Y, CW) → OCTOVOX's math
+  azimuth (0°=+X, CCW): `cc.to_octovox_azimuth`. An **azimuth offset** calibrates
+  the array's physical mounting rotation.
+- **Transport** — pure HTTP (`/api/upload` → `/api/clean` → fetch the cleaned WAV);
+  the two projects stay independent. Needs the `[octovox]` extra
+  (`requests` + `scipy`) and a running OCTOVOX server (`python run.py`, port 5050).
+- **Near-live cleaned monitor** (GUI: **Clean via OCTOVOX** in the Live tab) —
+  captures rolling chunks of the raw array, cleans each through OCTOVOX, and plays
+  the result back. **Delayed by ~chunk + processing (~4–5 s), not real-time
+  talkback** (OCTOVOX's neural stages are whole-file/offline), with audible seams
+  at chunk boundaries. Use headphones. `cc.CleanMonitor` drives it.
 
 ## Designer-inspired workflow (1.8.0)
 

@@ -16,6 +16,7 @@ dev = ["pytest>=7"]
 sim = ["numpy>=1.24"]                                        # far-field validation backend
 sim-rir = ["pyroomacoustics>=0.7", "numpy>=1.24", "scipy>=1.7"]  # image-source RIR backend
 control = ["numpy>=1.24", "sounddevice>=0.4"]               # live host-side beamforming of a real array
+octovox = ["numpy>=1.24", "sounddevice>=0.4", "requests>=2.25", "scipy>=1.7"]  # bridge to the OCTOVOX cleaning server
 
 [project.scripts]
 conf-pipeline-gui = "conf_pipeline_gui.app:main"

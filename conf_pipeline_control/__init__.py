@@ -24,7 +24,9 @@ from .beamformer import (  # noqa: F401
     MODE_DELAYSUM,
     MODE_SUPERDIRECTIVE,
     BeamDesign,
+    LobeReport,
     ZoneBeam,
+    analyze_lobes,
     beam_pattern_azimuth,
     delay_and_sum_weights,
     design_zone_beams,
@@ -35,9 +37,30 @@ from .beamformer import (  # noqa: F401
     response_db,
     steering_vector,
     superdirective_weights,
+    talker_leakage_db,
     white_noise_gain_db,
 )
 from .control import MicController, MicState, SimulatedMicController  # noqa: F401
+from .octovox_bridge import (  # noqa: F401
+    OCTOVOX_DEFAULT_URL,
+    CleanResult,
+    OctovoxClient,
+    ZoneAzimuths,
+    octovox_deps_available,
+    repair_dead_channels,
+    to_octovox_azimuth,
+    zone_azimuths,
+)
+from .octovox_monitor import CleanMonitor, MonitorState  # noqa: F401
+from .ab_test import (  # noqa: F401
+    ABReport,
+    ABVariant,
+    ab_compare,
+    apply_design_offline,
+    omni_reference,
+    record_clip,
+    save_ab_report,
+)
 from .geometry import (  # noqa: F401
     SOUND_SPEED_MPS,
     ArrayGeometry,
@@ -75,8 +98,14 @@ __all__ = [
     "superdirective_weights", "diffuse_coherence", "directivity_index_db",
     "MODE_DELAYSUM", "MODE_SUPERDIRECTIVE", "response",
     "response_db", "white_noise_gain_db", "beam_pattern_azimuth",
+    "analyze_lobes", "LobeReport", "talker_leakage_db",
     "design_zone_beams", "BeamDesign", "ZoneBeam",
     "MicController", "MicState", "SimulatedMicController",
     "DEFAULT_DESIGN_FREQ_HZ", "DEFAULT_TARGET_ELEVATION_M", "RESPONSE_FLOOR_DB",
     "controls_available",
+    "to_octovox_azimuth", "zone_azimuths", "ZoneAzimuths", "OctovoxClient",
+    "CleanResult", "octovox_deps_available", "OCTOVOX_DEFAULT_URL",
+    "repair_dead_channels", "CleanMonitor", "MonitorState",
+    "ab_compare", "apply_design_offline", "omni_reference", "save_ab_report",
+    "record_clip", "ABReport", "ABVariant",
 ]
