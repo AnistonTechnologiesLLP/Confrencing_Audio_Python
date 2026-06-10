@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QPlainTextEdit,
+    QProgressBar,
     QPushButton,
     QScrollArea,
     QSlider,
@@ -28,6 +29,7 @@ from PySide6.QtWidgets import (
 )
 
 import conf_pipeline as cp
+import conf_pipeline_control as cc
 from conf_pipeline.model import AecConfig, Point2D
 
 from .state import AppState
@@ -50,6 +52,34 @@ class _ValidateWorker(QRunnable):
         try:
             self.signals.done.emit(cp.validate_recommendation(*self._args))
         except Exception as exc:  # surface to the GUI thread
+            self.signals.failed.emit(str(exc))
+
+
+class _ProbeSignals(QObject):
+    done = Signal(object)   # list[float]: per-channel RMS
+    failed = Signal(str)
+
+
+class _ProbeWorker(QRunnable):
+    """Briefly captures the array off the GUI thread and reports per-capsule RMS,
+    so the Live tab can auto-detect dead / silent capsules."""
+
+    def __init__(self, device, samplerate, channels, dur=0.6):
+        super().__init__()
+        self._args = (device, samplerate, channels, dur)
+        self.signals = _ProbeSignals()
+
+    def run(self):  # noqa: D401 (Qt override)
+        try:
+            import numpy as np
+            import sounddevice as sd
+
+            device, sr, ch, dur = self._args
+            rec = sd.rec(int(dur * sr), samplerate=sr, channels=ch, device=device, dtype="float32")
+            sd.wait()
+            rms = [float((rec[:, i] ** 2).mean() ** 0.5) for i in range(ch)]
+            self.signals.done.emit(rms)
+        except Exception as exc:
             self.signals.failed.emit(str(exc))
 
 DEVICE_TYPES = [
@@ -110,12 +140,24 @@ class Inspector(QWidget):
         self.tabs = QTabWidget()
         root.addWidget(self.tabs)
 
+        # ---- live array-control state (host-side beamforming) ----
+        self._live_ctl = None            # MicController while connected
+        self._live_design = None         # last cc.BeamDesign built from zones
+        self._live_dev_rates = {}        # device index -> native samplerate
+        self._probe_workers = set()      # strong refs to capsule-probe runnables
+
         self.tabs.addTab(self._scroll(self._build_tab()), "Build")
         self.tabs.addTab(self._scroll(self._dsp_tab()), "AEC / DSP")
         self.tabs.addTab(self._routing_tab(), "Routing")
         self.tabs.addTab(self._issues_tab(), "Issues")
         self.tabs.addTab(self._scroll(self._simulate_tab()), "Simulate")
+        self.tabs.addTab(self._scroll(self._live_tab()), "Live")
         self.tabs.addTab(self._json_tab(), "JSON")
+
+        self._live_timer = QTimer(self)
+        self._live_timer.setInterval(60)
+        self._live_timer.timeout.connect(self._tick_live_meter)
+        self._live_timer.start()
 
         state.changed.connect(self._schedule_refresh)
         self.refresh()
@@ -138,7 +180,10 @@ class Inspector(QWidget):
         sa = QScrollArea()
         sa.setWidgetResizable(True)
         sa.setFrameShape(QFrame.NoFrame)
-        sa.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        # As-needed (not Off): if a tab's content is wider than a narrow / high-DPI
+        # panel, scroll it inside the panel rather than letting it spill out of the
+        # window.
+        sa.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         sa.setWidget(inner)
         return sa
 
@@ -255,6 +300,456 @@ class Inspector(QWidget):
         self.json_view.setFont(QFont("Consolas", 10))
         lay.addWidget(self.json_view)
         return w
+
+    # ------------------------------------------------------------- Live tab
+    def _live_tab(self):
+        """Drive a real array microphone with host-side beamforming.
+
+        The pickup/exclusion zones on the selected array are turned into beam
+        weights (steer toward pickup, null exclusions). With the array plugged in
+        and the ``[control]`` extra installed this runs live; otherwise a
+        simulated controller keeps the UI usable.
+        """
+        w = QWidget()
+        lay = QVBoxLayout(w)
+
+        intro = QLabel(
+            "Coverage-area control for an array microphone (e.g. sensiBel 8). "
+            "Pickup zones are steered toward; exclusion zones are nulled/attenuated."
+        )
+        intro.setWordWrap(True)
+        lay.addWidget(intro)
+
+        self.live_avail_lbl = QLabel()
+        self.live_avail_lbl.setWordWrap(True)
+        lay.addWidget(self.live_avail_lbl)
+
+        # --- array + geometry ---
+        gb = QGroupBox("Array & geometry")
+        gf = QFormLayout(gb)
+        gf.setRowWrapPolicy(QFormLayout.WrapLongRows)        # stack label/field when narrow
+        gf.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+        self.live_array = QComboBox()  # populated in _refresh_live
+        self.live_array.currentIndexChanged.connect(lambda *_a: None if self._refreshing else self._on_live_array_changed())
+        gf.addRow("Array", self.live_array)
+        self.live_radius = NoWheelDoubleSpinBox()
+        self.live_radius.setRange(0.01, 1.0)
+        self.live_radius.setSingleStep(0.005)
+        self.live_radius.setDecimals(3)
+        self.live_radius.setValue(0.05)
+        self.live_radius.setSuffix(" m")
+        gf.addRow("Capsule radius", self.live_radius)
+        self.live_freq = NoWheelDoubleSpinBox()
+        self.live_freq.setRange(200.0, 8000.0)
+        self.live_freq.setSingleStep(100.0)
+        self.live_freq.setDecimals(0)
+        self.live_freq.setValue(cc.DEFAULT_DESIGN_FREQ_HZ)
+        self.live_freq.setSuffix(" Hz")
+        gf.addRow("Design freq", self.live_freq)
+        lay.addWidget(gb)
+
+        # --- active capsules (exclude a dead / non-audio channel) ---
+        cap_gb = QGroupBox("Active capsules")
+        cap_l = QVBoxLayout(cap_gb)
+        cap_row = QHBoxLayout()
+        self.live_caps = []
+        for i in range(8):
+            cb = QCheckBox(str(i + 1))
+            cb.setChecked(True)
+            cb.toggled.connect(lambda *_a: None if self._refreshing else self._live_active_changed())
+            self.live_caps.append(cb)
+            cap_row.addWidget(cb)
+        cap_row.addStretch(1)
+        cap_l.addLayout(cap_row)
+        ctl_row = QHBoxLayout()
+        self.live_detect = QPushButton("Detect silent capsules")
+        self.live_detect.clicked.connect(self._live_detect_silent)
+        self.live_active_lbl = QLabel("8/8 active")
+        ctl_row.addWidget(self.live_detect)
+        ctl_row.addWidget(self.live_active_lbl)
+        ctl_row.addStretch(1)
+        cap_l.addLayout(ctl_row)
+        lay.addWidget(cap_gb)
+
+        # --- beamformer mode (directivity vs robustness) ---
+        bf_gb = QGroupBox("Beamformer")
+        bf = QFormLayout(bf_gb)
+        bf.setRowWrapPolicy(QFormLayout.WrapLongRows)
+        bf.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+        self.live_mode = QComboBox()
+        self.live_mode.addItem("Superdirective (rejects background)", cc.MODE_SUPERDIRECTIVE)
+        self.live_mode.addItem("Delay-and-sum (most robust)", cc.MODE_DELAYSUM)
+        self.live_mode.currentIndexChanged.connect(lambda *_a: None if self._refreshing else self._on_live_mode_changed())
+        bf.addRow("Mode", self.live_mode)
+        rob_row = QHBoxLayout()
+        self.live_robust = QSlider(Qt.Horizontal)
+        self.live_robust.setRange(0, 100)
+        self.live_robust.setValue(60)          # ≈ 0.05 loading
+        self.live_robust.valueChanged.connect(self._on_live_loading_changed)
+        self.live_robust_lbl = QLabel()
+        rob_row.addWidget(self.live_robust, 1)
+        rob_row.addWidget(self.live_robust_lbl)
+        bf.addRow("Focus ↔ robust", rob_row)
+        lay.addWidget(bf_gb)
+
+        design_btn = QPushButton("Design beam from zones")
+        design_btn.setProperty("accent", "true")
+        design_btn.clicked.connect(self._live_design_from_zones)
+        lay.addWidget(design_btn)
+
+        self.live_design_view = QPlainTextEdit()
+        self.live_design_view.setReadOnly(True)
+        self.live_design_view.setFont(QFont("Consolas", 9))
+        self.live_design_view.setMaximumHeight(150)
+        self.live_design_view.setPlaceholderText("No beam designed yet.")
+        lay.addWidget(self.live_design_view)
+
+        # --- device + transport ---
+        dgb = QGroupBox("Audio device")
+        df = QFormLayout(dgb)
+        df.setRowWrapPolicy(QFormLayout.WrapLongRows)
+        df.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+        self.live_device = QComboBox()
+        self.live_device.currentIndexChanged.connect(lambda *_a: None if self._refreshing else self._on_live_device_changed())
+        df.addRow("Input", self.live_device)
+        self.live_rate = QComboBox()
+        for r in ("48000", "44100", "32000", "16000"):
+            self.live_rate.addItem(f"{r} Hz", int(r))
+        df.addRow("Sample rate", self.live_rate)
+        self.live_monitor = QCheckBox("Monitor output (use headphones)")
+        self.live_monitor.setToolTip(
+            "Play the beamformed output live. Use headphones — monitoring through "
+            "room speakers will feed back into the array and howl."
+        )
+        df.addRow("Monitor", self.live_monitor)
+        self.live_out_device = QComboBox()
+        df.addRow("Output", self.live_out_device)
+        lay.addWidget(dgb)
+
+        # --- transport controls ---
+        row = QHBoxLayout()
+        self.live_connect = QPushButton("Connect")
+        self.live_connect.clicked.connect(self._live_toggle_connect)
+        self.live_mute = QPushButton("Mute")
+        self.live_mute.setCheckable(True)
+        self.live_mute.clicked.connect(self._live_toggle_mute)
+        row.addWidget(self.live_connect)
+        row.addWidget(self.live_mute)
+        lay.addLayout(row)
+
+        gainrow = QHBoxLayout()
+        gainrow.addWidget(QLabel("Gain"))
+        self.live_gain = QSlider(Qt.Horizontal)
+        self.live_gain.setRange(-60, 24)
+        self.live_gain.setValue(0)
+        self.live_gain.valueChanged.connect(self._live_gain_changed)
+        self.live_gain_lbl = QLabel("0 dB")
+        gainrow.addWidget(self.live_gain, 1)
+        gainrow.addWidget(self.live_gain_lbl)
+        lay.addLayout(gainrow)
+
+        lay.addWidget(QLabel("Output level"))
+        self.live_meter = QProgressBar()
+        self.live_meter.setRange(0, 100)
+        self.live_meter.setValue(0)
+        self.live_meter.setTextVisible(False)
+        lay.addWidget(self.live_meter)
+
+        self.live_status = QLabel("Disconnected.")
+        self.live_status.setWordWrap(True)
+        lay.addWidget(self.live_status)
+        lay.addStretch(1)
+
+        # Stop combos from demanding their full content width (long OS device
+        # names) — let them fill the column and elide instead of forcing the whole
+        # tab wider than a narrow panel.
+        for combo in (self.live_array, self.live_device, self.live_rate, self.live_out_device, self.live_mode):
+            combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+            combo.setMinimumContentsLength(6)
+            combo.setMinimumWidth(80)
+        self.live_robust_lbl.setText(f"{self._live_loading():.3f}")  # initial loading readout
+        return w
+
+    # ---- live helpers ----
+    def _live_array_id(self):
+        return self.live_array.currentData()
+
+    def _live_active_mask(self):
+        return [cb.isChecked() for cb in self.live_caps]
+
+    def _live_geometry(self):
+        geom = cc.sensibel_8(radius_m=float(self.live_radius.value()))
+        mask = self._live_active_mask()
+        if any(mask) and not all(mask):
+            geom = cc.with_active_channels(geom, mask)
+        return geom
+
+    def _live_mode(self):
+        return self.live_mode.currentData() or cc.MODE_SUPERDIRECTIVE
+
+    def _live_loading(self):
+        # slider 0..100 → diagonal loading 0.001 (max focus) .. 0.5 (max robust), log
+        v = self.live_robust.value()
+        return round(0.001 * (500.0 ** (v / 100.0)), 4)
+
+    def _on_live_mode_changed(self):
+        sd = self._live_mode() == cc.MODE_SUPERDIRECTIVE
+        self.live_robust.setEnabled(sd)
+        self.live_robust_lbl.setEnabled(sd)
+        if self._live_design is not None:
+            self._live_design_from_zones()
+
+    def _on_live_loading_changed(self, *_a):
+        self.live_robust_lbl.setText(f"{self._live_loading():.3f}")
+        if not self._refreshing and self._live_design is not None:
+            self._live_design_from_zones()
+
+    def _refresh_live(self):
+        # availability banner
+        if cc.controls_available():
+            self.live_avail_lbl.setText("Live audio ready (numpy + sounddevice detected).")
+        else:
+            self.live_avail_lbl.setText(
+                "Live audio backend not installed — running in simulation. "
+                "Install with:  pip install -e \".[control]\""
+            )
+        # array picker (preserve selection)
+        cur = self._live_array_id()
+        self.live_array.blockSignals(True)
+        self.live_array.clear()
+        arrays = [d for d in self.state.config.devices if d.type == "microphoneArray"]
+        for a in arrays:
+            placed = "" if a.position else "  (no position)"
+            self.live_array.addItem(f"{a.label} · {a.id}{placed}", a.id)
+        if cur is not None:
+            idx = self.live_array.findData(cur)
+            if idx >= 0:
+                self.live_array.setCurrentIndex(idx)
+        self.live_array.blockSignals(False)
+        # device picker (only when idle; don't disrupt a live session)
+        if self._live_ctl is None:
+            curd = self.live_device.currentData()
+            self.live_device.blockSignals(True)
+            self.live_device.clear()
+            from conf_pipeline_control.audio import list_input_devices
+            devs = list_input_devices()
+            self._live_dev_rates = {}
+            if devs:
+                for d in devs:
+                    self.live_device.addItem(f"[{d.index}] {d.name} ({d.max_input_channels}ch)", d.index)
+                    self._live_dev_rates[d.index] = int(d.default_samplerate)
+            else:
+                self.live_device.addItem("System default", None)
+            if curd is not None:
+                i = self.live_device.findData(curd)
+                if i >= 0:
+                    self.live_device.setCurrentIndex(i)
+            self.live_device.blockSignals(False)
+            self._on_live_device_changed()  # match the rate to the selected device
+
+            # output devices (for monitoring)
+            from conf_pipeline_control.audio import list_output_devices
+            curo = self.live_out_device.currentData()
+            self.live_out_device.blockSignals(True)
+            self.live_out_device.clear()
+            self.live_out_device.addItem("System default", None)
+            for o in list_output_devices():
+                self.live_out_device.addItem(f"[{o.index}] {o.name} ({o.max_output_channels}ch)", o.index)
+            if curo is not None:
+                i = self.live_out_device.findData(curo)
+                if i >= 0:
+                    self.live_out_device.setCurrentIndex(i)
+            self.live_out_device.blockSignals(False)
+
+    def _on_live_array_changed(self):
+        # changing the target array invalidates any prior design
+        self._live_design = None
+        self.live_design_view.clear()
+
+    def _on_live_device_changed(self):
+        """Select the device's native sample rate so Connect doesn't fail on a
+        rate the hardware can't open (e.g. a 44100-only array vs a 48000 default)."""
+        rate = self._live_dev_rates.get(self.live_device.currentData())
+        if not rate:
+            return
+        i = self.live_rate.findData(rate)
+        if i < 0:
+            self.live_rate.addItem(f"{rate} Hz", rate)
+            i = self.live_rate.findData(rate)
+        self.live_rate.setCurrentIndex(i)
+
+    def _live_active_changed(self):
+        """A capsule was toggled: update the count, and rebuild + reapply the beam
+        (the live runtime designs over only the active capsules)."""
+        n = sum(cb.isChecked() for cb in self.live_caps)
+        if n == 0:  # never leave the array with no capsules
+            for cb in self.live_caps:
+                cb.blockSignals(True)
+                cb.setChecked(True)
+                cb.blockSignals(False)
+            n = len(self.live_caps)
+            self.live_status.setText("At least one capsule must stay active.")
+        self.live_active_lbl.setText(f"{n}/{len(self.live_caps)} active")
+        if self._live_design is not None:
+            self._live_design_from_zones()  # rebuild with the new mask (+ reapply if connected)
+
+    def _live_detect_silent(self):
+        """Capture briefly and auto-uncheck capsules reading near-silence."""
+        if self._live_ctl is not None:
+            self.live_status.setText("Disconnect before detecting capsules (the device is in use).")
+            return
+        if not cc.controls_available():
+            self.live_status.setText("Detect needs the [control] extra (numpy + sounddevice).")
+            return
+        dev = self.live_device.currentData()
+        sr = self.live_rate.currentData() or 48000
+        self.live_status.setText("Probing capsules…")
+        self.live_detect.setEnabled(False)
+        worker = _ProbeWorker(dev, int(sr), len(self.live_caps))
+        worker.signals.done.connect(self._on_probe_done)
+        worker.signals.failed.connect(self._on_probe_failed)
+        self._probe_workers.add(worker)
+        QThreadPool.globalInstance().start(worker)
+
+    def _on_probe_done(self, rms):
+        self.live_detect.setEnabled(True)
+        self._probe_workers.clear()
+        dbs = [20.0 * math.log10(r + 1e-12) for r in rms]
+        mx = max(dbs) if dbs else -120.0
+        # active = within 20 dB of the loudest capsule and above an absolute floor;
+        # a dead capsule reads ~30 dB below the others (or true digital silence).
+        for i, cb in enumerate(self.live_caps):
+            if i < len(dbs):
+                live = (dbs[i] > mx - 20.0) and (dbs[i] > -100.0)
+                cb.blockSignals(True)
+                cb.setChecked(live)
+                cb.blockSignals(False)
+        n = sum(cb.isChecked() for cb in self.live_caps)
+        detail = "  ".join(f"{i+1}:{dbs[i]:.0f}" for i in range(len(dbs)))
+        self.live_status.setText(f"{n}/{len(self.live_caps)} capsules live  ({detail} dB)")
+        self._live_active_changed()
+
+    def _on_probe_failed(self, msg):
+        self.live_detect.setEnabled(True)
+        self._probe_workers.clear()
+        self.live_status.setText(f"Probe failed: {msg}")
+
+    def _live_design_from_zones(self):
+        aid = self._live_array_id()
+        if not aid:
+            self.live_design_view.setPlainText("Add a microphone array and place it in the room first.")
+            return
+        try:
+            geom = self._live_geometry()
+            design = cc.design_zone_beams(
+                self.state.config, aid, geom,
+                freq_hz=float(self.live_freq.value()),
+                mode=self._live_mode(),
+                loading=self._live_loading(),
+            )
+        except ValueError as exc:
+            self.live_design_view.setPlainText(f"Cannot design: {exc}")
+            return
+        self._live_design = design
+        text = design.summary()
+        if not design.beams:
+            text += "\n\nTip: add Records/dedicated zones on this array to steer pickup, " \
+                    "and No-pickup zones to mute areas."
+        else:
+            # compact azimuth pattern of the first beam, as a text sparkline
+            pat = cc.beam_pattern_azimuth(list(design.beams[0].weights), geom, design.freq_hz, steps=36)
+            text += "\n\nAzimuth response (beam 1), 0°→350°:\n" + self._sparkline([db for _a, db in pat])
+        self.live_design_view.setPlainText(text)
+        if self._live_ctl is not None:
+            try:
+                self._live_ctl.apply_design(design)
+            except ValueError as exc:
+                self.live_status.setText(f"Design not applied: {exc}")
+
+    @staticmethod
+    def _sparkline(values_db, floor=-40.0):
+        bars = "▁▂▃▄▅▆▇█"
+        out = []
+        for v in values_db:
+            t = max(0.0, min(1.0, (v - floor) / (0.0 - floor)))
+            out.append(bars[min(len(bars) - 1, int(t * (len(bars) - 1)))])
+        return "".join(out)
+
+    def _live_toggle_connect(self):
+        if self._live_ctl is not None:
+            self._live_disconnect()
+            return
+        aid = self._live_array_id()
+        geom = self._live_geometry()
+        rate = self.live_rate.currentData() or 48000
+        try:
+            if cc.controls_available():
+                from conf_pipeline_control.live import LiveBeamController
+                ctl = LiveBeamController(
+                    geom,
+                    device=self.live_device.currentData(),
+                    samplerate=float(rate),
+                    monitor=self.live_monitor.isChecked(),
+                    output_device=self.live_out_device.currentData(),
+                )
+            else:
+                ctl = cc.SimulatedMicController(geom)
+            if self._live_design is not None:
+                try:
+                    ctl.apply_design(self._live_design)
+                except ValueError:
+                    pass
+            ctl.set_gain_db(float(self.live_gain.value()))
+            ctl.set_mute(self.live_mute.isChecked())
+            ctl.connect()
+        except Exception as exc:  # hardware/open failure → report, stay disconnected
+            self.live_status.setText(f"Connect failed: {exc}")
+            return
+        self._live_ctl = ctl
+        self.live_connect.setText("Disconnect")
+        st = ctl.state()
+        beams = f", {st.design_zones} beam(s)" if st.design_zones else ""
+        mon = ", monitoring" if self.live_monitor.isChecked() and ctl.backend == "live" else ""
+        self.live_status.setText(
+            f"Connected ({ctl.backend}, {st.active_channels}/{st.n_channels} capsules{beams}{mon})."
+        )
+
+    def _live_disconnect(self):
+        if self._live_ctl is not None:
+            try:
+                self._live_ctl.disconnect()
+            finally:
+                self._live_ctl = None
+        self.live_connect.setText("Connect")
+        self.live_meter.setValue(0)
+        self.live_status.setText("Disconnected.")
+        self._refresh_live()
+
+    def _live_toggle_mute(self):
+        muted = self.live_mute.isChecked()
+        self.live_mute.setText("Muted" if muted else "Mute")
+        if self._live_ctl is not None:
+            self._live_ctl.set_mute(muted)
+
+    def _live_gain_changed(self, v):
+        self.live_gain_lbl.setText(f"{v} dB")
+        if self._live_ctl is not None:
+            self._live_ctl.set_gain_db(float(v))
+
+    def _tick_live_meter(self):
+        """Update the level meter on a dB scale (−60 dB → 0 %, 0 dB → 100 %), so
+        normal speech picked up by a ceiling array is clearly visible rather than
+        a sliver on a linear scale."""
+        if self._live_ctl is not None and self._live_ctl.connected:
+            lvl = self._live_ctl.read_level()  # linear 0..1, post gain + mute
+            if lvl <= 1e-6:
+                pct = 0
+            else:
+                db = 20.0 * math.log10(lvl)
+                pct = int(max(0.0, min(100.0, (db + 60.0) / 60.0 * 100.0)))
+            self.live_meter.setValue(pct)
+        elif self.live_meter.value() != 0:
+            self.live_meter.setValue(0)
 
     # ------------------------------------------------------------- Simulate tab
     def _simulate_tab(self):
@@ -700,6 +1195,8 @@ class Inspector(QWidget):
         self.json_view.setPlainText(cp.serialize(cfg, pretty=True))
         # simulate
         self._refresh_simulate()
+        # live array control
+        self._refresh_live()
         self._refreshing = False
 
     def _clear_layout(self, lay):

@@ -35,10 +35,16 @@ conf_pipeline/        the engine (pure dataclasses + functions, no Qt)
 conf_pipeline_gui/    the PySide6 app
   state.py            AppState (undo/redo, selection, tool, camera)
   canvas.py           2D + 3D editor (QPainter, orbit camera, floor-plan image, coverage circles)
-  inspector.py        Build / AEC-DSP / Routing / Issues / Simulate / JSON tabs
+  inspector.py        Build / AEC-DSP / Routing / Issues / Simulate / Live / JSON tabs
   scenarios.py        sample configs (boardroom, huddle, meeting, conference, training, lecture, U-shape)
   app.py              main window + toolbar (Auto-Route, Show coverage, Floor plan, Export report)
-tests/                pytest suite (139 tests)
+conf_pipeline_control/ host-side array-microphone control (optional [control] extra)
+  geometry.py         physical capsule layout (ArrayGeometry, sensibel_8)
+  steering.py         coverage zones → beamformer look/null directions
+  beamformer.py       delay-and-sum + LCMV null-steering + beam pattern (pure stdlib)
+  control.py          MicController interface + SimulatedMicController
+  audio.py / live.py  real-time capture + beamforming (numpy + sounddevice)
+tests/                pytest suite (174 tests)
 run_gui.py            launcher
 ```
 
@@ -190,6 +196,80 @@ Four capabilities modelled on **Shure Designer 6**, all offline and vendor-neutr
 - **Design report** — `cp.design_report(config, "markdown"|"html")` produces a
   shareable doc (room + RT60, devices, routing, AEC, coverage, validation);
   **Export report** writes `.md`/`.html`.
+
+## Live array-microphone control (1.11.0)
+
+Drive an **actual array microphone** with **coverage-area selection**, the way a
+Shure MXA920 lets you pick which areas to capture and which to mute — but for an
+array that exposes only raw multi-channel audio (e.g. a **sensiBel 8-capsule**
+array over USB). Such arrays have no on-device zone protocol; the steering is done
+**on the host**, in the new optional `conf_pipeline_control` package. The
+pickup/exclusion zones you already draw in the app become the beamformer:
+
+```python
+import conf_pipeline as cp
+import conf_pipeline_control as cc
+
+c = ...                                  # a config with an array + pickup/exclusion zones
+geom = cc.sensibel_8(radius_m=0.05)      # set radius to your array's actual value
+design = cc.design_zone_beams(c, "A", geom, freq_hz=1000)
+print(design.summary())                  # pickup gain, white-noise gain, excluded-area leak per zone
+```
+
+`design_zone_beams` steers a beam toward each **Records / dedicated** zone and
+places spatial **nulls** toward each **No-pickup (exclusion)** zone (pure stdlib —
+`cmath`, no numpy). It returns verification numbers and you can evaluate the
+directivity directly (`cc.beam_pattern_azimuth`, `cc.response_db`,
+`cc.directivity_index_db`) to *prove* a pickup area is on-axis and an excluded
+area is attenuated.
+
+**Superdirective by default** — a small array is barely directional with plain
+delay-and-sum at speech frequencies, so it picks up diffuse background almost as
+loudly as the talker. The default mode is **superdirective** (diffuse-noise MVDR):
+it minimises pickup of isotropic background while holding unity gain on the talker,
+buying **~5 dB more voice-vs-background** in the low/mid speech band on an 8-capsule
+array. A **diagonal-loading** knob trades directivity for robustness to self-noise
+and capsule mismatch (raise it if the beam hisses). `mode="delaysum"` selects the
+robust delay-and-sum instead. In the GUI: the **Beamformer** group (Mode +
+**Focus ↔ robust** slider).
+
+**Two layers, split by dependency:**
+
+- **Design (always available, pure stdlib):** geometry, zone→direction, weights,
+  and beam-pattern verification. Importing `conf_pipeline_control` pulls no
+  numpy/sounddevice; the full 174-test suite runs without them.
+- **Live (optional `[control]` extra):** capture the array's channels and apply
+  the weights in real time — a frequency-domain (per-FFT-bin), Hann-windowed
+  overlap-add beamformer — with a live output level, mute, gain, and optional WAV
+  recording of the steered output:
+
+  ```bash
+  .venv\Scripts\python -m pip install -e ".[control]"   # numpy + sounddevice
+  ```
+
+In the desktop app, the **Live** inspector tab does all of this: choose the
+target array and capsule radius, **Design beam from zones** (shows per-zone gains
+and an azimuth-response sparkline), pick the input device, **Connect**, then watch
+the level meter and toggle **Mute** / **Gain**. Without the extra it runs against
+a built-in **simulated** controller so the workflow is fully usable offline.
+
+**Hearing the output** — tick **Monitor output** and pick an output device to play
+the beamformed signal live (full-duplex). Use **headphones**: monitoring a ceiling
+array through room speakers feeds back into the array and howls. You can also save
+the steered output to a WAV by passing `record_path=` to `LiveBeamController`.
+
+**Active capsules** — if a capsule is dead or a channel in the stream carries no
+audio, switch it off (per-capsule checkboxes, or **Detect silent capsules** to
+auto-probe the live stream and uncheck the silent ones). The beamformer then
+designs over the active capsules only and gives the rest zero weight, so one bad
+channel doesn't corrupt the beam (`cc.with_active_channels(geom, mask)`).
+
+> **Honest fidelity note.** An *N*-capsule array forms at most *N*−1 nulls; null
+> depth and beamwidth are bounded by the array's aperture and degrade away from
+> the design band. Excluded areas are **strongly attenuated**, not perfectly
+> silenced, and a planar array separates areas mainly by **azimuth / horizontal
+> offset** (two areas on the same bearing are hard to tell apart). This is the
+> physics of the hardware, surfaced rather than hidden.
 
 ## Designer-inspired workflow (1.8.0)
 

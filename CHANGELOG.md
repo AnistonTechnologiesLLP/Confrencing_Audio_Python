@@ -5,6 +5,72 @@ Python port of the Conferencing Audio Pipeline. Format based on
 project they were ported from. The JSON **config schema** (`CONFIG_VERSION` = 1,
 camelCase keys) is identical to the TS version, so configs interoperate.
 
+## [1.11.0] - 2026-06-10
+
+**Live array-microphone control** — a Python-only addition (no TS counterpart)
+that drives an **actual array microphone** with **coverage-area selection** (à la
+Shure MXA920) for arrays exposing only raw multi-channel audio (e.g. a sensiBel
+8-capsule array). The steering is host-side; the engine's pickup/exclusion zones
+become beamformer weights. Additive — the JSON config schema is unchanged.
+
+### Added
+- **New package `conf_pipeline_control/`** (design layer is pure stdlib — no numpy):
+  - `geometry.py` — `ArrayGeometry`, `circular_array`, `sensibel_8(radius_m)`;
+    capsule positions in a local frame, `SOUND_SPEED_MPS`.
+  - `steering.py` — coverage zones → `Direction` look/null vectors, reusing
+    `conf_pipeline.steering_angles` so beam bearings match the canvas rays.
+    `look_direction`, `zone_look_direction`, `pickup_directions`,
+    `exclusion_directions`, `zone_centroid`.
+  - `beamformer.py` — narrowband design in pure `cmath`: `steering_vector`,
+    `delay_and_sum_weights`, `lcmv_weights` (unit gain at the look direction,
+    exact nulls toward exclusion directions, via a stdlib complex solver),
+    `response_db`, `white_noise_gain_db`, `beam_pattern_azimuth`, and the
+    app-facing `design_zone_beams → BeamDesign` (one beam per pickup zone, nulling
+    exclusions, with verification numbers and a `summary()`).
+  - `control.py` — `MicController` interface (connect / mute / gain / level /
+    `apply_design`) + `SimulatedMicController` (hardware-free, deterministic level).
+  - `audio.py` / `live.py` — **optional `[control]` extra** (numpy + sounddevice):
+    input/output device enumeration and `LiveBeamController`, a real-time
+    frequency-domain (per-FFT-bin), Hann-windowed 50 %-overlap-add beamformer with
+    a live meter, mute/gain, **live monitoring** (`monitor=True` opens a full-duplex
+    stream that plays the beamformed mono out to `output_device`), and optional WAV
+    recording of the steered output. Import-guarded: a clear "install the extra"
+    message if the deps are absent.
+  - **Active-capsule mask** (`ArrayGeometry.active`, `with_active_channels`): a
+    dead or non-audio channel can be switched off; the beamformer designs over the
+    active capsules only and scatters zero weight to the rest (so the full-length
+    weight vector still aligns with the device's channels), and the null-count
+    limit becomes `n_active − 1`.
+  - **Superdirective beamforming** (`superdirective_weights`, `diffuse_coherence`,
+    `directivity_index_db`, `design_zone_beams(mode=…, loading=…)`): diffuse-noise
+    MVDR that rejects isotropic background far better than delay-and-sum on a small
+    array (~+5 dB directivity index in the 300 Hz–1 kHz speech band on the 8-capsule
+    geometry), with diagonal loading trading directivity for robustness. Now the
+    **default** mode (`MODE_SUPERDIRECTIVE`); the live per-FFT-bin runtime applies
+    it broadband. GUI: a **Beamformer** group (Mode + Focus↔robust slider).
+- **PySide6 GUI**: a **Live** inspector tab — array + capsule-radius + design-freq
+  selectors, per-capsule **active checkboxes** + a **Detect silent capsules** probe
+  (captures briefly off the GUI thread and unchecks dead channels), **Design beam
+  from zones** (per-zone pickup/WNG/leak readout + an azimuth-response sparkline),
+  input-device picker (auto-matching the device's native sample rate), a
+  **Monitor output** toggle + output-device picker (play the beam live on
+  headphones), **Connect/Disconnect**, a **Mute** toggle, a **Gain** slider, and a
+  dB-scaled level meter driven by a `QTimer`. Falls back to the simulated controller
+  (with a banner) when the extra is absent, so the workflow is fully usable offline.
+- **Optional extra** (`pyproject.toml`): `control` (numpy + sounddevice). The base
+  engine and GUI need neither.
+- pytest coverage for the design layer (numpy-free) — 174 tests total
+  (+29: steering geometry, steering-vector/main-lobe/LCMV-null math, zone-driven
+  design, the active-capsule mask, and the controller/simulated backend).
+
+### Notes
+- Importing `conf_pipeline_control` never imports numpy/sounddevice; the live path
+  imports them lazily, behind availability gates.
+- **Fidelity is stated, not hidden:** an *N*-capsule array forms at most *N*−1
+  nulls; excluded areas are strongly attenuated (not perfectly muted), and a planar
+  array discriminates mainly by azimuth/horizontal offset. The code reports
+  white-noise gain and excluded-area leakage so the trade-offs are visible.
+
 ## [1.10.0] - 2026-06-09
 
 **Shure-Designer-inspired features** (Python-only, offline, vendor-neutral). Four
