@@ -102,6 +102,30 @@ class _ABWorker(QRunnable):
         except Exception as exc:
             self.signals.failed.emit(str(exc))
 
+
+class _CalibWorker(QRunnable):
+    """Record a few seconds and report the dominant talker bearing, off the GUI
+    thread — used to set the auto-steer Front offset from a known 'front' talker."""
+
+    def __init__(self, geom, device, sr, off_nadir, seconds=4.0):
+        super().__init__()
+        self._args = (geom, device, sr, off_nadir, seconds)
+        self.signals = _ProbeSignals()  # done((az|None, salience_db)) / failed(str)
+
+    def run(self):  # noqa: D401 (Qt override)
+        try:
+            geom, device, sr, off_nadir, seconds = self._args
+            y8 = cc.record_clip(device, sr, seconds, channels=geom.n_channels)
+            res = cc.detect_offline(y8, sr, geom, off_nadir_deg=off_nadir, max_talkers=1)
+            if res.detections:
+                d = res.detections[0]
+                self.signals.done.emit((d.azimuth_deg, d.salience_db))
+            else:
+                self.signals.done.emit((None, 0.0))
+        except Exception as exc:
+            self.signals.failed.emit(str(exc))
+
+
 DEVICE_TYPES = [
     ("Processor (DSP)", "processor"),
     ("Microphone array", "microphoneArray"),
@@ -189,6 +213,7 @@ class Inspector(QWidget):
         self._live_dev_rates = {}        # device index -> native samplerate
         self._probe_workers = set()      # strong refs to capsule-probe runnables
         self._ab_workers = set()         # strong refs to A/B-test runnables
+        self._calib_workers = set()      # strong refs to front-calibration runnables
         self._clean_monitor = None       # CleanMonitor while OCTOVOX cleaning is live
         self._autosteer = None           # AutoSteerController while auto-following talkers
 
@@ -593,6 +618,14 @@ class Inspector(QWidget):
         self.live_autosteer_gate = QCheckBox("Mute output when nobody is in the sector")
         self.live_autosteer_gate.setChecked(True)
         asf.addRow("Gate", self.live_autosteer_gate)
+        self.live_calib_btn = QPushButton("Calibrate front (talk from the front, then click)")
+        self.live_calib_btn.setToolTip(
+            "Records a few seconds while someone talks from your desk's 'front', measures "
+            "that bearing, and sets the Front offset so the sector lines up with it. "
+            "Disconnect first; needs the [control] extra."
+        )
+        self.live_calib_btn.clicked.connect(self._live_calibrate_front)
+        asf.addRow("Calibrate", self.live_calib_btn)
         self.live_autosteer_view = QLabel("Connect with auto-steer enabled to see detected talkers.")
         self.live_autosteer_view.setWordWrap(True)
         self.live_autosteer_view.setFont(QFont("Consolas", 9))
@@ -600,10 +633,14 @@ class Inspector(QWidget):
         lay.addWidget(as_gb)
         self._autosteer_widgets = (
             self.live_sector_center, self.live_sector_width, self.live_front_offset,
-            self.live_max_talkers, self.live_autosteer_gate,
+            self.live_max_talkers, self.live_autosteer_gate, self.live_calib_btn,
         )
         for _w in self._autosteer_widgets:
             _w.setEnabled(False)                 # enabled when auto-steer is ticked
+        # adjust the sector live while connected (no reconnect needed)
+        for _sp in (self.live_sector_center, self.live_sector_width, self.live_front_offset, self.live_max_talkers):
+            _sp.valueChanged.connect(lambda *_a: None if self._refreshing else self._on_autosteer_param_changed())
+        self.live_autosteer_gate.toggled.connect(lambda *_a: None if self._refreshing else self._on_autosteer_param_changed())
 
         design_btn = QPushButton("Design beam from zones")
         design_btn.setProperty("accent", "true")
@@ -750,6 +787,24 @@ class Inspector(QWidget):
         on = self.live_autosteer.isChecked()
         for w in self._autosteer_widgets:
             w.setEnabled(on)
+
+    def _autosteer_sector(self):
+        return cc.SectorConfig(
+            center_deg=float(self.live_sector_center.value()),
+            half_width_deg=float(self.live_sector_width.value()) / 2.0,
+            front_offset_deg=float(self.live_front_offset.value()),
+        )
+
+    def _on_autosteer_param_changed(self):
+        """Push sector / max-talkers / gate changes to a running session live —
+        the controller reads these each control tick, so no reconnect is needed."""
+        a = self._autosteer
+        if a is None:
+            return
+        a.sector = self._autosteer_sector()
+        a.max_talkers = int(self.live_max_talkers.value())
+        a.gate_when_empty = self.live_autosteer_gate.isChecked()
+        self.live_mute.setEnabled(not a.gate_when_empty)
 
     def _live_active_mask(self):
         return [cb.isChecked() for cb in self.live_caps]
@@ -962,6 +1017,39 @@ class Inspector(QWidget):
         self._probe_workers.clear()
         self.live_status.setText(f"Probe failed: {msg}")
 
+    def _live_calibrate_front(self):
+        """Record a 'front' talker and set the Front offset to the measured bearing."""
+        if self._live_busy():
+            self.live_status.setText("Disconnect before calibrating (the device is in use).")
+            return
+        if not cc.controls_available():
+            self.live_status.setText("Calibrate needs the [control] extra (numpy + sounddevice).")
+            return
+        geom = self._live_geometry()
+        sr = self.live_rate.currentData() or 44100
+        self.live_status.setText("Calibrating — have someone talk from the FRONT for ~4 s…")
+        self.live_calib_btn.setEnabled(False)
+        worker = _CalibWorker(geom, self.live_device.currentData(), int(sr), 90.0)
+        worker.signals.done.connect(self._on_calib_done)
+        worker.signals.failed.connect(self._on_calib_failed)
+        self._calib_workers.add(worker)
+        QThreadPool.globalInstance().start(worker)
+
+    def _on_calib_done(self, payload):
+        self.live_calib_btn.setEnabled(self.live_autosteer.isChecked())
+        self._calib_workers.clear()
+        az, sal = payload
+        if az is None:
+            self.live_status.setText("Calibration: no clear talker detected — try again, louder.")
+            return
+        self.live_front_offset.setValue(round(az))   # front talker measured here → that's the offset
+        self.live_status.setText(f"Front calibrated: azimuth {az:.0f}° ({sal:.0f} dB). Sector centre is now 'front'.")
+
+    def _on_calib_failed(self, msg):
+        self.live_calib_btn.setEnabled(self.live_autosteer.isChecked())
+        self._calib_workers.clear()
+        self.live_status.setText(f"Calibration failed: {msg}")
+
     def _live_design_from_zones(self):
         aid = self._live_array_id()
         if not aid:
@@ -1115,11 +1203,7 @@ class Inspector(QWidget):
             return
         geom = self._live_geometry()
         rate = self.live_rate.currentData() or 44100
-        sector = cc.SectorConfig(
-            center_deg=float(self.live_sector_center.value()),
-            half_width_deg=float(self.live_sector_width.value()) / 2.0,
-            front_offset_deg=float(self.live_front_offset.value()),
-        )
+        sector = self._autosteer_sector()
         try:
             ctrl = cc.AutoSteerController(
                 geom, sector,

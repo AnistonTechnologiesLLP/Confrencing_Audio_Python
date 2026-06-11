@@ -42,12 +42,14 @@ conf_pipeline_control/ host-side array-microphone control (optional [control] ex
   geometry.py         physical capsule layout (ArrayGeometry, sensibel_8)
   steering.py         coverage zones → beamformer look/null directions
   beamformer.py       delay-and-sum + LCMV null-steering + beam pattern (pure stdlib)
+  doa.py              SRP-PHAT multi-azimuth detection + sector gate (numpy)
+  autosteer.py        detect talkers → gate to sector → steer/extract live
   control.py          MicController interface + SimulatedMicController
   audio.py / live.py  real-time capture + beamforming (numpy + sounddevice)
   octovox_bridge.py   zones → azimuths + HTTP client to the OCTOVOX clean server
   octovox_monitor.py  near-live cleaned monitor (rolling chunk → clean → playback)
   ab_test.py          A/B harness: record → beamform N ways → WAVs + dB report
-tests/                pytest suite (231 tests; incl. headless GUI smoke)
+tests/                pytest suite (251 tests; incl. headless GUI smoke)
 run_gui.py            launcher
 ```
 
@@ -357,6 +359,43 @@ channel doesn't corrupt the beam (`cc.with_active_channels(geom, mask)`).
 > silenced, and a planar array separates areas mainly by **azimuth / horizontal
 > offset** (two areas on the same bearing are hard to tell apart). This is the
 > physics of the hardware, surfaced rather than hidden.
+
+## Auto-steer — follow talkers by direction (1.13.0)
+
+Beam *design from zones* needs you to know where people sit. **Auto-steer** instead
+finds them: it scans azimuth in real time (SRP-PHAT direction-of-arrival), keeps the
+talkers inside a coverage **sector** (a centre bearing ± half-width — the "area"
+expressed as an angle, since a planar array measures bearing, not range), and steers
+a beam at each one while nulling the talkers outside. It adapts as people talk in
+turn or move — good for a desk/table array.
+
+```python
+import conf_pipeline_control as cc
+geom = cc.with_active_channels(cc.sensibel_8(radius_m=0.035), [i != 5 for i in range(8)])
+sector = cc.SectorConfig(center_deg=0, half_width_deg=60, front_offset_deg=37)
+ctrl = cc.AutoSteerController(geom, sector, device=7, samplerate=44100, monitor=True)
+ctrl.start()                       # detect → gate → steer, live
+print(ctrl.detections())           # [(azimuth, in_sector, salience), …]
+ctrl.stop()
+```
+
+In the desktop app, the Live tab's **Auto-steer (follow talkers in a sector)** group
+exposes the sector centre/width, a **Front offset** (rotates azimuth-0 to your desk's
+"front"), max talkers, and a "mute when empty" gate, with a live readout of the
+detected bearings. The sector controls update a running session **without
+reconnecting**. **Calibrate front** records a 'front' talker and sets the offset for
+you. The pure-DOA / control pieces are `conf_pipeline_control.doa` (`detect`,
+`sector_gate`, `detect_offline`) and `conf_pipeline_control.autosteer`; the live
+covariance the scan needs comes from `LiveBeamController(track_covariance=True)`
+(opt-in, zero overhead when off).
+
+CLI helpers: `scripts/device_check.py` (confirm 8 channels @ 44100),
+`scripts/calibrate_front.py` (measure the front bearing), and
+`scripts/area_autosteer.py` (live detect + extract with a radar readout).
+
+> **Same physics caveat.** Azimuth is reliable; **range is not**, so the area is an
+> angular arc, not a metric radius. Resolution ≈ beamwidth — two talkers closer than
+> ~40–50° on a small array merge into one detection.
 
 ## OCTOVOX integration — clean the steered voice (1.11.0)
 

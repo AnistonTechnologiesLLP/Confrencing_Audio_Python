@@ -5,6 +5,53 @@ Python port of the Conferencing Audio Pipeline. Format based on
 project they were ported from. The JSON **config schema** (`CONFIG_VERSION` = 1,
 camelCase keys) is identical to the TS version, so configs interoperate.
 
+## [1.13.0] - 2026-06-11
+
+**Multi-azimuth auto-steer** — host-side, real-time "listen only to the people in
+this area" for a raw multi-channel array (e.g. sensiBel 8). A small array can't
+*separate* sources well, but a circular array is strong at **azimuth**, so instead
+of fighting that we detect *where* each talker is and steer at the ones inside a
+coverage **sector**. Python-only and additive (the JSON config schema is
+unchanged); needs the `[control]` extra (numpy + sounddevice).
+
+### Added
+- **DOA detection** (`conf_pipeline_control.doa`): SRP-PHAT azimuth scan from the
+  array's spatial covariance (PHAT-whitened for reverb robustness, speech-band only
+  to dodge spatial aliasing), with a multi-peak picker (`detect`) that returns up to
+  `max_talkers` bearings, honouring a resolution-aware `min_separation_deg` and a
+  peak-to-median VAD floor. Plus the **sector gate** (`in_sector` / `sector_gate`,
+  wrap-aware with a `front_offset`) and `detect_offline` for tuning on a recording.
+  The active-capsule mask is respected (a dead capsule is excluded from the scan).
+- **Auto-steer controller** (`conf_pipeline_control.autosteer.AutoSteerController`,
+  `SectorConfig`): a slow control thread snapshots the live covariance, detects
+  talkers, gates them to the sector, and rebuilds a multi-look beam
+  (`design_multi_bearings` — one beam per in-sector talker, nulling the out-of-sector
+  ones) which it re-applies live. Hysteresis (hold + re-select deadband) stops beam
+  flicker during turn-taking; optionally mutes the output when nobody is in the area.
+- **Live runtime covariance tap** (`live.LiveBeamController(track_covariance=True)` +
+  `snapshot_covariance()`): opt-in, thread-safe band-covariance estimate for DOA;
+  **off by default with zero overhead** and no behaviour change.
+- **`design_multi_bearings`** / **`bearing_direction`** (`beamformer`): steer one
+  beam at each of several bearings while nulling others, without a room/zone config.
+- **PySide6 GUI** — an **Auto-steer (follow talkers in a sector)** group in the Live
+  tab: sector centre/width, front-offset, max talkers, a "mute when empty" gate, a
+  live readout of detected bearings (IN/out of sector), and a **Calibrate front**
+  button (records a 'front' talker and sets the offset). Sector controls update a
+  running session **live** (no reconnect). Reuses the existing transport
+  (Connect/gain/meter/monitor) and the device-native sample-rate match.
+- **Scripts**: `scripts/area_autosteer.py` (live detect + extract with a radar
+  readout), `scripts/calibrate_front.py` (measure the front bearing),
+  `scripts/device_check.py` (8-channel/44100 device diagnostic),
+  `scripts/desk_isolation.py` (fixed-bearing extraction).
+- pytest coverage: 15 new hardware-free tests (synthetic-mixture DOA recovery,
+  resolution/threshold limits, sector gate, multi-look design, stubbed auto-steer
+  loop). **251 tests total.**
+
+### Notes (honest limits)
+- Azimuth is reliable; **range is not** on a planar array — the coverage boundary is
+  an angular sector, not a metric radius. Angular resolution ≈ beamwidth, so two
+  talkers closer than ~40–50° on a small array merge into one detection.
+
 ## [1.12.0] - 2026-06-11
 
 **More Shure-Designer-6 parity** — four config-only, vendor-neutral, offline
