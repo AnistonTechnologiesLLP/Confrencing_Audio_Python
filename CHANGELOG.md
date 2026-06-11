@@ -75,6 +75,19 @@ with the TypeScript version (new fields are optional and omitted when unset).
 - **Canvas context menus**: right-click a device / zone / talker (or empty floor)
   for Edit / Delete / quick-add actions; the cursor now reflects what's grabbable
   (open-hand over movable items, resize over zone corners, crosshair while drawing).
+- **Mute-group editor** in the Routing tab — create a group over the mute-capable
+  mics, toggle its mute, and remove it (surfacing the `ControlConfig` / `MuteGroup`
+  model that previously had API + validation but no UI).
+- 8 headless GUI smoke tests (`tests/test_gui_smoke.py`, Qt offscreen, skipped when
+  PySide6 is absent) covering the window build, guide progress, the mute-group
+  add/toggle/remove cycle, the inspector banner, and canvas context/hover helpers.
+  **231 tests total.**
+
+### Fixed
+- Canvas right-click on the *body* of a coverage zone now opens the Edit/Delete
+  menu — the handler tested for a `"zone"` hit kind that `_hit_test` never returns
+  (it returns `"zone-move"` / `"zone-resize"`), so body clicks previously fell
+  through to the empty-floor menu.
 
 ### Notes
 - The JSON schema stays v2: a config with no channels/gain/control round-trips

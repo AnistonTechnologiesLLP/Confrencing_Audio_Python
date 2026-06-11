@@ -27,8 +27,11 @@ from .beamformer import (  # noqa: F401
     LobeReport,
     ZoneBeam,
     analyze_lobes,
+    bearing_direction,
     beam_pattern_azimuth,
     delay_and_sum_weights,
+    design_from_bearings,
+    design_multi_bearings,
     design_zone_beams,
     diffuse_coherence,
     directivity_index_db,
@@ -81,6 +84,17 @@ from .steering import (  # noqa: F401
     zone_centroid,
     zone_look_direction,
 )
+from .doa import (  # noqa: F401
+    DEFAULT_F_HI_HZ,
+    DEFAULT_F_LO_HZ,
+    Detection,
+    DoaResult,
+    detect,
+    detect_offline,
+    in_sector,
+    sector_gate,
+)
+from .autosteer import AutoSteerController, SectorConfig  # noqa: F401
 
 
 def controls_available() -> bool:
@@ -99,7 +113,11 @@ __all__ = [
     "MODE_DELAYSUM", "MODE_SUPERDIRECTIVE", "response",
     "response_db", "white_noise_gain_db", "beam_pattern_azimuth",
     "analyze_lobes", "LobeReport", "talker_leakage_db",
-    "design_zone_beams", "BeamDesign", "ZoneBeam",
+    "design_zone_beams", "design_from_bearings", "design_multi_bearings",
+    "bearing_direction", "BeamDesign", "ZoneBeam",
+    "detect", "detect_offline", "sector_gate", "in_sector", "Detection", "DoaResult",
+    "DEFAULT_F_LO_HZ", "DEFAULT_F_HI_HZ",
+    "AutoSteerController", "SectorConfig",
     "MicController", "MicState", "SimulatedMicController",
     "DEFAULT_DESIGN_FREQ_HZ", "DEFAULT_TARGET_ELEVATION_M", "RESPONSE_FLOOR_DB",
     "controls_available",

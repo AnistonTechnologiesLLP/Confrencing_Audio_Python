@@ -144,6 +144,17 @@ class NoWheelDoubleSpinBox(QDoubleSpinBox):
         event.ignore()
 
 
+class NoWheelSpinBox(QSpinBox):
+    """Integer spin box that ignores the mouse wheel (see NoWheelDoubleSpinBox)."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.setFocusPolicy(Qt.StrongFocus)
+
+    def wheelEvent(self, event):  # noqa: N802 (Qt override)
+        event.ignore()
+
+
 class Inspector(QWidget):
     def __init__(self, state: AppState):
         super().__init__()
@@ -179,6 +190,7 @@ class Inspector(QWidget):
         self._probe_workers = set()      # strong refs to capsule-probe runnables
         self._ab_workers = set()         # strong refs to A/B-test runnables
         self._clean_monitor = None       # CleanMonitor while OCTOVOX cleaning is live
+        self._autosteer = None           # AutoSteerController while auto-following talkers
 
         self.tabs.addTab(self._scroll(self._build_tab()), "Build")
         self.tabs.addTab(self._scroll(self._dsp_tab()), "AEC / DSP")
@@ -306,8 +318,95 @@ class Inspector(QWidget):
         self.routing_view = QPlainTextEdit()
         self.routing_view.setReadOnly(True)
         self.routing_view.setFont(QFont("Consolas", 10))
-        lay.addWidget(self.routing_view)
+        lay.addWidget(self.routing_view, 1)
+
+        # ---- Mute groups (logic / control) ----
+        mg = QGroupBox("Mute groups")
+        mgl = QVBoxLayout(mg)
+        mgl.addWidget(QLabel("A named set of devices that mute together (Designer-style logic control)."))
+        self.mute_group_list = QListWidget()
+        self.mute_group_list.setMaximumHeight(120)
+        mgl.addWidget(self.mute_group_list)
+        row = QHBoxLayout()
+        self.mute_group_name = QLineEdit()
+        self.mute_group_name.setPlaceholderText("New group name…")
+        add_mg = QPushButton("+ Group from mute-capable mics")
+        add_mg.clicked.connect(self._add_mute_group)
+        row.addWidget(self.mute_group_name, 1)
+        row.addWidget(add_mg)
+        mgl.addLayout(row)
+        row2 = QHBoxLayout()
+        self.mute_group_toggle = QPushButton("Toggle mute")
+        self.mute_group_toggle.clicked.connect(self._toggle_selected_mute_group)
+        rm_mg = QPushButton("Remove")
+        rm_mg.clicked.connect(self._remove_selected_mute_group)
+        row2.addWidget(self.mute_group_toggle)
+        row2.addWidget(rm_mg)
+        row2.addStretch(1)
+        mgl.addLayout(row2)
+        lay.addWidget(mg)
         return w
+
+    # ---- mute-group actions ----
+    def _selected_mute_group_id(self):
+        it = self.mute_group_list.currentItem()
+        return it.data(Qt.UserRole) if it is not None else None
+
+    def _add_mute_group(self):
+        cfg = self.state.config
+        mics = [d for d in cfg.devices if cp.is_mic_device(d) and cp.device_capabilities(d).mute]
+        if not mics:
+            return self._toast("No mute-capable microphones to group.")
+        existing = cfg.control.mute_groups if cfg.control is not None else []
+        n = len(existing) + 1
+        ids = {g.id for g in existing}
+        gid = f"mg{n}"
+        while gid in ids:
+            n += 1
+            gid = f"mg{n}"
+        name = self.mute_group_name.text().strip() or f"Mute group {n}"
+        try:
+            grp = cp.create_mute_group(gid, name, device_ids=[m.id for m in mics])
+            self.state.set_config(cp.add_mute_group(cfg, grp))
+            self.mute_group_name.clear()
+            self._toast(f"Added “{name}” over {len(mics)} mic(s)")
+        except Exception as exc:
+            self._toast(str(exc))
+
+    def _toggle_selected_mute_group(self):
+        gid = self._selected_mute_group_id()
+        if gid is None or self.state.config.control is None:
+            return
+        grp = next((g for g in self.state.config.control.mute_groups if g.id == gid), None)
+        if grp is not None:
+            self.state.set_config(cp.set_mute_group_muted(self.state.config, gid, not grp.muted))
+
+    def _remove_selected_mute_group(self):
+        gid = self._selected_mute_group_id()
+        if gid is not None:
+            self.state.set_config(cp.remove_mute_group(self.state.config, gid))
+
+    def _refresh_mute_groups(self, cfg):
+        if not hasattr(self, "mute_group_list"):
+            return
+        prev = self._selected_mute_group_id()
+        self.mute_group_list.clear()
+        groups = cfg.control.mute_groups if cfg.control is not None else []
+        for g in groups:
+            members = len(g.device_ids) + len(g.zone_refs)
+            state = "🔇 muted" if g.muted else "🔊 unmuted"
+            it = QListWidgetItem(f"{g.label}  ·  {members} member(s) · {g.trigger} · {state}")
+            it.setData(Qt.UserRole, g.id)
+            self.mute_group_list.addItem(it)
+            if g.id == prev:
+                self.mute_group_list.setCurrentItem(it)
+        has = bool(groups)
+        self.mute_group_toggle.setEnabled(has)
+
+    def _toast(self, msg):
+        win = self.window()
+        if hasattr(win, "toast"):
+            win.toast(msg)
 
     def _issues_tab(self):
         w = QWidget()
@@ -372,6 +471,11 @@ class Inspector(QWidget):
         self.live_radius.setDecimals(3)
         self.live_radius.setValue(0.05)
         self.live_radius.setSuffix(" m")
+        self.live_radius.setToolTip(
+            "Capsule-circle radius of YOUR array. 0.05 m is a placeholder — set the "
+            "real radius (centre to a capsule). It sets the beamwidth and the DOA "
+            "resolution, so the number matters."
+        )
         gf.addRow("Capsule radius", self.live_radius)
         self.live_freq = NoWheelDoubleSpinBox()
         self.live_freq.setRange(200.0, 8000.0)
@@ -442,6 +546,64 @@ class Inspector(QWidget):
         preset.clicked.connect(self._live_aggressive_preset)
         bf.addRow("Preset", preset)
         lay.addWidget(bf_gb)
+
+        # --- auto-steer: detect talkers by direction and follow the ones in a sector ---
+        as_gb = QGroupBox("Auto-steer — follow talkers in a sector")
+        as_gb.setToolTip(
+            "Detect who is talking by direction (DOA) in real time and steer a beam at "
+            "each talker inside the coverage sector, nulling the ones outside. Best for "
+            "a desk array: it adapts as people talk in turn or move. Azimuth only — a "
+            "small array resolves bearing, not distance, so the area is an angular arc."
+        )
+        asf = QFormLayout(as_gb)
+        asf.setRowWrapPolicy(QFormLayout.WrapLongRows)
+        asf.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+        self.live_autosteer = QCheckBox("Enable (auto-detect & follow)")
+        self.live_autosteer.setToolTip("On Connect, follow detected talkers instead of using a fixed zone design.")
+        self.live_autosteer.toggled.connect(lambda *_a: None if self._refreshing else self._on_autosteer_toggled())
+        asf.addRow("Auto-steer", self.live_autosteer)
+        self.live_sector_center = NoWheelDoubleSpinBox()
+        self.live_sector_center.setRange(0.0, 359.0)
+        self.live_sector_center.setSingleStep(5.0)
+        self.live_sector_center.setDecimals(0)
+        self.live_sector_center.setValue(0.0)
+        self.live_sector_center.setSuffix("°")
+        asf.addRow("Sector centre", self.live_sector_center)
+        self.live_sector_width = NoWheelDoubleSpinBox()
+        self.live_sector_width.setRange(10.0, 360.0)
+        self.live_sector_width.setSingleStep(10.0)
+        self.live_sector_width.setDecimals(0)
+        self.live_sector_width.setValue(120.0)
+        self.live_sector_width.setSuffix("° wide")
+        self.live_sector_width.setToolTip("Full arc width (e.g. 120° = centre ±60°).")
+        asf.addRow("Sector width", self.live_sector_width)
+        self.live_front_offset = NoWheelDoubleSpinBox()
+        self.live_front_offset.setRange(-180.0, 180.0)
+        self.live_front_offset.setSingleStep(5.0)
+        self.live_front_offset.setDecimals(0)
+        self.live_front_offset.setValue(0.0)
+        self.live_front_offset.setSuffix("°")
+        self.live_front_offset.setToolTip("Rotate the array's azimuth-0 to your room/desk 'front'.")
+        asf.addRow("Front offset", self.live_front_offset)
+        self.live_max_talkers = NoWheelSpinBox()
+        self.live_max_talkers.setRange(1, 6)
+        self.live_max_talkers.setValue(3)
+        self.live_max_talkers.setToolTip("Max simultaneous talkers to track (resolution-limited on a small array).")
+        asf.addRow("Max talkers", self.live_max_talkers)
+        self.live_autosteer_gate = QCheckBox("Mute output when nobody is in the sector")
+        self.live_autosteer_gate.setChecked(True)
+        asf.addRow("Gate", self.live_autosteer_gate)
+        self.live_autosteer_view = QLabel("Connect with auto-steer enabled to see detected talkers.")
+        self.live_autosteer_view.setWordWrap(True)
+        self.live_autosteer_view.setFont(QFont("Consolas", 9))
+        asf.addRow(self.live_autosteer_view)
+        lay.addWidget(as_gb)
+        self._autosteer_widgets = (
+            self.live_sector_center, self.live_sector_width, self.live_front_offset,
+            self.live_max_talkers, self.live_autosteer_gate,
+        )
+        for _w in self._autosteer_widgets:
+            _w.setEnabled(False)                 # enabled when auto-steer is ticked
 
         design_btn = QPushButton("Design beam from zones")
         design_btn.setProperty("accent", "true")
@@ -573,6 +735,22 @@ class Inspector(QWidget):
     def _live_array_id(self):
         return self.live_array.currentData()
 
+    def _live_busy(self):
+        """True if any live session (beamformer, OCTOVOX, or auto-steer) is active."""
+        return self._live_ctl is not None or self._clean_monitor is not None or self._autosteer is not None
+
+    def _active_ctl(self):
+        """The underlying MicController in use (auto-steer wraps one), or None."""
+        if self._autosteer is not None:
+            return self._autosteer.ctrl
+        return self._live_ctl
+
+    def _on_autosteer_toggled(self):
+        """Enable the sector controls only when auto-steer is selected."""
+        on = self.live_autosteer.isChecked()
+        for w in self._autosteer_widgets:
+            w.setEnabled(on)
+
     def _live_active_mask(self):
         return [cb.isChecked() for cb in self.live_caps]
 
@@ -626,7 +804,7 @@ class Inspector(QWidget):
                 self.live_array.setCurrentIndex(idx)
         self.live_array.blockSignals(False)
         # device picker (only when idle; don't disrupt a live session)
-        if self._live_ctl is None:
+        if not self._live_busy():
             curd = self.live_device.currentData()
             self.live_device.blockSignals(True)
             self.live_device.clear()
@@ -683,7 +861,7 @@ class Inspector(QWidget):
         if not aid:
             self.live_status.setText("Select a placed array first.")
             return
-        if self._live_ctl is not None or self._clean_monitor is not None:
+        if self._live_busy():
             self.live_status.setText("Disconnect before running the A/B test.")
             return
         from PySide6.QtWidgets import QFileDialog
@@ -745,7 +923,7 @@ class Inspector(QWidget):
 
     def _live_detect_silent(self):
         """Capture briefly and auto-uncheck capsules reading near-silence."""
-        if self._live_ctl is not None:
+        if self._live_busy():
             self.live_status.setText("Disconnect before detecting capsules (the device is in use).")
             return
         if not cc.controls_available():
@@ -835,8 +1013,11 @@ class Inspector(QWidget):
         return "".join(out)
 
     def _live_toggle_connect(self):
-        if self._live_ctl is not None or self._clean_monitor is not None:
+        if self._live_busy():
             self._live_disconnect()
+            return
+        if self.live_autosteer.isChecked():
+            self._autosteer_connect()
             return
         if self.live_octovox.isChecked():
             self._octovox_connect()
@@ -927,7 +1108,70 @@ class Inspector(QWidget):
             if not steer else (za.note or "Steering to the pickup-zone azimuth.")
         )
 
+    def _autosteer_connect(self):
+        """Start auto-steer: detect talkers by direction and follow those in the sector."""
+        if not cc.controls_available():
+            self.live_status.setText("Auto-steer needs the [control] extra (numpy + sounddevice).")
+            return
+        geom = self._live_geometry()
+        rate = self.live_rate.currentData() or 44100
+        sector = cc.SectorConfig(
+            center_deg=float(self.live_sector_center.value()),
+            half_width_deg=float(self.live_sector_width.value()) / 2.0,
+            front_offset_deg=float(self.live_front_offset.value()),
+        )
+        try:
+            ctrl = cc.AutoSteerController(
+                geom, sector,
+                device=self.live_device.currentData(),
+                samplerate=float(rate),
+                max_talkers=int(self.live_max_talkers.value()),
+                freq_hz=float(self.live_freq.value()),
+                mode=self._live_mode(),
+                loading=self._live_loading(),
+                gate_when_empty=self.live_autosteer_gate.isChecked(),
+                monitor=self.live_monitor.isChecked(),
+                output_device=self.live_out_device.currentData(),
+            )
+            ctrl.ctrl.set_gain_db(float(self.live_gain.value()))
+            ctrl.start()
+        except Exception as exc:  # hardware/open failure → report, stay disconnected
+            self.live_status.setText(f"Auto-steer connect failed: {exc}")
+            return
+        self._autosteer = ctrl
+        self.live_connect.setText("Disconnect")
+        # the gate owns muting while auto-steering; avoid a fight with the manual button
+        self.live_mute.setEnabled(not self.live_autosteer_gate.isChecked())
+        mon = ", monitoring" if self.live_monitor.isChecked() else ""
+        self.live_status.setText(
+            f"Auto-steer live · sector {sector.center_deg:.0f}° ±{sector.half_width_deg:.0f}° "
+            f"· up to {int(self.live_max_talkers.value())} talker(s){mon} (headphones)."
+        )
+
+    def _tick_autosteer(self):
+        """Update the meter + the detected-talker readout while auto-steering."""
+        a = self._autosteer
+        lvl = a.read_level()
+        pct = 0 if lvl <= 1e-6 else int(max(0.0, min(100.0, (20.0 * math.log10(lvl) + 60.0) / 60.0 * 100.0)))
+        self.live_meter.setValue(pct)
+        dets = a.detections()
+        if not dets:
+            self.live_autosteer_view.setText("· listening — no talker detected ·")
+        else:
+            parts = [f"{'IN ' if d.in_sector else 'out'} {d.azimuth_deg:.0f}° ({d.salience_db:.0f}dB)" for d in dets]
+            n_in = sum(1 for d in dets if d.in_sector)
+            self.live_autosteer_view.setText(f"{n_in} in-area  |  " + "   ".join(parts))
+        if a.error:
+            self.live_status.setText(f"Auto-steer: {a.error[:60]}")
+
     def _live_disconnect(self):
+        if self._autosteer is not None:
+            try:
+                self._autosteer.stop()
+            finally:
+                self._autosteer = None
+            self.live_mute.setEnabled(True)
+            self.live_autosteer_view.setText("Connect with auto-steer enabled to see detected talkers.")
         if self._clean_monitor is not None:
             try:
                 self._clean_monitor.stop()
@@ -946,18 +1190,23 @@ class Inspector(QWidget):
     def _live_toggle_mute(self):
         muted = self.live_mute.isChecked()
         self.live_mute.setText("Muted" if muted else "Mute")
-        if self._live_ctl is not None:
-            self._live_ctl.set_mute(muted)
+        ctl = self._active_ctl()
+        if ctl is not None:
+            ctl.set_mute(muted)
 
     def _live_gain_changed(self, v):
         self.live_gain_lbl.setText(f"{v} dB")
-        if self._live_ctl is not None:
-            self._live_ctl.set_gain_db(float(v))
+        ctl = self._active_ctl()
+        if ctl is not None:
+            ctl.set_gain_db(float(v))
 
     def _tick_live_meter(self):
         """Update the level meter on a dB scale (−60 dB → 0 %, 0 dB → 100 %), so
         normal speech picked up by a ceiling array is clearly visible rather than
         a sliver on a linear scale."""
+        if self._autosteer is not None:
+            self._tick_autosteer()
+            return
         if self._clean_monitor is not None:
             st = self._clean_monitor.state()
             # meter shows playback buffer fill (0..~chunk seconds); status shows progress
@@ -1472,6 +1721,8 @@ class Inspector(QWidget):
         s = cp.routing_summary(cfg)
         self.routing_summary_lbl.setText(f"{s['total']} route(s) · {s['dante']} Dante · {s['analog']} analog")
         self.routing_view.setPlainText(cp.signal_flow_report(cfg))
+        # mute groups
+        self._refresh_mute_groups(cfg)
         # json
         self.json_view.setPlainText(cp.serialize(cfg, pretty=True))
         # simulate

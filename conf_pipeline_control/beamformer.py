@@ -448,6 +448,162 @@ class BeamDesign:
         return "\n".join(lines)
 
 
+def bearing_direction(
+    azimuth_deg: float,
+    off_nadir_deg: float = 90.0,
+    *,
+    distance_m: float = 1.0,
+    label: str = "",
+) -> Direction:
+    """A :class:`Direction` from a compass ``azimuth_deg`` (0° = +Y, clockwise)
+    and ``off_nadir_deg`` (0° = straight down, **90° = horizontal**).
+
+    The 90° default suits a **desk/table array** whose capsules sit in a
+    horizontal plane and whose talkers are across the table at roughly the same
+    height (a near-horizontal look). For a ceiling array looking down, use a
+    smaller off-nadir. ``distance_m`` is informational (plane-wave design)."""
+    return Direction(
+        unit=_unit_from_az_offnadir(azimuth_deg, off_nadir_deg),
+        azimuth_deg=azimuth_deg,
+        off_nadir_deg=off_nadir_deg,
+        distance_m=distance_m,
+        label=label,
+    )
+
+
+def _coerce_direction(d) -> Direction:
+    """Accept a :class:`Direction` or an ``(azimuth_deg, off_nadir_deg)`` tuple."""
+    if isinstance(d, Direction):
+        return d
+    try:
+        az, off = d
+    except (TypeError, ValueError) as exc:
+        raise TypeError(
+            "expected a Direction or an (azimuth_deg, off_nadir_deg) tuple"
+        ) from exc
+    return bearing_direction(float(az), float(off))
+
+
+def _beam_for_look(geom, look_dir, applied_nulls, freq_hz, mode, loading, *, label, base_note):
+    """Build one verified :class:`ZoneBeam` toward ``look_dir`` nulling
+    ``applied_nulls`` (shared across a multi-look design)."""
+    def _weights(use_nulls):
+        if mode == MODE_SUPERDIRECTIVE:
+            return superdirective_weights(geom, look_dir, use_nulls, freq_hz, loading=loading)
+        return (
+            lcmv_weights(geom, look_dir, use_nulls, freq_hz)
+            if use_nulls
+            else delay_and_sum_weights(geom, look_dir, freq_hz)
+        )
+
+    note = base_note
+    use_nulls = applied_nulls
+    try:
+        w = _weights(use_nulls)
+    except ValueError as exc:
+        use_nulls = []
+        w = _weights([])
+        note = f"no nulls: {exc}"
+
+    atten = tuple(response_db(w, geom, d.unit, freq_hz) for d in applied_nulls)
+    lobes = analyze_lobes(w, geom, freq_hz, off_nadir_deg=look_dir.off_nadir_deg)
+    return ZoneBeam(
+        zone_id="bearing",
+        label=look_dir.label or label,
+        weights=tuple(w),
+        look=look_dir,
+        pickup_gain_db=response_db(w, geom, look_dir.unit, freq_hz),
+        wng_db=white_noise_gain_db(w, geom, look_dir, freq_hz),
+        di_db=directivity_index_db(w, geom, look_dir, freq_hz),
+        exclusion_atten_db=atten,
+        nulled=bool(use_nulls),
+        n_lobes=lobes.n_lobes,
+        peak_sidelobe_db=lobes.peak_sidelobe_db,
+        n_grating=len(lobes.grating_lobes),
+        n_nulls=len(use_nulls),
+        note=note,
+    )
+
+
+def _design_from_directions(geom, look_dirs, null_dirs, *, freq_hz, mode, loading, array_id):
+    """Shared core: one shared null set, one beam per look direction."""
+    budget = max(0, geom.n_active - 1)
+    applied = list(null_dirs)[:budget]
+    dropped = len(null_dirs) - len(applied)
+    base_note = f"null budget {budget}: {dropped} dropped" if dropped else ""
+    beams = tuple(
+        _beam_for_look(geom, ld, applied, freq_hz, mode, loading, label="target", base_note=base_note)
+        for ld in look_dirs
+    )
+    return BeamDesign(
+        array_id=array_id,
+        freq_hz=freq_hz,
+        geometry=geom,
+        beams=beams,
+        exclusion_labels=tuple(d.label for d in applied),
+        exclusion_dirs=tuple(applied),
+        null_dirs=tuple(applied),
+        mode=mode,
+        loading=loading,
+    )
+
+
+def design_from_bearings(
+    geom: ArrayGeometry,
+    look,
+    nulls=(),
+    *,
+    freq_hz: float = DEFAULT_DESIGN_FREQ_HZ,
+    mode: str = MODE_SUPERDIRECTIVE,
+    loading: float = 0.05,
+    array_id: str = "array",
+    label: str = "target",
+) -> BeamDesign:
+    """Design a single beam toward a **bearing** and null other bearings — the
+    coverage-area feature without needing a room/zone :class:`SystemConfig`.
+
+    Ideal for a **desk/table array**: say "listen toward this azimuth, reject
+    those" directly. ``look`` and each entry of ``nulls`` is a :class:`Direction`
+    or an ``(azimuth_deg, off_nadir_deg)`` tuple (see :func:`bearing_direction`,
+    which defaults off-nadir to horizontal). ``mode`` is ``"superdirective"``
+    (default) or ``"delaysum"``. Returns a one-beam :class:`BeamDesign` carrying
+    the same verification numbers as :func:`design_zone_beams`, ready for
+    :meth:`conf_pipeline_control.live.LiveBeamController.apply_design`.
+
+    Nulls beyond the array's budget (``n_active − 1``) are dropped with a note; a
+    null coinciding with the look direction falls back to no nulls (you cannot
+    null an area you are also steering at)."""
+    look_dir = _coerce_direction(look)
+    null_dirs = [_coerce_direction(n) for n in nulls]
+    return _design_from_directions(
+        geom, [look_dir], null_dirs, freq_hz=freq_hz, mode=mode, loading=loading, array_id=array_id
+    )
+
+
+def design_multi_bearings(
+    geom: ArrayGeometry,
+    looks,
+    nulls=(),
+    *,
+    freq_hz: float = DEFAULT_DESIGN_FREQ_HZ,
+    mode: str = MODE_SUPERDIRECTIVE,
+    loading: float = 0.05,
+    array_id: str = "array",
+) -> BeamDesign:
+    """Multi-look version of :func:`design_from_bearings`: steer one beam at
+    **each** of ``looks`` while nulling **each** of ``nulls`` (one shared null
+    set). The live runtime sums the per-look beams into a single mixed output, so
+    this captures several in-area talkers at once and rejects the out-of-area
+    ones. Used by :mod:`conf_pipeline_control.autosteer` to turn the current DOA
+    detections into a live beam. ``looks``/``nulls`` are :class:`Direction`\\ s or
+    ``(azimuth_deg, off_nadir_deg)`` tuples. Empty ``looks`` ⇒ an empty design."""
+    look_dirs = [_coerce_direction(d) for d in looks]
+    null_dirs = [_coerce_direction(d) for d in nulls]
+    return _design_from_directions(
+        geom, look_dirs, null_dirs, freq_hz=freq_hz, mode=mode, loading=loading, array_id=array_id
+    )
+
+
 def design_zone_beams(
     config,
     array_id: str,

@@ -827,7 +827,7 @@ class Canvas(QWidget):
         elif hit and hit["kind"] == "talker":
             menu.addAction("Edit talker", lambda: self._ctx_select(hit))
             menu.addAction("Delete talker", lambda: self._ctx_delete({"kind": "talker", "id": hit["id"]}))
-        elif hit and hit["kind"] in ("zone", "zone-resize"):
+        elif hit and hit["kind"] in ("zone-move", "zone-resize"):
             menu.addAction("Edit zone", lambda: self._ctx_select({"kind": "zone", "array_id": hit["array_id"], "zone_id": hit["zone_id"]}))
             menu.addAction("Delete zone", lambda: self._ctx_delete({"kind": "zone", "array_id": hit["array_id"], "zone_id": hit["zone_id"]}))
         else:

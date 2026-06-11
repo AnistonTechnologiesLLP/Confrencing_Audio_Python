@@ -47,7 +47,7 @@ conf_pipeline_control/ host-side array-microphone control (optional [control] ex
   octovox_bridge.py   zones → azimuths + HTTP client to the OCTOVOX clean server
   octovox_monitor.py  near-live cleaned monitor (rolling chunk → clean → playback)
   ab_test.py          A/B harness: record → beamform N ways → WAVs + dB report
-tests/                pytest suite (223 tests)
+tests/                pytest suite (231 tests; incl. headless GUI smoke)
 run_gui.py            launcher
 ```
 
@@ -256,7 +256,8 @@ the same JSON as before (so existing files and the TS version are unaffected).
 
   Validation flags an empty group or a dangling device/array/zone reference
   (`CONTROL_MUTE_GROUP_INVALID`). The design report gains **Coverage areas** and
-  **Mute groups** sections.
+  **Mute groups** sections, and the GUI's **Routing** tab has a **Mute groups**
+  editor (create over the mute-capable mics, toggle mute, remove).
 
 ## Live array-microphone control (1.11.0)
 
