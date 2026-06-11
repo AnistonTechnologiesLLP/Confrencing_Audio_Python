@@ -273,6 +273,113 @@ def beam_pattern_azimuth(
 
 
 # --------------------------------------------------------------------------- #
+# Lobe analysis — where the beam picks up besides the target
+# --------------------------------------------------------------------------- #
+@dataclass(frozen=True)
+class LobeReport:
+    """Structure of a beam's azimuth pattern at the target's elevation.
+
+    A beam has one **main lobe** (toward the target) plus **side lobes** (smaller
+    sensitivity peaks elsewhere). A side lobe within ``grating_threshold_db`` of
+    the main lobe is a **grating lobe** — a person there is picked up almost as
+    loudly as the target (spatial aliasing; happens on a sparse array at high
+    frequency). ``side_lobes`` / ``grating_lobes`` are ``(azimuth_deg, level_db)``
+    with level in dB **relative to the main lobe** (so ≤ 0)."""
+
+    main_az_deg: float
+    beamwidth_3db_deg: float          # −3 dB main-lobe width
+    n_lobes: int                      # 1 main + side lobes
+    side_lobes: tuple                 # ((az, level_db re main), …) strongest first
+    peak_sidelobe_db: float           # worst off-target leak (re main)
+    grating_lobes: tuple              # side lobes within grating_threshold of main
+    off_nadir_deg: float
+    freq_hz: float
+
+
+def analyze_lobes(
+    weights: list[Complex],
+    geom: ArrayGeometry,
+    freq_hz: float,
+    *,
+    off_nadir_deg: float = 60.0,
+    steps: int = 720,
+    grating_threshold_db: float = -3.0,
+    sidelobe_floor_db: float = -25.0,
+    min_sep_deg: float = 8.0,
+) -> LobeReport:
+    """Count and locate a beam's lobes (azimuth slice at ``off_nadir_deg``).
+
+    ``sidelobe_floor_db`` ignores ripples weaker than this (re the main lobe);
+    ``grating_threshold_db`` flags side lobes this close to the main as grating
+    lobes (a real off-target pickup problem)."""
+    pat = beam_pattern_azimuth(weights, geom, freq_hz, off_nadir_deg=off_nadir_deg, steps=steps)
+    az = [p[0] for p in pat]
+    g = [p[1] for p in pat]
+    n = len(g)
+    main_i = max(range(n), key=lambda i: g[i])
+    main_db, main_az = g[main_i], az[main_i]
+    rel = [x - main_db for x in g]                       # dB re main (main = 0)
+    step_deg = 360.0 / steps
+
+    # −3 dB main-lobe width
+    left = 0
+    while left < n and rel[(main_i - left) % n] > -3.0:
+        left += 1
+    right = 0
+    while right < n and rel[(main_i + right) % n] > -3.0:
+        right += 1
+    beamwidth = (left + right) * step_deg
+
+    # local maxima (circular) → side lobes away from the main lobe, above the floor
+    peaks = [i for i in range(n) if rel[i] >= rel[(i - 1) % n] and rel[i] > rel[(i + 1) % n]]
+    side = []
+    for i in peaks:
+        d = min(abs(az[i] - main_az), 360.0 - abs(az[i] - main_az))
+        if d < max(min_sep_deg, beamwidth / 2.0):
+            continue                                     # part of the main lobe
+        if rel[i] < sidelobe_floor_db:
+            continue                                     # negligible ripple
+        side.append((az[i], rel[i]))
+    side.sort(key=lambda s: -s[1])
+    deduped = []
+    for a, lv in side:
+        if all(min(abs(a - a2), 360.0 - abs(a - a2)) >= min_sep_deg for a2, _ in deduped):
+            deduped.append((a, lv))
+    side = deduped
+    grating = tuple((a, lv) for a, lv in side if lv >= grating_threshold_db)
+    psl = max((lv for _a, lv in side), default=RESPONSE_FLOOR_DB)
+    return LobeReport(
+        main_az_deg=main_az,
+        beamwidth_3db_deg=beamwidth,
+        n_lobes=1 + len(side),
+        side_lobes=tuple(side),
+        peak_sidelobe_db=psl,
+        grating_lobes=grating,
+        off_nadir_deg=off_nadir_deg,
+        freq_hz=freq_hz,
+    )
+
+
+def talker_leakage_db(config, array_id, geom, weights, freq_hz) -> list:
+    """Per-placed-talker pickup level (dB, unity = 0) for a beam — i.e. how loudly
+    each person is currently captured. The target ≈ 0 dB; everyone else should be
+    well below. A high value for an out-of-area person means they leak through a
+    side/grating lobe. Returns ``[(talker_id, label, gain_db, in_pickup), …]``."""
+    from conf_pipeline import is_pickup_zone, point_in_shape  # noqa
+    from .steering import look_direction
+
+    dev = next((d for d in config.devices if d.id == array_id), None)
+    pickup_shapes = [z.shape for z in getattr(dev, "zones", []) if is_pickup_zone(z)] if dev else []
+    out = []
+    for t in config.talkers:
+        d = look_direction(config, array_id, t.position)
+        gain = response_db(weights, geom, d.unit, freq_hz)
+        in_pickup = any(point_in_shape(t.position, s) for s in pickup_shapes)
+        out.append((t.id, t.label, gain, in_pickup))
+    return out
+
+
+# --------------------------------------------------------------------------- #
 # Zone-driven design (the app-facing entry point)
 # --------------------------------------------------------------------------- #
 @dataclass(frozen=True)
@@ -288,6 +395,10 @@ class ZoneBeam:
     di_db: float                     # directivity index (gain vs diffuse background)
     exclusion_atten_db: tuple[float, ...]  # gain at each exclusion direction (≤ 0 = good)
     nulled: bool                     # True if exclusion nulls were applied
+    n_lobes: int = 1                 # main + side lobes
+    peak_sidelobe_db: float = RESPONSE_FLOOR_DB   # worst off-target leak (re main)
+    n_grating: int = 0               # grating lobes (near-full off-target pickup)
+    n_nulls: int = 0                 # total nulls applied (exclusions + out-of-zone talkers)
     note: str = ""
 
 
@@ -303,7 +414,8 @@ class BeamDesign:
     geometry: ArrayGeometry
     beams: tuple[ZoneBeam, ...]
     exclusion_labels: tuple[str, ...]
-    exclusion_dirs: tuple[Direction, ...] = ()   # null directions (for the live runtime)
+    exclusion_dirs: tuple[Direction, ...] = ()   # exclusion-zone directions (for reporting)
+    null_dirs: tuple[Direction, ...] = ()        # ALL nulls applied (exclusions + out-of-zone talkers)
     mode: str = MODE_SUPERDIRECTIVE
     loading: float = 0.05                        # diagonal loading (superdirective)
 
@@ -321,13 +433,175 @@ class BeamDesign:
                 f"  • {b.label or b.zone_id}: pickup {b.pickup_gain_db:+.1f} dB, "
                 f"directivity {b.di_db:+.1f} dB, WNG {b.wng_db:+.1f} dB"
             )
+            side = b.n_lobes - 1
+            line += f"; lobes: 1 main + {side} side (peak {b.peak_sidelobe_db:+.0f} dB)"
+            if b.n_nulls:
+                line += f", {b.n_nulls} null(s)"
             if b.exclusion_atten_db:
                 worst = max(b.exclusion_atten_db)  # closest to 0 = least suppressed
-                line += f", worst excluded-area leak {worst:+.1f} dB"
+                line += f", worst excluded leak {worst:+.0f} dB"
+            if b.n_grating:
+                line += f"  ⚠ {b.n_grating} grating lobe(s) — off-target voices leak at near-full level"
             if b.note:
                 line += f"  [{b.note}]"
             lines.append(line)
         return "\n".join(lines)
+
+
+def bearing_direction(
+    azimuth_deg: float,
+    off_nadir_deg: float = 90.0,
+    *,
+    distance_m: float = 1.0,
+    label: str = "",
+) -> Direction:
+    """A :class:`Direction` from a compass ``azimuth_deg`` (0° = +Y, clockwise)
+    and ``off_nadir_deg`` (0° = straight down, **90° = horizontal**).
+
+    The 90° default suits a **desk/table array** whose capsules sit in a
+    horizontal plane and whose talkers are across the table at roughly the same
+    height (a near-horizontal look). For a ceiling array looking down, use a
+    smaller off-nadir. ``distance_m`` is informational (plane-wave design)."""
+    return Direction(
+        unit=_unit_from_az_offnadir(azimuth_deg, off_nadir_deg),
+        azimuth_deg=azimuth_deg,
+        off_nadir_deg=off_nadir_deg,
+        distance_m=distance_m,
+        label=label,
+    )
+
+
+def _coerce_direction(d) -> Direction:
+    """Accept a :class:`Direction` or an ``(azimuth_deg, off_nadir_deg)`` tuple."""
+    if isinstance(d, Direction):
+        return d
+    try:
+        az, off = d
+    except (TypeError, ValueError) as exc:
+        raise TypeError(
+            "expected a Direction or an (azimuth_deg, off_nadir_deg) tuple"
+        ) from exc
+    return bearing_direction(float(az), float(off))
+
+
+def _beam_for_look(geom, look_dir, applied_nulls, freq_hz, mode, loading, *, label, base_note):
+    """Build one verified :class:`ZoneBeam` toward ``look_dir`` nulling
+    ``applied_nulls`` (shared across a multi-look design)."""
+    def _weights(use_nulls):
+        if mode == MODE_SUPERDIRECTIVE:
+            return superdirective_weights(geom, look_dir, use_nulls, freq_hz, loading=loading)
+        return (
+            lcmv_weights(geom, look_dir, use_nulls, freq_hz)
+            if use_nulls
+            else delay_and_sum_weights(geom, look_dir, freq_hz)
+        )
+
+    note = base_note
+    use_nulls = applied_nulls
+    try:
+        w = _weights(use_nulls)
+    except ValueError as exc:
+        use_nulls = []
+        w = _weights([])
+        note = f"no nulls: {exc}"
+
+    atten = tuple(response_db(w, geom, d.unit, freq_hz) for d in applied_nulls)
+    lobes = analyze_lobes(w, geom, freq_hz, off_nadir_deg=look_dir.off_nadir_deg)
+    return ZoneBeam(
+        zone_id="bearing",
+        label=look_dir.label or label,
+        weights=tuple(w),
+        look=look_dir,
+        pickup_gain_db=response_db(w, geom, look_dir.unit, freq_hz),
+        wng_db=white_noise_gain_db(w, geom, look_dir, freq_hz),
+        di_db=directivity_index_db(w, geom, look_dir, freq_hz),
+        exclusion_atten_db=atten,
+        nulled=bool(use_nulls),
+        n_lobes=lobes.n_lobes,
+        peak_sidelobe_db=lobes.peak_sidelobe_db,
+        n_grating=len(lobes.grating_lobes),
+        n_nulls=len(use_nulls),
+        note=note,
+    )
+
+
+def _design_from_directions(geom, look_dirs, null_dirs, *, freq_hz, mode, loading, array_id):
+    """Shared core: one shared null set, one beam per look direction."""
+    budget = max(0, geom.n_active - 1)
+    applied = list(null_dirs)[:budget]
+    dropped = len(null_dirs) - len(applied)
+    base_note = f"null budget {budget}: {dropped} dropped" if dropped else ""
+    beams = tuple(
+        _beam_for_look(geom, ld, applied, freq_hz, mode, loading, label="target", base_note=base_note)
+        for ld in look_dirs
+    )
+    return BeamDesign(
+        array_id=array_id,
+        freq_hz=freq_hz,
+        geometry=geom,
+        beams=beams,
+        exclusion_labels=tuple(d.label for d in applied),
+        exclusion_dirs=tuple(applied),
+        null_dirs=tuple(applied),
+        mode=mode,
+        loading=loading,
+    )
+
+
+def design_from_bearings(
+    geom: ArrayGeometry,
+    look,
+    nulls=(),
+    *,
+    freq_hz: float = DEFAULT_DESIGN_FREQ_HZ,
+    mode: str = MODE_SUPERDIRECTIVE,
+    loading: float = 0.05,
+    array_id: str = "array",
+    label: str = "target",
+) -> BeamDesign:
+    """Design a single beam toward a **bearing** and null other bearings — the
+    coverage-area feature without needing a room/zone :class:`SystemConfig`.
+
+    Ideal for a **desk/table array**: say "listen toward this azimuth, reject
+    those" directly. ``look`` and each entry of ``nulls`` is a :class:`Direction`
+    or an ``(azimuth_deg, off_nadir_deg)`` tuple (see :func:`bearing_direction`,
+    which defaults off-nadir to horizontal). ``mode`` is ``"superdirective"``
+    (default) or ``"delaysum"``. Returns a one-beam :class:`BeamDesign` carrying
+    the same verification numbers as :func:`design_zone_beams`, ready for
+    :meth:`conf_pipeline_control.live.LiveBeamController.apply_design`.
+
+    Nulls beyond the array's budget (``n_active − 1``) are dropped with a note; a
+    null coinciding with the look direction falls back to no nulls (you cannot
+    null an area you are also steering at)."""
+    look_dir = _coerce_direction(look)
+    null_dirs = [_coerce_direction(n) for n in nulls]
+    return _design_from_directions(
+        geom, [look_dir], null_dirs, freq_hz=freq_hz, mode=mode, loading=loading, array_id=array_id
+    )
+
+
+def design_multi_bearings(
+    geom: ArrayGeometry,
+    looks,
+    nulls=(),
+    *,
+    freq_hz: float = DEFAULT_DESIGN_FREQ_HZ,
+    mode: str = MODE_SUPERDIRECTIVE,
+    loading: float = 0.05,
+    array_id: str = "array",
+) -> BeamDesign:
+    """Multi-look version of :func:`design_from_bearings`: steer one beam at
+    **each** of ``looks`` while nulling **each** of ``nulls`` (one shared null
+    set). The live runtime sums the per-look beams into a single mixed output, so
+    this captures several in-area talkers at once and rejects the out-of-area
+    ones. Used by :mod:`conf_pipeline_control.autosteer` to turn the current DOA
+    detections into a live beam. ``looks``/``nulls`` are :class:`Direction`\\ s or
+    ``(azimuth_deg, off_nadir_deg)`` tuples. Empty ``looks`` ⇒ an empty design."""
+    look_dirs = [_coerce_direction(d) for d in looks]
+    null_dirs = [_coerce_direction(d) for d in nulls]
+    return _design_from_directions(
+        geom, look_dirs, null_dirs, freq_hz=freq_hz, mode=mode, loading=loading, array_id=array_id
+    )
 
 
 def design_zone_beams(
@@ -339,16 +613,20 @@ def design_zone_beams(
     null_exclusions: bool = True,
     mode: str = MODE_SUPERDIRECTIVE,
     loading: float = 0.05,
+    suppress_outside_talkers: bool = False,
 ) -> BeamDesign:
     """Design one beam per pickup zone on ``array_id``, nulling exclusion zones.
 
     ``mode`` is ``"superdirective"`` (default — rejects diffuse background far
     better on a small array) or ``"delaysum"``. ``loading`` is the superdirective
-    diagonal loading (robustness vs directivity). Pure: reads the config's
-    zones/positions, returns a :class:`BeamDesign`. Falls back to a no-null beam
-    (with a note) for any zone whose nulls are infeasible.
+    diagonal loading (robustness vs directivity). When ``suppress_outside_talkers``
+    is set, every placed talker that is **not** inside a pickup zone is added as a
+    null too — so people outside the pickup area are actively subtracted (up to the
+    array's null budget, ``n_active − 1``). Pure: returns a :class:`BeamDesign`;
+    falls back to fewer nulls (with a note) when the budget is exceeded.
     """
-    from .steering import exclusion_directions, pickup_directions  # local: avoid cycle at import
+    from conf_pipeline import is_pickup_zone, point_in_shape  # noqa
+    from .steering import exclusion_directions, look_direction, pickup_directions
 
     def _weights(look, use_nulls):
         if mode == MODE_SUPERDIRECTIVE:
@@ -360,18 +638,32 @@ def design_zone_beams(
     excl_dirs = [d for _z, d in exclusions]
     excl_labels = tuple(z.label or z.id for z, _d in exclusions)
 
+    # talkers outside every pickup zone → extra nulls ("subtract out-of-area voices")
+    outside_dirs = []
+    if suppress_outside_talkers:
+        dev = next((d for d in config.devices if d.id == array_id), None)
+        pickup_shapes = [z.shape for z in getattr(dev, "zones", []) if is_pickup_zone(z)] if dev else []
+        for t in config.talkers:
+            if not any(point_in_shape(t.position, s) for s in pickup_shapes):
+                outside_dirs.append(look_direction(config, array_id, t.position))
+
+    budget = max(0, geom.n_active - 1)
+    wanted = (excl_dirs if null_exclusions else []) + outside_dirs
+    applied_nulls = wanted[:budget]                 # same null set for every pickup beam
+    dropped = len(wanted) - len(applied_nulls)
+
     beams: list[ZoneBeam] = []
     for zone, look in pickups:
-        note = ""
-        use_nulls = excl_dirs if (null_exclusions and excl_dirs) else []
+        note = f"null budget {budget}: {dropped} dropped" if dropped else ""
+        use_nulls = applied_nulls
         try:
             w = _weights(look, use_nulls)
-            nulled = bool(use_nulls)
         except ValueError as exc:
+            use_nulls = []
             w = _weights(look, [])
-            nulled = False
             note = f"no nulls: {exc}"
         atten = tuple(response_db(w, geom, d.unit, freq_hz) for d in excl_dirs)
+        lobes = analyze_lobes(w, geom, freq_hz, off_nadir_deg=look.off_nadir_deg)
         beams.append(
             ZoneBeam(
                 zone_id=zone.id,
@@ -382,7 +674,11 @@ def design_zone_beams(
                 wng_db=white_noise_gain_db(w, geom, look, freq_hz),
                 di_db=directivity_index_db(w, geom, look, freq_hz),
                 exclusion_atten_db=atten,
-                nulled=nulled,
+                nulled=bool(use_nulls),
+                n_lobes=lobes.n_lobes,
+                peak_sidelobe_db=lobes.peak_sidelobe_db,
+                n_grating=len(lobes.grating_lobes),
+                n_nulls=len(use_nulls),
                 note=note,
             )
         )
@@ -393,6 +689,7 @@ def design_zone_beams(
         beams=tuple(beams),
         exclusion_labels=excl_labels,
         exclusion_dirs=tuple(excl_dirs),
+        null_dirs=tuple(applied_nulls),
         mode=mode,
         loading=loading,
     )

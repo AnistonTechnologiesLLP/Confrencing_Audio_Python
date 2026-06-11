@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import math
 import queue
+import threading
 import wave
 from typing import Optional
 
@@ -57,6 +58,7 @@ class LiveBeamController(MicController):
         record_path: Optional[str] = None,
         monitor: bool = False,
         output_device: Optional[int] = None,
+        track_covariance: bool = False,
     ):
         super().__init__(geometry, n_channels=geometry.n_channels)
         self.device = device
@@ -64,6 +66,13 @@ class LiveBeamController(MicController):
         self.record_path = record_path
         self.monitor = monitor                 # play the beamformed output live
         self.output_device = output_device     # None → system default output
+        # opt-in spatial-covariance tap for DOA / auto-steer (off ⇒ zero overhead)
+        self.track_covariance = track_covariance
+        self._cov = None           # EMA of band covariance, (n_band, M, M) complex
+        self._cov_freqs = None     # band bin frequencies (n_band,)
+        self._cov_band = None      # band bin indices into the rfft axis
+        self._cov_alpha = 0.05     # EMA rate (~230 ms at 44.1 kHz / 512 hop)
+        self._cov_lock = threading.Lock()
         self._sd = None
         self._np = None
         self._stream = None
@@ -92,7 +101,8 @@ class LiveBeamController(MicController):
         freqs = np.fft.rfftfreq(_FRAME, d=1.0 / self.samplerate)  # (n_bins,)
 
         looks = [b.look for b in self._design.beams]
-        nulls = list(self._design.exclusion_dirs)
+        # ALL nulls applied in the design (exclusion zones + out-of-zone talkers)
+        nulls = list(self._design.null_dirs or self._design.exclusion_dirs)
         active = np.array(geom.active_indices(), dtype=int)   # capsules in use
         na = max(1, len(active))
         superd = self._design.mode == "superdirective"
@@ -163,6 +173,15 @@ class LiveBeamController(MicController):
         self._inbuf = np.zeros((_FRAME, self.n_channels), dtype=float)
         self._ola = np.zeros(_FRAME, dtype=float)
         self._compute_weights()
+
+        if self.track_covariance:
+            from .doa import DEFAULT_F_HI_HZ, DEFAULT_F_LO_HZ, band_indices
+
+            freqs_full = np.fft.rfftfreq(_FRAME, d=1.0 / self.samplerate)
+            self._cov_band = band_indices(freqs_full, DEFAULT_F_LO_HZ, DEFAULT_F_HI_HZ)
+            self._cov_freqs = freqs_full[self._cov_band]
+            with self._cov_lock:
+                self._cov = np.zeros((len(self._cov_band), self.n_channels, self.n_channels), dtype=complex)
 
         if self.record_path:
             self._wav = wave.open(self.record_path, "wb")
@@ -243,6 +262,15 @@ class LiveBeamController(MicController):
 
         block = self._inbuf * self._win[:, None]
         X = np.fft.rfft(block, axis=0)                 # (n_bins, M)
+
+        if self.track_covariance and self._cov is not None:
+            xb = X[self._cov_band, :]                  # (n_band, M) band spectrum
+            inst = xb[:, :, None] * np.conj(xb[:, None, :])  # (n_band, M, M) outer
+            a = self._cov_alpha
+            with self._cov_lock:
+                self._cov *= (1.0 - a)
+                self._cov += a * inst
+
         if self._weights is None:
             Y = X.mean(axis=1)                         # passthrough: average capsules
         else:
@@ -296,3 +324,17 @@ class LiveBeamController(MicController):
 
     def _raw_level(self) -> float:
         return self._level
+
+    def snapshot_covariance(self):
+        """Thread-safe copy of the current band covariance for DOA.
+
+        Returns ``(cov, freqs)`` — ``cov`` is ``(n_band, M, M)`` complex, ``freqs``
+        the band bin frequencies — or ``(None, None)`` if covariance tracking is
+        off or the stream hasn't produced a frame yet. Safe to call from a control
+        thread while the audio thread updates the estimate."""
+        if not self.track_covariance:
+            return None, None
+        with self._cov_lock:
+            if self._cov is None:
+                return None, None
+            return self._cov.copy(), self._cov_freqs

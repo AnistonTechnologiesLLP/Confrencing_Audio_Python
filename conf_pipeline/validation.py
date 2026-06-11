@@ -12,10 +12,14 @@ from .model import (
     MAX_MANUAL_LOBES,
     MAX_ZONES_PER_ARRAY,
     NLP_LEVELS,
+    ZONE_GAIN_DB_MAX,
+    ZONE_GAIN_DB_MIN,
     RectShape,
     SystemConfig,
+    find_device,
     find_port,
     is_mic_device,
+    is_pickup_zone,
     is_processor,
 )
 from .profiles import device_capabilities, get_device_profile
@@ -33,6 +37,10 @@ CODE_DESCRIPTIONS: dict[str, str] = {
     "AEC_REFERENCE_EMPTY": "AEC reference bus resolves to zero source signals.",
     "COVERAGE_ZONE_LIMIT": "More than 8 coverage zones on an array.",
     "COVERAGE_ZONE_INVALID": "Zone has invalid type/always_on pairing or degenerate geometry.",
+    "COVERAGE_CHANNEL_INVALID": "Coverage-area output channel is out of range or assigned to an exclusion zone.",
+    "COVERAGE_CHANNEL_DUPLICATE": "Two coverage areas on the same array share an output channel.",
+    "COVERAGE_GAIN_INVALID": "Coverage-area gain trim is out of range.",
+    "CONTROL_MUTE_GROUP_INVALID": "A mute group references a missing device or coverage area, or is empty.",
     "MANUAL_LOBE_LIMIT": "Manual mode with more than 8 pickup lobes.",
     "AUTOMIXER_INVALID": "Automixer value out of range or output bus unresolved.",
     "DEVICE_PROFILE_UNKNOWN": "Device references a profile id not in the catalog.",
@@ -77,6 +85,7 @@ def validate(config: SystemConfig) -> ValidationResult:
     _validate_profiles_and_blocks(config, add)
     _validate_commissioning(config, add)
     _validate_naming(config, add)
+    _validate_control(config, add)
 
     errors = [i for i in issues if i.severity == "error"]
     warnings = [i for i in issues if i.severity == "warning"]
@@ -116,6 +125,7 @@ def _validate_coverage(config: SystemConfig, add: AddIssue) -> None:
         lobe_count = sum(1 for z in device.zones if z.type != "exclusion")
         if device.coverage_mode == "manual" and lobe_count > MAX_MANUAL_LOBES:
             add("error", "MANUAL_LOBE_LIMIT", f'Array "{device.id}" in manual mode has {lobe_count} pickup lobes; max is {MAX_MANUAL_LOBES}.', [device.id])
+        channels_seen: dict[int, str] = {}
         for zone in device.zones:
             expected = zone.type == "dedicated"
             if zone.always_on != expected:
@@ -126,6 +136,19 @@ def _validate_coverage(config: SystemConfig, add: AddIssue) -> None:
                 bad = len(zone.shape.points) < 3
             if bad:
                 add("error", "COVERAGE_ZONE_INVALID", f'Zone "{zone.id}" on array "{device.id}" has degenerate geometry.', [device.id, zone.id])
+            # Per-area output channel + gain (v1.12.0).
+            ch = zone.output_channel
+            if ch is not None:
+                if not is_pickup_zone(zone):
+                    add("error", "COVERAGE_CHANNEL_INVALID", f'Exclusion zone "{zone.id}" on array "{device.id}" cannot carry an output channel.', [device.id, zone.id])
+                elif not (1 <= ch <= MAX_ZONES_PER_ARRAY):
+                    add("error", "COVERAGE_CHANNEL_INVALID", f'Zone "{zone.id}" on array "{device.id}" has output channel {ch}, out of range 1..{MAX_ZONES_PER_ARRAY}.', [device.id, zone.id])
+                elif ch in channels_seen:
+                    add("error", "COVERAGE_CHANNEL_DUPLICATE", f'Array "{device.id}" assigns output channel {ch} to both "{channels_seen[ch]}" and "{zone.id}".', [device.id, zone.id, channels_seen[ch]])
+                else:
+                    channels_seen[ch] = zone.id
+            if zone.gain_db is not None and not (ZONE_GAIN_DB_MIN <= zone.gain_db <= ZONE_GAIN_DB_MAX):
+                add("error", "COVERAGE_GAIN_INVALID", f'Zone "{zone.id}" on array "{device.id}" gain {zone.gain_db} dB is out of range [{ZONE_GAIN_DB_MIN}, {ZONE_GAIN_DB_MAX}].', [device.id, zone.id])
 
 
 def _validate_aec(config: SystemConfig, add: AddIssue) -> None:
@@ -215,6 +238,26 @@ def _validate_commissioning(config: SystemConfig, add: AddIssue) -> None:
         blocks = getattr(device, "dsp_blocks", []) or []
         if blocks and not any(b.kind in ("gain", "mute") for b in blocks):
             add("warning", "DSP_CHAIN_NO_LEVEL", f'Device "{device.id}" has a DSP chain with no gain or mute stage.', [device.id])
+
+
+def _validate_control(config: SystemConfig, add: AddIssue) -> None:
+    if config.control is None:
+        return
+    for group in config.control.mute_groups:
+        if not group.device_ids and not group.zone_refs:
+            add("error", "CONTROL_MUTE_GROUP_INVALID", f'Mute group "{group.id}" is empty (no devices or coverage areas).', [group.id])
+        for did in group.device_ids:
+            dev = find_device(config, did)
+            if dev is None:
+                add("error", "CONTROL_MUTE_GROUP_INVALID", f'Mute group "{group.id}" references missing device "{did}".', [group.id, did])
+            elif not device_capabilities(dev).mute:
+                add("warning", "MUTE_LINK_UNSUPPORTED", f'Mute group "{group.id}" includes device "{did}" which has no mute capability.', [group.id, did])
+        for ref in group.zone_refs:
+            arr = find_device(config, ref.array_id)
+            if arr is None or arr.type != "microphoneArray":
+                add("error", "CONTROL_MUTE_GROUP_INVALID", f'Mute group "{group.id}" references missing array "{ref.array_id}".', [group.id, ref.array_id])
+            elif not any(z.id == ref.zone_id for z in arr.zones):  # type: ignore[attr-defined]
+                add("error", "CONTROL_MUTE_GROUP_INVALID", f'Mute group "{group.id}" references missing zone "{ref.zone_id}" on array "{ref.array_id}".', [group.id, ref.array_id, ref.zone_id])
 
 
 def _validate_naming(config: SystemConfig, add: AddIssue) -> None:

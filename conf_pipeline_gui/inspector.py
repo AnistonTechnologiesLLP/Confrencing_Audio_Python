@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSlider,
+    QSpinBox,
     QTabWidget,
     QVBoxLayout,
     QWidget,
@@ -82,6 +83,25 @@ class _ProbeWorker(QRunnable):
         except Exception as exc:
             self.signals.failed.emit(str(exc))
 
+
+class _ABWorker(QRunnable):
+    """Record a clip and run the A/B beamformer comparison off the GUI thread."""
+
+    def __init__(self, config, array_id, geom, device, sr, seconds, out_dir, freq):
+        super().__init__()
+        self._args = (config, array_id, geom, device, sr, seconds, out_dir, freq)
+        self.signals = _ProbeSignals()  # done(object) / failed(str)
+
+    def run(self):  # noqa: D401 (Qt override)
+        try:
+            config, array_id, geom, device, sr, seconds, out_dir, freq = self._args
+            y8 = cc.record_clip(device, sr, seconds, channels=geom.n_channels)
+            report = cc.ab_compare(config, array_id, geom, y8, sr, freq_hz=freq)
+            paths = cc.save_ab_report(report, out_dir)
+            self.signals.done.emit((report.summary, out_dir, len(paths)))
+        except Exception as exc:
+            self.signals.failed.emit(str(exc))
+
 DEVICE_TYPES = [
     ("Processor (DSP)", "processor"),
     ("Microphone array", "microphoneArray"),
@@ -124,6 +144,17 @@ class NoWheelDoubleSpinBox(QDoubleSpinBox):
         event.ignore()
 
 
+class NoWheelSpinBox(QSpinBox):
+    """Integer spin box that ignores the mouse wheel (see NoWheelDoubleSpinBox)."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.setFocusPolicy(Qt.StrongFocus)
+
+    def wheelEvent(self, event):  # noqa: N802 (Qt override)
+        event.ignore()
+
+
 class Inspector(QWidget):
     def __init__(self, state: AppState):
         super().__init__()
@@ -137,14 +168,29 @@ class Inspector(QWidget):
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+
+        # Status banner: live validation state + the single most useful next step,
+        # clickable to jump to the relevant tab. Always visible above the tabs.
+        self.banner = QLabel("")
+        self.banner.setProperty("inspectorBanner", "true")
+        self.banner.setWordWrap(True)
+        self.banner.setContentsMargins(12, 8, 12, 8)
+        self.banner.setTextInteractionFlags(Qt.LinksAccessibleByMouse)
+        self.banner.linkActivated.connect(self._banner_link)
+        root.addWidget(self.banner)
+
         self.tabs = QTabWidget()
-        root.addWidget(self.tabs)
+        root.addWidget(self.tabs, 1)
 
         # ---- live array-control state (host-side beamforming) ----
         self._live_ctl = None            # MicController while connected
         self._live_design = None         # last cc.BeamDesign built from zones
         self._live_dev_rates = {}        # device index -> native samplerate
         self._probe_workers = set()      # strong refs to capsule-probe runnables
+        self._ab_workers = set()         # strong refs to A/B-test runnables
+        self._clean_monitor = None       # CleanMonitor while OCTOVOX cleaning is live
+        self._autosteer = None           # AutoSteerController while auto-following talkers
 
         self.tabs.addTab(self._scroll(self._build_tab()), "Build")
         self.tabs.addTab(self._scroll(self._dsp_tab()), "AEC / DSP")
@@ -272,8 +318,95 @@ class Inspector(QWidget):
         self.routing_view = QPlainTextEdit()
         self.routing_view.setReadOnly(True)
         self.routing_view.setFont(QFont("Consolas", 10))
-        lay.addWidget(self.routing_view)
+        lay.addWidget(self.routing_view, 1)
+
+        # ---- Mute groups (logic / control) ----
+        mg = QGroupBox("Mute groups")
+        mgl = QVBoxLayout(mg)
+        mgl.addWidget(QLabel("A named set of devices that mute together (Designer-style logic control)."))
+        self.mute_group_list = QListWidget()
+        self.mute_group_list.setMaximumHeight(120)
+        mgl.addWidget(self.mute_group_list)
+        row = QHBoxLayout()
+        self.mute_group_name = QLineEdit()
+        self.mute_group_name.setPlaceholderText("New group name…")
+        add_mg = QPushButton("+ Group from mute-capable mics")
+        add_mg.clicked.connect(self._add_mute_group)
+        row.addWidget(self.mute_group_name, 1)
+        row.addWidget(add_mg)
+        mgl.addLayout(row)
+        row2 = QHBoxLayout()
+        self.mute_group_toggle = QPushButton("Toggle mute")
+        self.mute_group_toggle.clicked.connect(self._toggle_selected_mute_group)
+        rm_mg = QPushButton("Remove")
+        rm_mg.clicked.connect(self._remove_selected_mute_group)
+        row2.addWidget(self.mute_group_toggle)
+        row2.addWidget(rm_mg)
+        row2.addStretch(1)
+        mgl.addLayout(row2)
+        lay.addWidget(mg)
         return w
+
+    # ---- mute-group actions ----
+    def _selected_mute_group_id(self):
+        it = self.mute_group_list.currentItem()
+        return it.data(Qt.UserRole) if it is not None else None
+
+    def _add_mute_group(self):
+        cfg = self.state.config
+        mics = [d for d in cfg.devices if cp.is_mic_device(d) and cp.device_capabilities(d).mute]
+        if not mics:
+            return self._toast("No mute-capable microphones to group.")
+        existing = cfg.control.mute_groups if cfg.control is not None else []
+        n = len(existing) + 1
+        ids = {g.id for g in existing}
+        gid = f"mg{n}"
+        while gid in ids:
+            n += 1
+            gid = f"mg{n}"
+        name = self.mute_group_name.text().strip() or f"Mute group {n}"
+        try:
+            grp = cp.create_mute_group(gid, name, device_ids=[m.id for m in mics])
+            self.state.set_config(cp.add_mute_group(cfg, grp))
+            self.mute_group_name.clear()
+            self._toast(f"Added “{name}” over {len(mics)} mic(s)")
+        except Exception as exc:
+            self._toast(str(exc))
+
+    def _toggle_selected_mute_group(self):
+        gid = self._selected_mute_group_id()
+        if gid is None or self.state.config.control is None:
+            return
+        grp = next((g for g in self.state.config.control.mute_groups if g.id == gid), None)
+        if grp is not None:
+            self.state.set_config(cp.set_mute_group_muted(self.state.config, gid, not grp.muted))
+
+    def _remove_selected_mute_group(self):
+        gid = self._selected_mute_group_id()
+        if gid is not None:
+            self.state.set_config(cp.remove_mute_group(self.state.config, gid))
+
+    def _refresh_mute_groups(self, cfg):
+        if not hasattr(self, "mute_group_list"):
+            return
+        prev = self._selected_mute_group_id()
+        self.mute_group_list.clear()
+        groups = cfg.control.mute_groups if cfg.control is not None else []
+        for g in groups:
+            members = len(g.device_ids) + len(g.zone_refs)
+            state = "🔇 muted" if g.muted else "🔊 unmuted"
+            it = QListWidgetItem(f"{g.label}  ·  {members} member(s) · {g.trigger} · {state}")
+            it.setData(Qt.UserRole, g.id)
+            self.mute_group_list.addItem(it)
+            if g.id == prev:
+                self.mute_group_list.setCurrentItem(it)
+        has = bool(groups)
+        self.mute_group_toggle.setEnabled(has)
+
+    def _toast(self, msg):
+        win = self.window()
+        if hasattr(win, "toast"):
+            win.toast(msg)
 
     def _issues_tab(self):
         w = QWidget()
@@ -338,6 +471,11 @@ class Inspector(QWidget):
         self.live_radius.setDecimals(3)
         self.live_radius.setValue(0.05)
         self.live_radius.setSuffix(" m")
+        self.live_radius.setToolTip(
+            "Capsule-circle radius of YOUR array. 0.05 m is a placeholder — set the "
+            "real radius (centre to a capsule). It sets the beamwidth and the DOA "
+            "resolution, so the number matters."
+        )
         gf.addRow("Capsule radius", self.live_radius)
         self.live_freq = NoWheelDoubleSpinBox()
         self.live_freq.setRange(200.0, 8000.0)
@@ -390,12 +528,96 @@ class Inspector(QWidget):
         rob_row.addWidget(self.live_robust, 1)
         rob_row.addWidget(self.live_robust_lbl)
         bf.addRow("Focus ↔ robust", rob_row)
+        self.live_suppress_outside = QCheckBox("Null talkers outside the pickup zone")
+        self.live_suppress_outside.setToolTip(
+            "Add every placed talker that is not inside a pickup zone as a beam null, "
+            "so out-of-area voices are actively subtracted (up to the array's null budget)."
+        )
+        self.live_suppress_outside.toggled.connect(
+            lambda *_a: None if self._refreshing else (self._live_design_from_zones() if self._live_design is not None else None)
+        )
+        bf.addRow("Out-of-zone", self.live_suppress_outside)
+        preset = QPushButton("Aggressive preset (low-noise studio mics)")
+        preset.setToolTip(
+            "Push the beam to maximum directivity. Safe here because your SBM100B mics "
+            "are 80 dBA SNR — the extra self-noise from aggressive superdirectivity stays "
+            "below audibility (would hiss on ordinary MEMS). Watch the WNG in the readout."
+        )
+        preset.clicked.connect(self._live_aggressive_preset)
+        bf.addRow("Preset", preset)
         lay.addWidget(bf_gb)
+
+        # --- auto-steer: detect talkers by direction and follow the ones in a sector ---
+        as_gb = QGroupBox("Auto-steer — follow talkers in a sector")
+        as_gb.setToolTip(
+            "Detect who is talking by direction (DOA) in real time and steer a beam at "
+            "each talker inside the coverage sector, nulling the ones outside. Best for "
+            "a desk array: it adapts as people talk in turn or move. Azimuth only — a "
+            "small array resolves bearing, not distance, so the area is an angular arc."
+        )
+        asf = QFormLayout(as_gb)
+        asf.setRowWrapPolicy(QFormLayout.WrapLongRows)
+        asf.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+        self.live_autosteer = QCheckBox("Enable (auto-detect & follow)")
+        self.live_autosteer.setToolTip("On Connect, follow detected talkers instead of using a fixed zone design.")
+        self.live_autosteer.toggled.connect(lambda *_a: None if self._refreshing else self._on_autosteer_toggled())
+        asf.addRow("Auto-steer", self.live_autosteer)
+        self.live_sector_center = NoWheelDoubleSpinBox()
+        self.live_sector_center.setRange(0.0, 359.0)
+        self.live_sector_center.setSingleStep(5.0)
+        self.live_sector_center.setDecimals(0)
+        self.live_sector_center.setValue(0.0)
+        self.live_sector_center.setSuffix("°")
+        asf.addRow("Sector centre", self.live_sector_center)
+        self.live_sector_width = NoWheelDoubleSpinBox()
+        self.live_sector_width.setRange(10.0, 360.0)
+        self.live_sector_width.setSingleStep(10.0)
+        self.live_sector_width.setDecimals(0)
+        self.live_sector_width.setValue(120.0)
+        self.live_sector_width.setSuffix("° wide")
+        self.live_sector_width.setToolTip("Full arc width (e.g. 120° = centre ±60°).")
+        asf.addRow("Sector width", self.live_sector_width)
+        self.live_front_offset = NoWheelDoubleSpinBox()
+        self.live_front_offset.setRange(-180.0, 180.0)
+        self.live_front_offset.setSingleStep(5.0)
+        self.live_front_offset.setDecimals(0)
+        self.live_front_offset.setValue(0.0)
+        self.live_front_offset.setSuffix("°")
+        self.live_front_offset.setToolTip("Rotate the array's azimuth-0 to your room/desk 'front'.")
+        asf.addRow("Front offset", self.live_front_offset)
+        self.live_max_talkers = NoWheelSpinBox()
+        self.live_max_talkers.setRange(1, 6)
+        self.live_max_talkers.setValue(3)
+        self.live_max_talkers.setToolTip("Max simultaneous talkers to track (resolution-limited on a small array).")
+        asf.addRow("Max talkers", self.live_max_talkers)
+        self.live_autosteer_gate = QCheckBox("Mute output when nobody is in the sector")
+        self.live_autosteer_gate.setChecked(True)
+        asf.addRow("Gate", self.live_autosteer_gate)
+        self.live_autosteer_view = QLabel("Connect with auto-steer enabled to see detected talkers.")
+        self.live_autosteer_view.setWordWrap(True)
+        self.live_autosteer_view.setFont(QFont("Consolas", 9))
+        asf.addRow(self.live_autosteer_view)
+        lay.addWidget(as_gb)
+        self._autosteer_widgets = (
+            self.live_sector_center, self.live_sector_width, self.live_front_offset,
+            self.live_max_talkers, self.live_autosteer_gate,
+        )
+        for _w in self._autosteer_widgets:
+            _w.setEnabled(False)                 # enabled when auto-steer is ticked
 
         design_btn = QPushButton("Design beam from zones")
         design_btn.setProperty("accent", "true")
         design_btn.clicked.connect(self._live_design_from_zones)
         lay.addWidget(design_btn)
+
+        self.live_ab_btn = QPushButton("A/B test — record & compare beamformers")
+        self.live_ab_btn.setToolTip(
+            "Record a clip from the array, process it omni / delay-sum / superdirective / "
+            "aggressive / nulled, and save mono WAVs + a dB report so you can hear and "
+            "measure the difference."
+        )
+        self.live_ab_btn.clicked.connect(self._live_ab_test)
+        lay.addWidget(self.live_ab_btn)
 
         self.live_design_view = QPlainTextEdit()
         self.live_design_view.setReadOnly(True)
@@ -425,6 +647,45 @@ class Inspector(QWidget):
         self.live_out_device = QComboBox()
         df.addRow("Output", self.live_out_device)
         lay.addWidget(dgb)
+
+        # --- clean via OCTOVOX (near-live cleaned monitor) ---
+        ov_gb = QGroupBox("Clean via OCTOVOX (near-live)")
+        ov_gb.setToolTip(
+            "Send rolling chunks of the raw array to a running OCTOVOX server "
+            "(beamform + dereverb + DeepFilterNet3), steered by the zone azimuths, "
+            "and play the cleaned result back. Delayed by ~chunk + processing; "
+            "not real-time talkback."
+        )
+        ovf = QFormLayout(ov_gb)
+        ovf.setRowWrapPolicy(QFormLayout.WrapLongRows)
+        ovf.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+        self.live_octovox = QCheckBox("Enable (use headphones)")
+        ovf.addRow("OCTOVOX", self.live_octovox)
+        self.live_octovox_url = QLineEdit(cc.OCTOVOX_DEFAULT_URL)
+        ovf.addRow("Server", self.live_octovox_url)
+        self.live_octovox_steer = QCheckBox("Steer to pickup zone (needs azimuth calibration)")
+        self.live_octovox_steer.setToolTip(
+            "OFF (default): OCTOVOX auto-finds the voice — reliable on a small/front-back-"
+            "ambiguous array. ON: force OCTOVOX to steer at the pickup-zone azimuth; only "
+            "use once the Azimuth offset is calibrated, or it can null the voice (noise only)."
+        )
+        ovf.addRow("Direction", self.live_octovox_steer)
+        self.live_az_offset = NoWheelDoubleSpinBox()
+        self.live_az_offset.setRange(-180.0, 180.0)
+        self.live_az_offset.setSingleStep(5.0)
+        self.live_az_offset.setValue(0.0)
+        self.live_az_offset.setSuffix("°")
+        ovf.addRow("Azimuth offset", self.live_az_offset)
+        self.live_chunk = NoWheelDoubleSpinBox()
+        self.live_chunk.setRange(1.0, 8.0)
+        self.live_chunk.setSingleStep(0.5)
+        self.live_chunk.setValue(3.0)
+        self.live_chunk.setSuffix(" s")
+        ovf.addRow("Chunk", self.live_chunk)
+        self.live_octovox_status = QLabel("")
+        self.live_octovox_status.setWordWrap(True)
+        ovf.addRow(self.live_octovox_status)
+        lay.addWidget(ov_gb)
 
         # --- transport controls ---
         row = QHBoxLayout()
@@ -473,6 +734,22 @@ class Inspector(QWidget):
     # ---- live helpers ----
     def _live_array_id(self):
         return self.live_array.currentData()
+
+    def _live_busy(self):
+        """True if any live session (beamformer, OCTOVOX, or auto-steer) is active."""
+        return self._live_ctl is not None or self._clean_monitor is not None or self._autosteer is not None
+
+    def _active_ctl(self):
+        """The underlying MicController in use (auto-steer wraps one), or None."""
+        if self._autosteer is not None:
+            return self._autosteer.ctrl
+        return self._live_ctl
+
+    def _on_autosteer_toggled(self):
+        """Enable the sector controls only when auto-steer is selected."""
+        on = self.live_autosteer.isChecked()
+        for w in self._autosteer_widgets:
+            w.setEnabled(on)
 
     def _live_active_mask(self):
         return [cb.isChecked() for cb in self.live_caps]
@@ -527,7 +804,7 @@ class Inspector(QWidget):
                 self.live_array.setCurrentIndex(idx)
         self.live_array.blockSignals(False)
         # device picker (only when idle; don't disrupt a live session)
-        if self._live_ctl is None:
+        if not self._live_busy():
             curd = self.live_device.currentData()
             self.live_device.blockSignals(True)
             self.live_device.clear()
@@ -566,6 +843,57 @@ class Inspector(QWidget):
         self._live_design = None
         self.live_design_view.clear()
 
+    def _live_aggressive_preset(self):
+        """Max-directivity superdirective — safe thanks to the 80 dBA studio mics."""
+        i = self.live_mode.findData(cc.MODE_SUPERDIRECTIVE)
+        if i >= 0:
+            self.live_mode.setCurrentIndex(i)
+        self.live_robust.setValue(26)          # ≈ 0.005 loading (low → aggressive)
+        if self._live_array_id():
+            self._live_design_from_zones()
+
+    def _live_ab_test(self):
+        """Record a clip and compare beamformers → WAVs + report (off the GUI thread)."""
+        if not cc.controls_available():
+            self.live_status.setText("A/B test needs the [control] extra (numpy + sounddevice).")
+            return
+        aid = self._live_array_id()
+        if not aid:
+            self.live_status.setText("Select a placed array first.")
+            return
+        if self._live_busy():
+            self.live_status.setText("Disconnect before running the A/B test.")
+            return
+        from PySide6.QtWidgets import QFileDialog
+        out_dir = QFileDialog.getExistingDirectory(self, "Save A/B WAVs + report to…")
+        if not out_dir:
+            return
+        geom = self._live_geometry()
+        sr = self.live_rate.currentData() or 44100
+        self.live_ab_btn.setEnabled(False)
+        self.live_status.setText("A/B: recording 10 s — speak from the pickup zone…")
+        worker = _ABWorker(self.state.config, aid, geom, self.live_device.currentData(),
+                           int(sr), 10.0, out_dir, float(self.live_freq.value()))
+        worker.signals.done.connect(self._on_ab_done)
+        worker.signals.failed.connect(self._on_ab_failed)
+        self._ab_workers.add(worker)
+        QThreadPool.globalInstance().start(worker)
+
+    def _on_ab_done(self, payload):
+        summary, out_dir, n = payload
+        self.live_ab_btn.setEnabled(True)
+        self._ab_workers.clear()
+        self.live_design_view.setPlainText(
+            summary + f"\n\nSaved {n} files to:\n{out_dir}\n"
+            "Listen: omni.wav vs superdirective_aggressive.wav vs nulled.wav."
+        )
+        self.live_status.setText(f"A/B done — {n} files in {out_dir}")
+
+    def _on_ab_failed(self, msg):
+        self.live_ab_btn.setEnabled(True)
+        self._ab_workers.clear()
+        self.live_status.setText(f"A/B failed: {msg}")
+
     def _on_live_device_changed(self):
         """Select the device's native sample rate so Connect doesn't fail on a
         rate the hardware can't open (e.g. a 44100-only array vs a 48000 default)."""
@@ -595,7 +923,7 @@ class Inspector(QWidget):
 
     def _live_detect_silent(self):
         """Capture briefly and auto-uncheck capsules reading near-silence."""
-        if self._live_ctl is not None:
+        if self._live_busy():
             self.live_status.setText("Disconnect before detecting capsules (the device is in use).")
             return
         if not cc.controls_available():
@@ -646,6 +974,7 @@ class Inspector(QWidget):
                 freq_hz=float(self.live_freq.value()),
                 mode=self._live_mode(),
                 loading=self._live_loading(),
+                suppress_outside_talkers=self.live_suppress_outside.isChecked(),
             )
         except ValueError as exc:
             self.live_design_view.setPlainText(f"Cannot design: {exc}")
@@ -659,6 +988,14 @@ class Inspector(QWidget):
             # compact azimuth pattern of the first beam, as a text sparkline
             pat = cc.beam_pattern_azimuth(list(design.beams[0].weights), geom, design.freq_hz, steps=36)
             text += "\n\nAzimuth response (beam 1), 0°→350°:\n" + self._sparkline([db for _a, db in pat])
+            # per-talker leakage: how loudly each placed person is captured
+            if self.state.config.talkers:
+                leak = cc.talker_leakage_db(self.state.config, aid, geom, list(design.beams[0].weights), design.freq_hz)
+                leak.sort(key=lambda r: -r[2])
+                text += "\n\nTalker pickup (beam 1):"
+                for _tid, label, gain, in_pk in leak:
+                    tag = "pickup" if in_pk else "OUTSIDE"
+                    text += f"\n  {label or _tid}: {gain:+.0f} dB  [{tag}]"
         self.live_design_view.setPlainText(text)
         if self._live_ctl is not None:
             try:
@@ -676,8 +1013,14 @@ class Inspector(QWidget):
         return "".join(out)
 
     def _live_toggle_connect(self):
-        if self._live_ctl is not None:
+        if self._live_busy():
             self._live_disconnect()
+            return
+        if self.live_autosteer.isChecked():
+            self._autosteer_connect()
+            return
+        if self.live_octovox.isChecked():
+            self._octovox_connect()
             return
         aid = self._live_array_id()
         geom = self._live_geometry()
@@ -714,7 +1057,126 @@ class Inspector(QWidget):
             f"Connected ({ctl.backend}, {st.active_channels}/{st.n_channels} capsules{beams}{mon})."
         )
 
+    def _octovox_connect(self):
+        """Start the near-live OCTOVOX cleaned monitor (raw array → server → play)."""
+        if not cc.octovox_deps_available():
+            self.live_octovox_status.setText("Needs the [octovox] extra (requests + scipy + sounddevice).")
+            return
+        aid = self._live_array_id()
+        if not aid:
+            self.live_octovox_status.setText("Select a placed array first.")
+            return
+        client = cc.OctovoxClient(self.live_octovox_url.text().strip() or cc.OCTOVOX_DEFAULT_URL)
+        if not client.is_up():
+            self.live_octovox_status.setText(f"OCTOVOX server not reachable at {client.base_url}. Start it (run.py).")
+            return
+        # Only force a steering direction when the user opts in (and has calibrated
+        # the azimuth offset). Otherwise let OCTOVOX auto-beamform — reliable on a
+        # small / front-back-ambiguous array, and never nulls the voice.
+        steer = self.live_octovox_steer.isChecked()
+        za = cc.zone_azimuths(self.state.config, aid, azimuth_offset_deg=float(self.live_az_offset.value()))
+        target_az = za.target_az if steer else None
+        interferer_az = za.interferer_az if steer else None
+        rate = self.live_rate.currentData() or 44100
+        try:
+            mon = cc.CleanMonitor(
+                client,
+                input_device=self.live_device.currentData(),
+                samplerate=int(rate),
+                chunk_seconds=float(self.live_chunk.value()),
+                target_az=target_az,
+                interferer_az=interferer_az,
+                output_device=self.live_out_device.currentData(),
+                nr="dfn",
+                active=self._live_active_mask(),  # repair dead capsules for OCTOVOX
+            )
+            mon.start()
+        except Exception as exc:
+            self.live_octovox_status.setText(f"Could not start: {exc}")
+            return
+        self._clean_monitor = mon
+        self.live_connect.setText("Disconnect")
+        if steer:
+            mode = f"steered to {za.target_az:.0f}°, {len(za.interferer_az)} excluded" if za.target_az is not None else "steered (no pickup zone)"
+        else:
+            mode = "auto-beam (OCTOVOX finds the voice)"
+        self.live_status.setText(
+            f"OCTOVOX cleaning live · {mode} · ~{self.live_chunk.value():.0f}s delay (headphones)."
+        )
+        self.live_octovox_status.setText(
+            "Auto-beam: OCTOVOX locates the talker. Enable 'Steer to pickup zone' only after calibrating the azimuth offset."
+            if not steer else (za.note or "Steering to the pickup-zone azimuth.")
+        )
+
+    def _autosteer_connect(self):
+        """Start auto-steer: detect talkers by direction and follow those in the sector."""
+        if not cc.controls_available():
+            self.live_status.setText("Auto-steer needs the [control] extra (numpy + sounddevice).")
+            return
+        geom = self._live_geometry()
+        rate = self.live_rate.currentData() or 44100
+        sector = cc.SectorConfig(
+            center_deg=float(self.live_sector_center.value()),
+            half_width_deg=float(self.live_sector_width.value()) / 2.0,
+            front_offset_deg=float(self.live_front_offset.value()),
+        )
+        try:
+            ctrl = cc.AutoSteerController(
+                geom, sector,
+                device=self.live_device.currentData(),
+                samplerate=float(rate),
+                max_talkers=int(self.live_max_talkers.value()),
+                freq_hz=float(self.live_freq.value()),
+                mode=self._live_mode(),
+                loading=self._live_loading(),
+                gate_when_empty=self.live_autosteer_gate.isChecked(),
+                monitor=self.live_monitor.isChecked(),
+                output_device=self.live_out_device.currentData(),
+            )
+            ctrl.ctrl.set_gain_db(float(self.live_gain.value()))
+            ctrl.start()
+        except Exception as exc:  # hardware/open failure → report, stay disconnected
+            self.live_status.setText(f"Auto-steer connect failed: {exc}")
+            return
+        self._autosteer = ctrl
+        self.live_connect.setText("Disconnect")
+        # the gate owns muting while auto-steering; avoid a fight with the manual button
+        self.live_mute.setEnabled(not self.live_autosteer_gate.isChecked())
+        mon = ", monitoring" if self.live_monitor.isChecked() else ""
+        self.live_status.setText(
+            f"Auto-steer live · sector {sector.center_deg:.0f}° ±{sector.half_width_deg:.0f}° "
+            f"· up to {int(self.live_max_talkers.value())} talker(s){mon} (headphones)."
+        )
+
+    def _tick_autosteer(self):
+        """Update the meter + the detected-talker readout while auto-steering."""
+        a = self._autosteer
+        lvl = a.read_level()
+        pct = 0 if lvl <= 1e-6 else int(max(0.0, min(100.0, (20.0 * math.log10(lvl) + 60.0) / 60.0 * 100.0)))
+        self.live_meter.setValue(pct)
+        dets = a.detections()
+        if not dets:
+            self.live_autosteer_view.setText("· listening — no talker detected ·")
+        else:
+            parts = [f"{'IN ' if d.in_sector else 'out'} {d.azimuth_deg:.0f}° ({d.salience_db:.0f}dB)" for d in dets]
+            n_in = sum(1 for d in dets if d.in_sector)
+            self.live_autosteer_view.setText(f"{n_in} in-area  |  " + "   ".join(parts))
+        if a.error:
+            self.live_status.setText(f"Auto-steer: {a.error[:60]}")
+
     def _live_disconnect(self):
+        if self._autosteer is not None:
+            try:
+                self._autosteer.stop()
+            finally:
+                self._autosteer = None
+            self.live_mute.setEnabled(True)
+            self.live_autosteer_view.setText("Connect with auto-steer enabled to see detected talkers.")
+        if self._clean_monitor is not None:
+            try:
+                self._clean_monitor.stop()
+            finally:
+                self._clean_monitor = None
         if self._live_ctl is not None:
             try:
                 self._live_ctl.disconnect()
@@ -728,18 +1190,38 @@ class Inspector(QWidget):
     def _live_toggle_mute(self):
         muted = self.live_mute.isChecked()
         self.live_mute.setText("Muted" if muted else "Mute")
-        if self._live_ctl is not None:
-            self._live_ctl.set_mute(muted)
+        ctl = self._active_ctl()
+        if ctl is not None:
+            ctl.set_mute(muted)
 
     def _live_gain_changed(self, v):
         self.live_gain_lbl.setText(f"{v} dB")
-        if self._live_ctl is not None:
-            self._live_ctl.set_gain_db(float(v))
+        ctl = self._active_ctl()
+        if ctl is not None:
+            ctl.set_gain_db(float(v))
 
     def _tick_live_meter(self):
         """Update the level meter on a dB scale (−60 dB → 0 %, 0 dB → 100 %), so
         normal speech picked up by a ceiling array is clearly visible rather than
         a sliver on a linear scale."""
+        if self._autosteer is not None:
+            self._tick_autosteer()
+            return
+        if self._clean_monitor is not None:
+            st = self._clean_monitor.state()
+            # meter shows playback buffer fill (0..~chunk seconds); status shows progress
+            self.live_meter.setValue(int(min(1.0, st.buffered_s / max(0.5, self.live_chunk.value())) * 100))
+            msg = f"OCTOVOX: {st.chunks_played} cleaned / {st.chunks_sent} sent"
+            if st.gated:
+                msg += f", {st.gated} silent-gated"
+            if st.dropped:
+                msg += f", {st.dropped} dropped"
+            if st.last_elapsed_s:
+                msg += f" · {st.last_elapsed_s:.1f}s/chunk"
+            if st.error:
+                msg += f" · ERROR: {st.error[:50]}"
+            self.live_octovox_status.setText(msg)
+            return
         if self._live_ctl is not None and self._live_ctl.connected:
             lvl = self._live_ctl.read_level()  # linear 0..1, post gain + mute
             if lvl <= 1e-6:
@@ -1135,6 +1617,47 @@ class Inspector(QWidget):
         self.state.set_config(cfg)
 
     # --------------------------------------------------------------- refresh
+    def _banner_link(self, href: str):
+        """Banner hint links jump to a tab (tab:Issues) or trigger an action (act:optimize)."""
+        if href.startswith("tab:"):
+            name = href.split(":", 1)[1]
+            for i in range(self.tabs.count()):
+                if self.tabs.tabText(i) == name:
+                    self.tabs.setCurrentIndex(i)
+                    return
+        elif href == "act:build":
+            self.tabs.setCurrentIndex(0)
+
+    def _refresh_banner(self, cfg, res):
+        """One-line status + next-step hint above the tabs."""
+        # Determine the most useful next step from the design state.
+        arrays = [d for d in cfg.devices if d.type == "microphoneArray"]
+        has_proc = any(d.type == "processor" for d in cfg.devices)
+        if not res.ok:
+            n = len(res.errors)
+            self.banner.setText(
+                f"<b style='color:#ff6b81'>✗ {n} error{'s' if n != 1 else ''}</b> — "
+                f"<a href='tab:Issues' style='color:#85a0ff'>review in Issues ›</a>"
+            )
+            self.banner.setProperty("level", "error")
+        else:
+            # valid — surface the best next action
+            hint = None
+            if not arrays and not cfg.devices:
+                hint = "Add a device in <a href='act:build' style='color:#85a0ff'>Build ›</a>"
+            elif arrays and not has_proc:
+                hint = "Add a processor (DSP) so AEC & the automixer have somewhere to live"
+            elif has_proc and not cfg.routes:
+                hint = "Run <b>Optimize room</b> or <b>Auto-Route</b> from the toolbar to wire it up"
+            warn = len(res.warnings)
+            base = "<b style='color:#3ddc97'>✓ Valid</b>"
+            if warn:
+                base += f" · <span style='color:#f7c948'>{warn} warning{'s' if warn != 1 else ''}</span> (<a href='tab:Issues' style='color:#85a0ff'>Issues ›</a>)"
+            self.banner.setText(base + (f" — {hint}" if hint else ""))
+            self.banner.setProperty("level", "ok" if not warn else "warn")
+        self.banner.style().unpolish(self.banner)
+        self.banner.style().polish(self.banner)
+
     def refresh(self):
         self._refreshing = True
         cfg = self.state.config
@@ -1167,6 +1690,7 @@ class Inspector(QWidget):
         self._refresh_dsp()
         # issues
         res = cp.validate(cfg)
+        self._refresh_banner(cfg, res)
         self.issue_badge.setText(("✓ Valid" if res.ok else f"✗ {len(res.errors)} error(s)") + f" · {len(res.warnings)} warning(s)")
         self.issue_list.clear()
         ic = ISSUE_COLORS[getattr(self.state, "theme", "dark")]
@@ -1186,11 +1710,19 @@ class Inspector(QWidget):
                 parts.append("uncovered: " + ", ".join(label_of.get(t, t) for t in rep.uncovered))
             if rep.overlaps:
                 parts.append(f"{len(rep.overlaps)} array overlap(s)")
+            zrep = cp.zone_coverage_report(cfg)
+            if zrep.zones:
+                covered_areas = sum(1 for z in zrep.zones if z.centroid_covered)
+                parts.append(f"{covered_areas}/{len(zrep.zones)} coverage area(s) in pickup")
+                if zrep.contended:
+                    parts.append(f"{len(zrep.contended)} area(s) contended")
             self.coverage_lbl.setText("  ·  ".join(parts))
         # routing
         s = cp.routing_summary(cfg)
         self.routing_summary_lbl.setText(f"{s['total']} route(s) · {s['dante']} Dante · {s['analog']} analog")
         self.routing_view.setPlainText(cp.signal_flow_report(cfg))
+        # mute groups
+        self._refresh_mute_groups(cfg)
         # json
         self.json_view.setPlainText(cp.serialize(cfg, pretty=True))
         # simulate
@@ -1230,9 +1762,48 @@ class Inspector(QWidget):
             self._talker_props(t)
         elif sel["kind"] == "zone":
             self.sel_layout.addWidget(QLabel(f"Zone {sel['zone_id']} on {sel['array_id']}"))
+            self._zone_props(sel["array_id"], sel["zone_id"])
             rm = QPushButton("Delete zone")
             rm.clicked.connect(lambda: self.state.set_config(cp.remove_coverage_zone(cfg, sel["array_id"], sel["zone_id"])))
             self.sel_layout.addWidget(rm)
+
+    def _zone_props(self, array_id, zone_id):
+        """Per-coverage-area output channel + gain (Designer steerable coverage)."""
+        cfg = self.state.config
+        arr = next((d for d in cfg.devices if d.id == array_id), None)
+        zone = next((z for z in arr.zones if z.id == zone_id), None) if arr else None
+        if zone is None or zone.type == "exclusion":
+            return  # exclusion zones carry no output channel
+        form = QFormLayout()
+        ch = QComboBox()
+        ch.addItem("— (mixed only)", None)
+        for i in range(1, cp.MAX_ZONES_PER_ARRAY + 1):
+            ch.addItem(str(i), i)
+        cur = 0 if zone.output_channel is None else zone.output_channel
+        ch.setCurrentIndex(cur)
+
+        def _set_channel(_idx):
+            if self._refreshing:
+                return
+            val = ch.currentData()
+            try:
+                self.state.set_config(cp.set_zone_output_channel(self.state.config, array_id, zone_id, val))
+            except cp.CoverageError as e:
+                ch.setCurrentIndex(0 if zone.output_channel is None else zone.output_channel)
+                self.coverage_lbl.setText(f"⚠ {e}")
+        ch.currentIndexChanged.connect(_set_channel)
+        form.addRow("Output channel", ch)
+
+        gain = NoWheelDoubleSpinBox()
+        gain.setRange(cp.ZONE_GAIN_DB_MIN, cp.ZONE_GAIN_DB_MAX)
+        gain.setSingleStep(0.5)
+        gain.setSuffix(" dB")
+        gain.setValue(zone.gain_db if zone.gain_db is not None else 0.0)
+        gain.valueChanged.connect(
+            lambda v: None if self._refreshing else self.state.set_config(cp.set_zone_gain_db(self.state.config, array_id, zone_id, float(v)))
+        )
+        form.addRow("Area gain", gain)
+        self.sel_layout.addLayout(form)
 
     def _device_props(self, d):
         form = QFormLayout()

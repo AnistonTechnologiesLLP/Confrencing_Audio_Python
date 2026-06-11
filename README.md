@@ -44,7 +44,10 @@ conf_pipeline_control/ host-side array-microphone control (optional [control] ex
   beamformer.py       delay-and-sum + LCMV null-steering + beam pattern (pure stdlib)
   control.py          MicController interface + SimulatedMicController
   audio.py / live.py  real-time capture + beamforming (numpy + sounddevice)
-tests/                pytest suite (174 tests)
+  octovox_bridge.py   zones → azimuths + HTTP client to the OCTOVOX clean server
+  octovox_monitor.py  near-live cleaned monitor (rolling chunk → clean → playback)
+  ab_test.py          A/B harness: record → beamform N ways → WAVs + dB report
+tests/                pytest suite (231 tests; incl. headless GUI smoke)
 run_gui.py            launcher
 ```
 
@@ -61,9 +64,19 @@ python -m venv .venv
 .venv\Scripts\python run_gui.py
 ```
 
-Toolbar: tools **Select / Connect / Room / Zone / Talker**, a **2D / 3D** toggle,
-undo/redo, auto-configure, a rectangular-room shortcut, sample scenarios, and
-JSON export/import. The **Load sample…** picker has seven rooms — boardroom,
+The toolbar is grouped into captioned sections — **Tools** (Select / Connect /
+Room / Zone / Talker), **View** (2D / 3D + Coverage), **Edit** (undo/redo),
+**Design** (the one-click ✨ Optimize room / ⚡ Auto-Route / ⚙ Auto-configure),
+**Room** (rect room + floor plan + calibrate), **Project** (samples + multi-room +
+auto-name + deploy), and **File** (import / export / report / theme / guide) —
+each action carrying a tooltip. A dismissible **Getting started** strip under the
+toolbar tracks the natural flow (room → array → zone → talker → optimize) with a
+live ✓ per step and a one-click button for each; reopen it from the **？ Guide**
+button. The inspector shows a status **banner** with the validation state and the
+single most useful next step (clickable to jump to the relevant tab). On the
+canvas, **right-click** a device / zone / talker (or empty floor) for a context
+menu, and the cursor changes to show what's grabbable. The **Load sample…** picker
+has seven rooms — boardroom,
 huddle, meeting, conference (3 arrays), training/classroom, lecture hall, and a
 U-shape boardroom (polygon table). Load **Boardroom** and select the **Presenter**
 talker to see steering-angle rays from each ceiling array (azimuth / down-tilt /
@@ -197,6 +210,55 @@ Four capabilities modelled on **Shure Designer 6**, all offline and vendor-neutr
   shareable doc (room + RT60, devices, routing, AEC, coverage, validation);
   **Export report** writes `.md`/`.html`.
 
+## More Designer-6 parity (1.12.0)
+
+Four further offline, vendor-neutral capabilities that close the remaining gaps
+against Designer's coverage/commissioning workflow. All additive — the JSON config
+schema stays v2 and a config that uses none of them round-trips byte-for-byte to
+the same JSON as before (so existing files and the TS version are unaffected).
+
+- **Per-coverage-area output channels + gain** — a pickup area can carry its own
+  numbered output channel (1..8) feeding a dedicated Dante out, the way an MXA920's
+  **steerable coverage** gives each of its 8 areas an individual output, plus a
+  per-area gain trim:
+
+  ```python
+  c = cp.set_zone_output_channel(c, "A", "z1", 1)   # area z1 → array out channel 1
+  c = cp.set_zone_gain_db(c, "A", "z1", -3.0)        # per-area trim
+  c = cp.auto_assign_zone_channels(c, "A")           # number every pickup area (idempotent)
+  ```
+
+  The array grows an `A-out-ch-1` port per channelled area. Validation flags an
+  out-of-range channel / one on an exclusion zone (`COVERAGE_CHANNEL_INVALID`),
+  two areas sharing a channel (`COVERAGE_CHANNEL_DUPLICATE`), and a bad gain
+  (`COVERAGE_GAIN_INVALID`). In the GUI: selecting a pickup zone shows an **Output
+  channel** picker and an **Area gain** trim.
+- **Zone-vs-coverage report** — `cp.zone_coverage_report(c)` answers, for each drawn
+  coverage *area*, "is it inside its array's pickup circle (centroid + every corner),
+  and is any area covered by 2+ arrays (automix **lobe contention**)?" — closer to
+  Designer than the array-circle overlap check. Views: `.uncovered`, `.partial`,
+  `.contended`. The Issues tab shows the area-in-pickup and contention counts.
+- **Optimize room** — `cp.optimize_room(c) → OptimizeRoomResult` is the one-click
+  "do everything": recommend + apply each array's best placement/steer, give every
+  pickup area its own output channel, then `auto_route` — with a change summary.
+  Each stage is opt-out (`place_arrays` / `assign_channels` / `route`) and
+  idempotent. Toolbar **Optimize room** button (one undo step + summary).
+- **Logic / mute control** — `ControlConfig` + `MuteGroup` model Designer's
+  mute-control / logic blocks: a named set of devices and/or coverage-area output
+  channels that mute together, with a `software` / `logicIn` / `button` trigger.
+
+  ```python
+  g = cp.create_mute_group("mg1", "Room mute", device_ids=["A"],
+                           zone_refs=[cp.ZoneChannelRef("A", "z1")], trigger="button")
+  c = cp.add_mute_group(c, g)
+  c = cp.set_mute_group_muted(c, "mg1", True)
+  ```
+
+  Validation flags an empty group or a dangling device/array/zone reference
+  (`CONTROL_MUTE_GROUP_INVALID`). The design report gains **Coverage areas** and
+  **Mute groups** sections, and the GUI's **Routing** tab has a **Mute groups**
+  editor (create over the mute-capable mics, toggle mute, remove).
+
 ## Live array-microphone control (1.11.0)
 
 Drive an **actual array microphone** with **coverage-area selection**, the way a
@@ -233,11 +295,36 @@ and capsule mismatch (raise it if the beam hisses). `mode="delaysum"` selects th
 robust delay-and-sum instead. In the GUI: the **Beamformer** group (Mode +
 **Focus ↔ robust** slider).
 
+**Lobes + leakage — where off-target voices get in.** A beam isn't a clean cone:
+it has one **main lobe** (toward the talker) plus **side lobes** (smaller pickup
+peaks elsewhere) and, on a sparse array at high frequency, **grating lobes**
+(near-full pickup in another direction). `cc.analyze_lobes(...)` counts and locates
+them (main width, side-lobe levels, grating-lobe warnings); `cc.talker_leakage_db`
+reports how loudly each *placed talker* is currently captured (target ≈ 0 dB,
+everyone else below). On the 8-capsule / 0.05 m array this is 2–3 lobes with
+−12…−17 dB side-lobes in the 0.5–2 kHz speech band, growing to ~8 lobes at 4–8 kHz.
+
+**Subtract out-of-area voices.** `design_zone_beams(..., suppress_outside_talkers=
+True)` adds every placed talker that is **not** inside a pickup zone as a beam null
+(on top of the exclusion-zone nulls), up to the array's null budget (`n_active−1`).
+A talker outside the zone drops from a side-lobe level (e.g. −23 dB) to a deep null
+(−120 dB). GUI: **Null talkers outside the pickup zone** in the Beamformer group;
+the design readout lists each talker's pickup level and `[pickup]`/`[OUTSIDE]` tag.
+
+**Hear and measure it — A/B harness.** `cc.ab_compare(config, array, geom, y8, sr)`
+runs a recorded clip through **omni / delay-sum / superdirective / aggressive /
+nulled** and returns mono signals + a dB report (DI, WNG, per-talker leakage);
+`cc.save_ab_report` writes the WAVs + `report.txt`. GUI: **A/B test — record &
+compare** records from the array and saves the set so you can *listen* to the
+difference. An **Aggressive preset** pushes superdirectivity to the limit — safe
+because the SBM100B capsules are **80 dBA SNR** (studio-grade), so the extra
+self-noise from low diagonal loading stays inaudible where ordinary MEMS would hiss.
+
 **Two layers, split by dependency:**
 
 - **Design (always available, pure stdlib):** geometry, zone→direction, weights,
   and beam-pattern verification. Importing `conf_pipeline_control` pulls no
-  numpy/sounddevice; the full 174-test suite runs without them.
+  numpy/sounddevice; the full 195-test suite runs without them.
 - **Live (optional `[control]` extra):** capture the array's channels and apply
   the weights in real time — a frequency-domain (per-FFT-bin), Hann-windowed
   overlap-add beamformer — with a live output level, mute, gain, and optional WAV
@@ -270,6 +357,35 @@ channel doesn't corrupt the beam (`cc.with_active_channels(geom, mask)`).
 > silenced, and a planar array separates areas mainly by **azimuth / horizontal
 > offset** (two areas on the same bearing are hard to tell apart). This is the
 > physics of the hardware, surfaced rather than hidden.
+
+## OCTOVOX integration — clean the steered voice (1.11.0)
+
+This app does the **spatial** front-end (room + drawn zones → which direction to
+listen); [OCTOVOX](../New_OCTOVOX) does the **cleaning** (calibration, dereverb,
+DeepFilterNet3, residual suppression, VAD automix, EQ/AGC). The bridge hands
+OCTOVOX the **raw 8 channels + the zone-derived azimuths**, so OCTOVOX runs its
+own direction-aware beamform-then-clean chain steered at the talker you picked and
+nulling the areas you excluded — no redundant beamforming.
+
+```python
+import conf_pipeline_control as cc
+za = cc.zone_azimuths(config, "A1")            # pickup zone → target_az, exclusions → interferer_az
+client = cc.OctovoxClient("http://127.0.0.1:5050")
+res = client.clean_8ch(y8, 44100, target_az=za.target_az, interferer_az=za.interferer_az)
+# res.mono is the cleaned voice @ 48 kHz (input auto-resampled 44100 → 48000)
+```
+
+- **Azimuth mapping** — this app's compass bearing (0°=+Y, CW) → OCTOVOX's math
+  azimuth (0°=+X, CCW): `cc.to_octovox_azimuth`. An **azimuth offset** calibrates
+  the array's physical mounting rotation.
+- **Transport** — pure HTTP (`/api/upload` → `/api/clean` → fetch the cleaned WAV);
+  the two projects stay independent. Needs the `[octovox]` extra
+  (`requests` + `scipy`) and a running OCTOVOX server (`python run.py`, port 5050).
+- **Near-live cleaned monitor** (GUI: **Clean via OCTOVOX** in the Live tab) —
+  captures rolling chunks of the raw array, cleans each through OCTOVOX, and plays
+  the result back. **Delayed by ~chunk + processing (~4–5 s), not real-time
+  talkback** (OCTOVOX's neural stages are whole-file/offline), with audible seams
+  at chunk boundaries. Use headphones. `cc.CleanMonitor` drives it.
 
 ## Designer-inspired workflow (1.8.0)
 

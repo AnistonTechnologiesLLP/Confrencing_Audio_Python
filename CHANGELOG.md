@@ -5,6 +5,96 @@ Python port of the Conferencing Audio Pipeline. Format based on
 project they were ported from. The JSON **config schema** (`CONFIG_VERSION` = 1,
 camelCase keys) is identical to the TS version, so configs interoperate.
 
+## [1.12.0] - 2026-06-11
+
+**More Shure-Designer-6 parity** — four config-only, vendor-neutral, offline
+capabilities closing the remaining gaps against Designer's coverage/commissioning
+workflow. All additive: the JSON config schema stays version 2 and interoperable
+with the TypeScript version (new fields are optional and omitted when unset).
+
+### Added
+- **Per-coverage-area output channels + gain** (`CoverageZone.output_channel`,
+  `CoverageZone.gain_db`): a pickup area can carry its own numbered output channel
+  (1..`MAX_ZONES_PER_ARRAY`) feeding a dedicated Dante out — the way an MXA920's
+  *steerable coverage* gives each of its 8 areas an individual output — plus a
+  per-area gain trim. The array regenerates an `…-out-ch-N` port per channelled
+  area (sorted by channel). Builders (`conf_pipeline.coverage`):
+  `set_zone_output_channel`, `set_zone_gain_db`, `auto_assign_zone_channels`
+  (sequential, idempotent, skips exclusion zones); API wrappers
+  `set_zone_output_channel`, `set_zone_gain_db`, `auto_assign_zone_channels`.
+  New validation codes `COVERAGE_CHANNEL_INVALID` (out-of-range / on an exclusion
+  zone), `COVERAGE_CHANNEL_DUPLICATE` (two areas share a channel on one array),
+  `COVERAGE_GAIN_INVALID` (gain out of `[ZONE_GAIN_DB_MIN, ZONE_GAIN_DB_MAX]`).
+- **Zone-vs-coverage report** (`conf_pipeline.coverage_check.zone_coverage_report`
+  → `ZoneCoverageReport` / `ZoneCoverageStatus`): closer to Designer than the
+  array-circle overlap check — for each *drawn coverage area* it reports whether
+  the centroid (and every corner) sits inside the owning array's floor coverage
+  circle, and which arrays cover the centroid (more than one ⇒ automix **lobe
+  contention**). Convenience views: `.uncovered`, `.partial`, `.contended`.
+- **`optimize_room`** (`conf_pipeline.api.optimize_room` → `OptimizeRoomResult`):
+  one-click "do everything" that chains the existing pieces — recommend + apply
+  each array's best placement/steer (when a room + talkers exist), assign every
+  pickup area its own output channel, then `auto_route` — returning the new config
+  plus a human-readable change list. Each stage is opt-out (`place_arrays`,
+  `assign_channels`, `route`) and idempotent; a failing array never aborts the run.
+- **Logic / mute control** (`ControlConfig`, `MuteGroup`, `ZoneChannelRef`,
+  `MuteTrigger`): config-only commissioning parity with Designer's mute-control /
+  logic blocks. A mute group is a named set of devices and/or coverage-area output
+  channels that mute together, with a `software`/`logicIn`/`button` trigger. API:
+  `create_mute_group`, `add_mute_group`, `remove_mute_group`, `set_mute_group_muted`.
+  New validation code `CONTROL_MUTE_GROUP_INVALID` (empty group, or a missing
+  device/array/zone reference); a non-mute-capable member raises the existing
+  `MUTE_LINK_UNSUPPORTED` warning. `SystemConfig.control` is an additive optional
+  field, omitted from JSON when unset.
+- **Design report**: a **Coverage areas** table (array, area, type, output channel,
+  gain) with the zone-vs-coverage summary, and a **Mute groups** section.
+- **PySide6 GUI**: selecting a pickup zone now shows an **Output channel** picker
+  (— / 1..8) and an **Area gain** trim in the selection panel; the Issues-tab
+  coverage line reports coverage-area-in-pickup and contention counts; an
+  **Optimize room** toolbar button runs `optimize_room` (one undo step + summary).
+- pytest coverage for all four — 28 new tests (channel/gain builders + validation,
+  TS-interop round-trip + field omission, the zone-coverage report incl. contention,
+  `optimize_room` stages/idempotence/opt-out, mute groups + validation). **223 tests
+  total.**
+
+### Changed (UI/UX)
+- **Toolbar restructured** into captioned, tooltipped sections — Tools / View /
+  Edit / Design / Room / Project / File — instead of one flat row of ~25 buttons.
+  Each action carries a unicode glyph + a descriptive tooltip; the one-click
+  automation (**✨ Optimize room**, **⚡ Auto-Route**) is accent-styled as primary.
+- **Getting-started guide** (`conf_pipeline_gui/guide.py`): a dismissible strip
+  under the toolbar with a live checklist — room → mic array → coverage zone →
+  talker → optimize — each step showing ✓ when satisfied and a one-click action
+  button (the predicates read the live config, so ticks update no matter how the
+  design is built). Reopen via a **？ Guide** toolbar button.
+- **Canvas empty state**: a centered hint (draw a room / use the guide / load a
+  sample) replaces the blank canvas when nothing is placed yet.
+- **Inspector status banner**: a always-visible line above the tabs showing the
+  validation state (✓ valid / ✗ N errors / N warnings) plus the single most useful
+  next step, with links that jump to the relevant tab.
+- **Canvas context menus**: right-click a device / zone / talker (or empty floor)
+  for Edit / Delete / quick-add actions; the cursor now reflects what's grabbable
+  (open-hand over movable items, resize over zone corners, crosshair while drawing).
+- **Mute-group editor** in the Routing tab — create a group over the mute-capable
+  mics, toggle its mute, and remove it (surfacing the `ControlConfig` / `MuteGroup`
+  model that previously had API + validation but no UI).
+- 8 headless GUI smoke tests (`tests/test_gui_smoke.py`, Qt offscreen, skipped when
+  PySide6 is absent) covering the window build, guide progress, the mute-group
+  add/toggle/remove cycle, the inspector banner, and canvas context/hover helpers.
+  **231 tests total.**
+
+### Fixed
+- Canvas right-click on the *body* of a coverage zone now opens the Edit/Delete
+  menu — the handler tested for a `"zone"` hit kind that `_hit_test` never returns
+  (it returns `"zone-move"` / `"zone-resize"`), so body clicks previously fell
+  through to the empty-floor menu.
+
+### Notes
+- The JSON schema stays v2: a config with no channels/gain/control round-trips
+  byte-for-byte to the same JSON as before, so existing files (and the TS version)
+  are unaffected.
+- The UI/UX changes are presentation-only — no engine, schema, or API changes.
+
 ## [1.11.0] - 2026-06-10
 
 **Live array-microphone control** — a Python-only addition (no TS counterpart)
@@ -48,6 +138,16 @@ become beamformer weights. Additive — the JSON config schema is unchanged.
     geometry), with diagonal loading trading directivity for robustness. Now the
     **default** mode (`MODE_SUPERDIRECTIVE`); the live per-FFT-bin runtime applies
     it broadband. GUI: a **Beamformer** group (Mode + Focus↔robust slider).
+  - **Lobe analysis + leakage + out-of-zone suppression** (`analyze_lobes` →
+    `LobeReport`, `talker_leakage_db`, `design_zone_beams(suppress_outside_talkers=
+    …)`): count/locate a beam's main + side + grating lobes (so you see where
+    off-target voices leak in), report each placed talker's pickup level
+    (`[pickup]`/`[OUTSIDE]`), and **null every talker outside the pickup zone** as an
+    extra interferer (on top of exclusion zones, up to `n_active−1`) — an out-of-area
+    voice drops from a side-lobe level (~−23 dB) to a deep null (−120 dB). The null
+    set flows to the live runtime via `BeamDesign.null_dirs`. GUI: lobe count +
+    grating warning + per-talker leakage in the design readout, and a **Null talkers
+    outside the pickup zone** toggle.
 - **PySide6 GUI**: a **Live** inspector tab — array + capsule-radius + design-freq
   selectors, per-capsule **active checkboxes** + a **Detect silent capsules** probe
   (captures briefly off the GUI thread and unchecks dead channels), **Design beam
@@ -57,9 +157,38 @@ become beamformer weights. Additive — the JSON config schema is unchanged.
   headphones), **Connect/Disconnect**, a **Mute** toggle, a **Gain** slider, and a
   dB-scaled level meter driven by a `QTimer`. Falls back to the simulated controller
   (with a banner) when the extra is absent, so the workflow is fully usable offline.
-- **Optional extra** (`pyproject.toml`): `control` (numpy + sounddevice). The base
-  engine and GUI need neither.
-- pytest coverage for the design layer (numpy-free) — 174 tests total
+- **OCTOVOX bridge** (`conf_pipeline_control/octovox_bridge.py`,
+  `octovox_monitor.py`): connect the spatial front-end to the **OCTOVOX** voice-
+  cleaning pipeline over HTTP. `zone_azimuths` maps an array's pickup zone →
+  OCTOVOX `target_az` and exclusion zones → `interferer_az` (with
+  `to_octovox_azimuth` handling the compass→math azimuth convention and a
+  mounting-offset calibration). `OctovoxClient.clean_8ch` resamples the raw 8-ch
+  clip 44100→48000, uploads it, runs `/api/clean` steered at those azimuths, and
+  fetches the cleaned mono — so OCTOVOX does the cleaning while this app supplies
+  the direction. `CleanMonitor` adds a **near-live cleaned monitor** (rolling
+  chunks → clean → delayed playback; ~4–5 s latency, not real-time) — chunks
+  **overlap and are equal-power crossfaded with level-matching** so OCTOVOX's
+  per-chunk peak-normalisation and neural-stage edge transients don't click/pump at
+  the seams, and a **speech gate** (`speech_gate`, noise-floor tracker) plays
+  silence for noise-only chunks instead of OCTOVOX's normalised-up noise floor —
+  fixing the "only noise, no voice" pumping in a quiet room. Direction steering is
+  **opt-in** (`CleanMonitor` passes `target_az` only when enabled): by default
+  OCTOVOX auto-beamforms, which is reliable on a small / front-back-ambiguous array;
+  forcing a wrong azimuth could otherwise null the voice. The dead capsule is
+  repaired (`repair_dead_channels`) from its ring-neighbours before sending, since
+  OCTOVOX has no active-capsule mask. GUI: a **Clean via OCTOVOX** group in the Live
+  tab (server URL, **Steer to pickup zone** toggle, azimuth offset, chunk).
+- **A/B measurement harness** (`conf_pipeline_control/ab_test.py`): record a raw
+  8-ch clip and beamform it offline **omni / delay-sum / superdirective /
+  aggressive / nulled** (`ab_compare`, `apply_design_offline`), returning mono
+  signals + a dB report (DI, WNG, per-talker leakage); `save_ab_report` writes the
+  WAVs + `report.txt` so the steering effect is audible and measurable. GUI: an
+  **A/B test — record & compare** button and an **Aggressive preset** (max
+  superdirectivity, safe given the SBM100B's 80 dBA SNR).
+- **Optional extras** (`pyproject.toml`): `control` (numpy + sounddevice) and
+  `octovox` (adds requests + scipy for the bridge). The base engine and GUI need
+  none of them.
+- pytest coverage for the design layer (numpy-free) — 195 tests total
   (+29: steering geometry, steering-vector/main-lobe/LCMV-null math, zone-driven
   design, the active-capsule mask, and the controller/simulated backend).
 

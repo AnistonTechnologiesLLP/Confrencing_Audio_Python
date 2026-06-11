@@ -24,9 +24,14 @@ from .beamformer import (  # noqa: F401
     MODE_DELAYSUM,
     MODE_SUPERDIRECTIVE,
     BeamDesign,
+    LobeReport,
     ZoneBeam,
+    analyze_lobes,
+    bearing_direction,
     beam_pattern_azimuth,
     delay_and_sum_weights,
+    design_from_bearings,
+    design_multi_bearings,
     design_zone_beams,
     diffuse_coherence,
     directivity_index_db,
@@ -35,9 +40,30 @@ from .beamformer import (  # noqa: F401
     response_db,
     steering_vector,
     superdirective_weights,
+    talker_leakage_db,
     white_noise_gain_db,
 )
 from .control import MicController, MicState, SimulatedMicController  # noqa: F401
+from .octovox_bridge import (  # noqa: F401
+    OCTOVOX_DEFAULT_URL,
+    CleanResult,
+    OctovoxClient,
+    ZoneAzimuths,
+    octovox_deps_available,
+    repair_dead_channels,
+    to_octovox_azimuth,
+    zone_azimuths,
+)
+from .octovox_monitor import CleanMonitor, MonitorState  # noqa: F401
+from .ab_test import (  # noqa: F401
+    ABReport,
+    ABVariant,
+    ab_compare,
+    apply_design_offline,
+    omni_reference,
+    record_clip,
+    save_ab_report,
+)
 from .geometry import (  # noqa: F401
     SOUND_SPEED_MPS,
     ArrayGeometry,
@@ -58,6 +84,17 @@ from .steering import (  # noqa: F401
     zone_centroid,
     zone_look_direction,
 )
+from .doa import (  # noqa: F401
+    DEFAULT_F_HI_HZ,
+    DEFAULT_F_LO_HZ,
+    Detection,
+    DoaResult,
+    detect,
+    detect_offline,
+    in_sector,
+    sector_gate,
+)
+from .autosteer import AutoSteerController, SectorConfig  # noqa: F401
 
 
 def controls_available() -> bool:
@@ -75,8 +112,18 @@ __all__ = [
     "superdirective_weights", "diffuse_coherence", "directivity_index_db",
     "MODE_DELAYSUM", "MODE_SUPERDIRECTIVE", "response",
     "response_db", "white_noise_gain_db", "beam_pattern_azimuth",
-    "design_zone_beams", "BeamDesign", "ZoneBeam",
+    "analyze_lobes", "LobeReport", "talker_leakage_db",
+    "design_zone_beams", "design_from_bearings", "design_multi_bearings",
+    "bearing_direction", "BeamDesign", "ZoneBeam",
+    "detect", "detect_offline", "sector_gate", "in_sector", "Detection", "DoaResult",
+    "DEFAULT_F_LO_HZ", "DEFAULT_F_HI_HZ",
+    "AutoSteerController", "SectorConfig",
     "MicController", "MicState", "SimulatedMicController",
     "DEFAULT_DESIGN_FREQ_HZ", "DEFAULT_TARGET_ELEVATION_M", "RESPONSE_FLOOR_DB",
     "controls_available",
+    "to_octovox_azimuth", "zone_azimuths", "ZoneAzimuths", "OctovoxClient",
+    "CleanResult", "octovox_deps_available", "OCTOVOX_DEFAULT_URL",
+    "repair_dead_channels", "CleanMonitor", "MonitorState",
+    "ab_compare", "apply_design_offline", "omni_reference", "save_ab_report",
+    "record_clip", "ABReport", "ABVariant",
 ]

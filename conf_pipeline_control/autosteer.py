@@ -1,0 +1,212 @@
+"""Auto-steering controller: DOA detection → sector gate → live extraction.
+
+Ties the pieces together for the "listen only to people in this coverage area"
+feature. A slow control thread (a few Hz — NOT the audio hot loop) repeatedly:
+
+1. snapshots the array's spatial covariance from the live runtime,
+2. runs :func:`conf_pipeline_control.doa.detect` to find who is talking and where,
+3. gates the detections to the coverage **sector** (center ± half-width),
+4. rebuilds a multi-look beam with
+   :func:`conf_pipeline_control.beamformer.design_multi_bearings` — one look per
+   in-sector talker, nulling the out-of-sector talkers — and re-applies it.
+
+The audio thread keeps beamforming with the latest weights the whole time, so
+re-steering is seamless. Hysteresis (hold + re-select deadband) stops the beams
+flickering during normal turn-taking. Optionally mutes the output when nobody is
+in the sector, so only in-area voices are ever heard.
+
+numpy/sounddevice are pulled in lazily by the live runtime + DOA module, so
+importing this module without the ``[control]`` extra is fine.
+"""
+from __future__ import annotations
+
+import threading
+import time
+from dataclasses import dataclass
+from typing import Optional
+
+from . import doa
+from .beamformer import MODE_SUPERDIRECTIVE, design_multi_bearings
+from .geometry import ArrayGeometry
+from .live import LiveBeamController
+from .model import DEFAULT_DESIGN_FREQ_HZ
+
+
+@dataclass(frozen=True)
+class SectorConfig:
+    """The coverage area as an angular arc (the "radius" expressed in degrees)."""
+
+    center_deg: float = 0.0          # bearing of the arc centre (after front_offset)
+    half_width_deg: float = 60.0     # arc half-width; full sector = 2× this
+    front_offset_deg: float = 0.0    # aligns azimuth-0 to the room/desk "front"
+
+
+class AutoSteerController:
+    """Detect in-area talkers and steer/extract them live.
+
+    Wraps a :class:`~conf_pipeline_control.live.LiveBeamController` with
+    covariance tracking on. Call :meth:`start`, read :meth:`detections` for a live
+    readout, and :meth:`stop` (or use as a context manager). Audio I/O, mute and
+    gain are delegated to the wrapped controller."""
+
+    def __init__(
+        self,
+        geometry: ArrayGeometry,
+        sector: SectorConfig,
+        *,
+        device: Optional[int] = None,
+        samplerate: float = 44100.0,
+        off_nadir_deg: float = 90.0,
+        max_talkers: int = 3,
+        grid_step_deg: float = 2.0,
+        min_separation_deg: float = 40.0,
+        min_salience_db: float = 3.0,
+        vad_floor_db: float = 3.0,
+        freq_hz: float = DEFAULT_DESIGN_FREQ_HZ,
+        mode: str = MODE_SUPERDIRECTIVE,
+        loading: float = 0.05,
+        update_hz: float = 8.0,
+        hold_seconds: float = 0.6,
+        reselect_deg: float = 8.0,
+        gate_when_empty: bool = True,
+        monitor: bool = False,
+        output_device: Optional[int] = None,
+        record_path: Optional[str] = None,
+    ):
+        self.geometry = geometry
+        self.sector = sector
+        self.off_nadir_deg = off_nadir_deg
+        self.max_talkers = max_talkers
+        self.grid_step_deg = grid_step_deg
+        self.min_separation_deg = min_separation_deg
+        self.min_salience_db = min_salience_db
+        self.vad_floor_db = vad_floor_db
+        self.freq_hz = freq_hz
+        self.mode = mode
+        self.loading = loading
+        self.update_hz = max(1.0, update_hz)
+        self.hold_cycles = max(1, int(hold_seconds * update_hz))
+        self.reselect_deg = reselect_deg
+        self.gate_when_empty = gate_when_empty
+
+        self.ctrl = LiveBeamController(
+            geometry,
+            device=device,
+            samplerate=samplerate,
+            monitor=monitor,
+            output_device=output_device,
+            record_path=record_path,
+            track_covariance=True,
+        )
+        self._thread: Optional[threading.Thread] = None
+        self._stop = threading.Event()
+        self._lock = threading.Lock()
+        self._detections: list = []          # last gated detections (for readout)
+        self._last_looks: list = []           # held look azimuths
+        self._last_sig = None                 # quantized (looks, nulls) signature
+        self._hold = 0
+        self.error = ""
+
+    # ---- lifecycle ----
+    def start(self) -> None:
+        self.ctrl.connect()
+        self._stop.clear()
+        self._thread = threading.Thread(target=self._loop, name="autosteer", daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=2.0)
+            self._thread = None
+        self.ctrl.disconnect()
+
+    def __enter__(self):
+        self.start()
+        return self
+
+    def __exit__(self, *exc):
+        self.stop()
+
+    # ---- readout ----
+    def detections(self) -> list:
+        """Copy of the latest gated detections (``Detection`` list, in/out flagged)."""
+        with self._lock:
+            return list(self._detections)
+
+    def read_level(self) -> float:
+        return self.ctrl.read_level()
+
+    # ---- control loop ----
+    def _loop(self) -> None:  # pragma: no cover (timing/thread)
+        period = 1.0 / self.update_hz
+        while not self._stop.is_set():
+            try:
+                self._tick()
+            except Exception as exc:  # keep the thread alive; surface the error
+                self.error = str(exc)
+            self._stop.wait(period)
+
+    def _quantize(self, azimuths) -> tuple:
+        """Deadband: snap azimuths to the re-select grid so tiny jitter doesn't
+        force a redesign."""
+        q = sorted({round(az / self.reselect_deg) for az in azimuths})
+        return tuple(q)
+
+    def _tick(self) -> None:
+        cov, freqs = self.ctrl.snapshot_covariance()
+        if cov is None:
+            return
+        res = doa.detect(
+            cov, freqs, self.geometry,
+            off_nadir_deg=self.off_nadir_deg,
+            grid_step_deg=self.grid_step_deg,
+            max_talkers=self.max_talkers,
+            min_separation_deg=self.min_separation_deg,
+            min_salience_db=self.min_salience_db,
+            vad_floor_db=self.vad_floor_db,
+        )
+        doa.sector_gate(
+            res.detections,
+            self.sector.center_deg,
+            self.sector.half_width_deg,
+            front_offset_deg=self.sector.front_offset_deg,
+        )
+        with self._lock:
+            self._detections = res.detections
+
+        in_az = [d.azimuth_deg for d in res.detections if d.in_sector]
+        out_az = [d.azimuth_deg for d in res.detections if not d.in_sector]
+
+        # hysteresis: hold the last look set briefly when detections drop out
+        if in_az:
+            self._hold = self.hold_cycles
+            looks = in_az
+        elif self._hold > 0:
+            self._hold -= 1
+            looks = self._last_looks
+            out_az = []                        # don't null while merely holding
+        else:
+            looks = []
+
+        sig = (self._quantize(looks), self._quantize(out_az))
+        if sig == self._last_sig:
+            return                             # nothing meaningful changed
+        self._last_sig = sig
+        self._last_looks = looks
+
+        if looks:
+            design = design_multi_bearings(
+                self.geometry,
+                [(az, self.off_nadir_deg) for az in looks],
+                [(az, self.off_nadir_deg) for az in out_az],
+                freq_hz=self.freq_hz,
+                mode=self.mode,
+                loading=self.loading,
+                array_id="POLARIS",
+            )
+            self.ctrl.apply_design(design)
+            if self.gate_when_empty:
+                self.ctrl.set_mute(False)
+        elif self.gate_when_empty:
+            self.ctrl.set_mute(True)           # nobody in the area → silence
