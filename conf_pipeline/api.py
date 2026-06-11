@@ -15,11 +15,14 @@ from .model import (
     DEFAULT_TALKER_ELEVATION_M,
     AecConfig,
     AutomixerConfig,
+    ControlConfig,
     CoverageMode,
     CoverageZone,
     Crosspoint,
     Device,
     MatrixMixer,
+    MuteGroup,
+    MuteTrigger,
     Point2D,
     Processor,
     Route,
@@ -27,6 +30,7 @@ from .model import (
     RoomLayout,
     SystemConfig,
     Talker,
+    ZoneChannelRef,
     ZoneShape,
     default_elevation,
     find_device,
@@ -230,6 +234,30 @@ def remove_coverage_zone(config: SystemConfig, array_id: str, zone_id: str) -> S
             raise ValueError(f"Device {array_id} is not a microphone array.")
         return cov.remove_coverage_zone(d, zone_id)  # type: ignore[arg-type]
     return _map_device(config, array_id, fn)
+
+
+def _array_fn(config: SystemConfig, array_id: str, fn: Callable[[Device], Device]) -> SystemConfig:
+    def wrap(d: Device) -> Device:
+        if d.type != "microphoneArray":
+            raise ValueError(f"Device {array_id} is not a microphone array.")
+        return fn(d)
+    return _map_device(config, array_id, wrap)
+
+
+def set_zone_output_channel(config: SystemConfig, array_id: str, zone_id: str, channel: Optional[int]) -> SystemConfig:
+    """Assign (or clear with ``None``) a coverage area's own numbered output channel
+    (Designer steerable-coverage style). Regenerates the array's output ports."""
+    return _array_fn(config, array_id, lambda d: cov.set_zone_output_channel(d, zone_id, channel))  # type: ignore[arg-type]
+
+
+def set_zone_gain_db(config: SystemConfig, array_id: str, zone_id: str, gain_db: Optional[float]) -> SystemConfig:
+    """Set (or clear with ``None``) a coverage area's per-area gain trim (dB)."""
+    return _array_fn(config, array_id, lambda d: cov.set_zone_gain_db(d, zone_id, gain_db))  # type: ignore[arg-type]
+
+
+def auto_assign_zone_channels(config: SystemConfig, array_id: str) -> SystemConfig:
+    """Give every pickup area on the array a sequential output channel (idempotent)."""
+    return _array_fn(config, array_id, lambda d: cov.auto_assign_zone_channels(d))  # type: ignore[arg-type]
 
 
 # --------------------------------------------------------------------------- #
@@ -622,3 +650,115 @@ def auto_route(config: SystemConfig) -> AutoRouteResult:
     if to_jsonable(new) == to_jsonable(config):
         return AutoRouteResult(config, ["No changes — the design is already routed."], {"crosspoints": 0, "routes": 0, "mute_links": 0})
     return AutoRouteResult(new, changes, counts)
+
+
+# --------------------------------------------------------------------------- #
+# Logic / control — mute groups (v1.12.0)
+# --------------------------------------------------------------------------- #
+def _ensure_control(config: SystemConfig) -> ControlConfig:
+    return config.control if config.control is not None else ControlConfig(mute_groups=[])
+
+
+def create_mute_group(
+    id: str,
+    label: str,
+    device_ids: Optional[list[str]] = None,
+    zone_refs: Optional[list[ZoneChannelRef]] = None,
+    trigger: MuteTrigger = "software",
+    muted: bool = False,
+) -> MuteGroup:
+    return MuteGroup(
+        id=id, label=label,
+        device_ids=list(device_ids or []),
+        zone_refs=list(zone_refs or []),
+        trigger=trigger, muted=muted,
+    )
+
+
+def add_mute_group(config: SystemConfig, group: MuteGroup) -> SystemConfig:
+    ctrl = _ensure_control(config)
+    if any(g.id == group.id for g in ctrl.mute_groups):
+        raise ValueError(f"Duplicate mute-group id: {group.id}")
+    return _clone(config, control=ControlConfig(mute_groups=[*ctrl.mute_groups, group]))
+
+
+def remove_mute_group(config: SystemConfig, group_id: str) -> SystemConfig:
+    if config.control is None:
+        return config
+    groups = [g for g in config.control.mute_groups if g.id != group_id]
+    if len(groups) == len(config.control.mute_groups):
+        return config
+    return _clone(config, control=ControlConfig(mute_groups=groups))
+
+
+def set_mute_group_muted(config: SystemConfig, group_id: str, muted: bool) -> SystemConfig:
+    if config.control is None:
+        raise ValueError("No control config.")
+    groups = [_with(g, muted=muted) if g.id == group_id else g for g in config.control.mute_groups]
+    return _clone(config, control=ControlConfig(mute_groups=groups))
+
+
+# --------------------------------------------------------------------------- #
+# Optimize room — one-click "do everything" (v1.12.0). Orchestrates the existing
+# placement-recommendation, per-area channel assignment, and auto-route into a
+# single Designer-style action, returning the new config + a change summary.
+# --------------------------------------------------------------------------- #
+@dataclass
+class OptimizeRoomResult:
+    config: SystemConfig
+    changes: list[str] = field(default_factory=list)
+    auto_route: Optional[AutoRouteResult] = None
+
+
+def optimize_room(
+    config: SystemConfig,
+    *,
+    place_arrays: bool = True,
+    assign_channels: bool = True,
+    route: bool = True,
+    params=None,
+) -> OptimizeRoomResult:
+    """One-click optimize: (1) recommend + apply each array's best placement/steer
+    (when a room + talkers exist), (2) give every pickup area its own output channel,
+    (3) run :func:`auto_route`. Each stage is opt-out and idempotent.
+
+    Pure: returns a new config; never mutates the input.
+    """
+    from .sim import recommend_placement  # local import: sim is dependency-light but optional in spirit
+
+    new = config
+    changes: list[str] = []
+
+    arrays = [d for d in new.devices if d.type == "microphoneArray"]
+
+    if place_arrays and new.room is not None and new.talkers and arrays:
+        for arr in arrays:
+            try:
+                rec = recommend_placement(new, arr.id) if params is None else recommend_placement(new, arr.id, params=params)
+            except Exception as exc:  # noqa: BLE001 — never let a single array break the whole run
+                changes.append(f'Placement skipped for "{arr.label}" ({exc}).')
+                continue
+            if rec is None or rec.array_pos is None:
+                continue
+            new = set_device_position(new, arr.id, rec.array_pos)
+            new = set_device_elevation(new, arr.id, rec.array_elev)
+            changes.append(f'Placed "{arr.label}" at ({rec.array_pos.x:.2f}, {rec.array_pos.y:.2f}) m, '
+                           f'elev {rec.array_elev:.2f} m (score {rec.score.total:.2f}).')
+
+    if assign_channels:
+        for arr in [d for d in new.devices if d.type == "microphoneArray"]:
+            pickups = [z for z in arr.zones if z.type != "exclusion"]  # type: ignore[attr-defined]
+            unassigned = [z for z in pickups if z.output_channel is None]
+            if unassigned:
+                new = auto_assign_zone_channels(new, arr.id)
+                changes.append(f'Assigned {len(unassigned)} output channel(s) on "{arr.label}".')
+
+    ar: Optional[AutoRouteResult] = None
+    if route:
+        ar = auto_route(new)
+        new = ar.config
+        changes.extend(ar.changes)
+
+    if not changes:
+        changes.append("Nothing to optimize — room already placed, channelled, and routed.")
+    return OptimizeRoomResult(config=new, changes=changes, auto_route=ar)

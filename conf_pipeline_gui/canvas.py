@@ -249,6 +249,32 @@ class Canvas(QWidget):
             self._paint3d(p)
         else:
             self._paint2d(p)
+        self._paint_empty_hint(p)
+
+    def _paint_empty_hint(self, p):
+        """Centered hint when there is nothing on the canvas yet — no blank stare."""
+        cfg = self.cfg
+        has_room = cfg.room is not None and len(cfg.room.vertices) >= 3
+        if has_room or cfg.devices or cfg.talkers:
+            return
+        cx, cy = self.width() / 2, self.height() / 2
+        lines = [
+            ("Start your room design", QColor("#c4c5d2"), 15, QFont.DemiBold),
+            ("", None, 6, QFont.Normal),
+            ("• Use the Getting-started guide at the top, or", QColor("#8a93ad"), 11, QFont.Normal),
+            ("• Press the Room tool (R) and click to draw an outline", QColor("#8a93ad"), 11, QFont.Normal),
+            ("• Or load a sample from “Load sample…”", QColor("#8a93ad"), 11, QFont.Normal),
+        ]
+        y = cy - 36
+        for text, color, size, weight in lines:
+            if not text:
+                y += size
+                continue
+            p.setFont(QFont("Segoe UI", size, weight))
+            fm = p.fontMetrics()
+            p.setPen(color)
+            p.drawText(QPointF(cx - fm.horizontalAdvance(text) / 2, y), text)
+            y += fm.height() + 2
 
     def _grid_pen(self, axis):
         return QPen(QColor("#2c3760" if axis else "#172238"), 1)
@@ -781,6 +807,77 @@ class Canvas(QWidget):
         self.state.cam["dist"] = max(3.0, min(70.0, self.state.cam["dist"] * math.exp(e.angleDelta().y() * 0.0012 * -1)))
         self.update()
 
+    # ---- right-click context menu (2D) ----
+    def contextMenuEvent(self, e):
+        if self.state.view != "2d":
+            return
+        from PySide6.QtWidgets import QMenu
+        v = "2d"
+        world = self.s2w(e.pos().x(), e.pos().y(), v)
+        hit = self._hit_test(world, v)
+        menu = QMenu(self)
+
+        if hit and hit["kind"] == "device":
+            dev = next((d for d in self.cfg.devices if d.id == hit["id"]), None)
+            menu.addAction(f"Edit {dev.label if dev else hit['id']}", lambda: self._ctx_select(hit))
+            if dev is not None and dev.type == "microphoneArray":
+                menu.addAction("Add coverage zone here", lambda: self._ctx_add_zone(hit["id"], world))
+            menu.addSeparator()
+            menu.addAction("Delete device", lambda: self._ctx_delete({"kind": "device", "id": hit["id"]}))
+        elif hit and hit["kind"] == "talker":
+            menu.addAction("Edit talker", lambda: self._ctx_select(hit))
+            menu.addAction("Delete talker", lambda: self._ctx_delete({"kind": "talker", "id": hit["id"]}))
+        elif hit and hit["kind"] in ("zone", "zone-resize"):
+            menu.addAction("Edit zone", lambda: self._ctx_select({"kind": "zone", "array_id": hit["array_id"], "zone_id": hit["zone_id"]}))
+            menu.addAction("Delete zone", lambda: self._ctx_delete({"kind": "zone", "array_id": hit["array_id"], "zone_id": hit["zone_id"]}))
+        else:
+            # empty floor — quick-add affordances
+            menu.addAction("Place talker here", lambda: self._ctx_add_talker(world))
+            if any(d.type == "microphoneArray" for d in self.cfg.devices):
+                menu.addAction("Add array here", lambda: self._ctx_add_array(world))
+            else:
+                menu.addAction("Add mic array here", lambda: self._ctx_add_array(world))
+            if self.cfg.room is None:
+                menu.addAction("Add rectangular room", lambda: self.state.set_config(cp.set_room(self.cfg, cp.rectangular_room(9, 7, 3))))
+
+        if not menu.isEmpty():
+            menu.exec(e.globalPos())
+
+    def _ctx_select(self, sel):
+        self.state.select(sel)
+
+    def _ctx_delete(self, sel):
+        try:
+            if sel["kind"] == "device":
+                self.state.set_config(cp.remove_device(self.cfg, sel["id"]))
+            elif sel["kind"] == "talker":
+                self.state.set_config(cp.remove_talker(self.cfg, sel["id"]))
+            elif sel["kind"] == "zone":
+                self.state.set_config(cp.remove_coverage_zone(self.cfg, sel["array_id"], sel["zone_id"]))
+            self.state.select(None)
+        except Exception:
+            pass
+
+    def _ctx_add_talker(self, world):
+        tid = self.state.next_talker_id()
+        cfg = cp.add_talker(self.cfg, cp.create_talker(tid, tid, Point2D(self.snap(world.x), self.snap(world.y))))
+        self.state.select({"kind": "talker", "id": tid})
+        self.state.set_config(cfg)
+
+    def _ctx_add_array(self, world):
+        did = self.state.next_device_id("microphoneArray")
+        cfg = cp.add_device(self.cfg, cp.create_microphone_array(did, f"Ceiling Array {did}", "automatic"))
+        cfg = cp.set_device_position(cfg, did, Point2D(self.snap(world.x), self.snap(world.y)))
+        self.state.select({"kind": "device", "id": did})
+        self.state.set_config(cfg)
+
+    def _ctx_add_zone(self, array_id, world):
+        zid = self.state.next_zone_id(array_id)
+        shape = RectShape(origin=Point2D(self.snap(world.x - 1), self.snap(world.y - 1)), width=2, height=2)
+        cfg = cp.add_coverage_zone(self.cfg, array_id, cp.dynamic_zone(zid, f"Records {zid}", shape))
+        self.state.select({"kind": "zone", "array_id": array_id, "zone_id": zid})
+        self.state.set_config(cfg)
+
     # ---- 2D input ----
     def _hit_test(self, world, v):
         sp = self.w2s(world, v)
@@ -867,6 +964,22 @@ class Canvas(QWidget):
         except Exception as exc:  # surface engine errors without crashing
             self._toast(str(exc))
 
+    def _update_hover_cursor(self, world, v):
+        """Cursor feedback so interactive items feel grabbable in the Select tool."""
+        if self.state.tool != "select":
+            # tool-specific cursors: crosshair for drawing/placing
+            self.setCursor(Qt.CrossCursor if self.state.tool in ("room", "zone", "talker") else Qt.ArrowCursor)
+            return
+        hit = self._hit_test(world, v)
+        if hit is None:
+            self.setCursor(Qt.ArrowCursor)
+        elif hit["kind"] == "zone-resize":
+            self.setCursor(Qt.SizeFDiagCursor)
+        elif hit["kind"] in ("device", "talker", "vertex", "zone-move"):
+            self.setCursor(Qt.OpenHandCursor)
+        else:
+            self.setCursor(Qt.ArrowCursor)
+
     def _move2d(self, pos):
         if self.drag and self.drag.get("kind") == "calibrate":
             self.drag["b"] = pos
@@ -881,6 +994,7 @@ class Canvas(QWidget):
             self.hover = pos
             return self.update()
         if not self.drag:
+            self._update_hover_cursor(w, v)
             return
         psnap = Point2D(self.snap(w.x), self.snap(w.y))
         k = self.drag["kind"]

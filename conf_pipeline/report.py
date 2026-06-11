@@ -9,8 +9,8 @@ from __future__ import annotations
 import html
 
 from .api import talker_coverage
-from .coverage_check import coverage_report
-from .model import SystemConfig, is_mic_device
+from .coverage_check import coverage_report, zone_coverage_report
+from .model import SystemConfig, is_mic_device, is_pickup_zone
 from .routing import routing_summary, signal_flow_report
 from .validation import validate
 
@@ -34,6 +34,8 @@ def _markdown(config: SystemConfig) -> str:
             _routing_section(config),
             _aec_section(config),
             _coverage_section(config),
+            _coverage_areas_section(config),
+            _control_section(config),
             _validation_section(config),
         ) if s
     )
@@ -106,6 +108,51 @@ def _coverage_section(config: SystemConfig) -> str:
         cov = talker_coverage(config, t.id)
         status = "captured" if cov.captured else ("excluded" if cov.excluded_by else "not in a pickup zone")
         lines.append(f"- {t.label}: {status}")
+    return "\n".join(lines)
+
+
+def _coverage_areas_section(config: SystemConfig) -> str:
+    """Per-array coverage areas with their output channel / gain trim, plus the
+    zone-vs-coverage findings (Designer-style steerable-coverage view)."""
+    arrays = [d for d in config.devices if d.type == "microphoneArray"]
+    pickup_zones = [z for a in arrays for z in a.zones if is_pickup_zone(z)]  # type: ignore[attr-defined]
+    if not pickup_zones:
+        return ""
+    lines = [
+        "## Coverage areas",
+        "",
+        "| Array | Area | Type | Out channel | Gain (dB) |",
+        "| --- | --- | --- | --- | --- |",
+    ]
+    for a in arrays:
+        for z in a.zones:  # type: ignore[attr-defined]
+            if not is_pickup_zone(z):
+                continue
+            ch = str(z.output_channel) if z.output_channel is not None else "—"
+            gain = f"{z.gain_db:+.1f}" if z.gain_db is not None else "0.0"
+            lines.append(f"| {a.label} | {z.label} | {z.type} | {ch} | {gain} |")
+    zrep = zone_coverage_report(config)
+    if zrep.zones:
+        covered = sum(1 for z in zrep.zones if z.centroid_covered)
+        lines.append("")
+        lines.append(f"- {covered}/{len(zrep.zones)} coverage area(s) inside their array's pickup circle")
+        if zrep.uncovered:
+            lines.append("- Outside coverage: " + ", ".join(f"{z.zone_label} ({z.array_id})" for z in zrep.uncovered))
+        if zrep.partial:
+            lines.append("- Partially covered (edges outside): " + ", ".join(f"{z.zone_label} ({z.array_id})" for z in zrep.partial))
+        if zrep.contended:
+            lines.append("- Lobe contention (2+ arrays cover the area): " + ", ".join(f"{z.zone_label}" for z in zrep.contended))
+    return "\n".join(lines)
+
+
+def _control_section(config: SystemConfig) -> str:
+    if config.control is None or not config.control.mute_groups:
+        return ""
+    lines = ["## Mute groups"]
+    for g in config.control.mute_groups:
+        members = list(g.device_ids) + [f"{r.array_id}/{r.zone_id}" for r in g.zone_refs]
+        state = "muted" if g.muted else "unmuted"
+        lines.append(f"- {g.label} [{g.trigger}, {state}]: {', '.join(members) or '(empty)'}")
     return "\n".join(lines)
 
 

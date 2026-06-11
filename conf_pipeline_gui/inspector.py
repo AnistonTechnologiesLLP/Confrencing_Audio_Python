@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSlider,
+    QSpinBox,
     QTabWidget,
     QVBoxLayout,
     QWidget,
@@ -156,8 +157,20 @@ class Inspector(QWidget):
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+
+        # Status banner: live validation state + the single most useful next step,
+        # clickable to jump to the relevant tab. Always visible above the tabs.
+        self.banner = QLabel("")
+        self.banner.setProperty("inspectorBanner", "true")
+        self.banner.setWordWrap(True)
+        self.banner.setContentsMargins(12, 8, 12, 8)
+        self.banner.setTextInteractionFlags(Qt.LinksAccessibleByMouse)
+        self.banner.linkActivated.connect(self._banner_link)
+        root.addWidget(self.banner)
+
         self.tabs = QTabWidget()
-        root.addWidget(self.tabs)
+        root.addWidget(self.tabs, 1)
 
         # ---- live array-control state (host-side beamforming) ----
         self._live_ctl = None            # MicController while connected
@@ -1355,6 +1368,47 @@ class Inspector(QWidget):
         self.state.set_config(cfg)
 
     # --------------------------------------------------------------- refresh
+    def _banner_link(self, href: str):
+        """Banner hint links jump to a tab (tab:Issues) or trigger an action (act:optimize)."""
+        if href.startswith("tab:"):
+            name = href.split(":", 1)[1]
+            for i in range(self.tabs.count()):
+                if self.tabs.tabText(i) == name:
+                    self.tabs.setCurrentIndex(i)
+                    return
+        elif href == "act:build":
+            self.tabs.setCurrentIndex(0)
+
+    def _refresh_banner(self, cfg, res):
+        """One-line status + next-step hint above the tabs."""
+        # Determine the most useful next step from the design state.
+        arrays = [d for d in cfg.devices if d.type == "microphoneArray"]
+        has_proc = any(d.type == "processor" for d in cfg.devices)
+        if not res.ok:
+            n = len(res.errors)
+            self.banner.setText(
+                f"<b style='color:#ff6b81'>✗ {n} error{'s' if n != 1 else ''}</b> — "
+                f"<a href='tab:Issues' style='color:#85a0ff'>review in Issues ›</a>"
+            )
+            self.banner.setProperty("level", "error")
+        else:
+            # valid — surface the best next action
+            hint = None
+            if not arrays and not cfg.devices:
+                hint = "Add a device in <a href='act:build' style='color:#85a0ff'>Build ›</a>"
+            elif arrays and not has_proc:
+                hint = "Add a processor (DSP) so AEC & the automixer have somewhere to live"
+            elif has_proc and not cfg.routes:
+                hint = "Run <b>Optimize room</b> or <b>Auto-Route</b> from the toolbar to wire it up"
+            warn = len(res.warnings)
+            base = "<b style='color:#3ddc97'>✓ Valid</b>"
+            if warn:
+                base += f" · <span style='color:#f7c948'>{warn} warning{'s' if warn != 1 else ''}</span> (<a href='tab:Issues' style='color:#85a0ff'>Issues ›</a>)"
+            self.banner.setText(base + (f" — {hint}" if hint else ""))
+            self.banner.setProperty("level", "ok" if not warn else "warn")
+        self.banner.style().unpolish(self.banner)
+        self.banner.style().polish(self.banner)
+
     def refresh(self):
         self._refreshing = True
         cfg = self.state.config
@@ -1387,6 +1441,7 @@ class Inspector(QWidget):
         self._refresh_dsp()
         # issues
         res = cp.validate(cfg)
+        self._refresh_banner(cfg, res)
         self.issue_badge.setText(("✓ Valid" if res.ok else f"✗ {len(res.errors)} error(s)") + f" · {len(res.warnings)} warning(s)")
         self.issue_list.clear()
         ic = ISSUE_COLORS[getattr(self.state, "theme", "dark")]
@@ -1406,6 +1461,12 @@ class Inspector(QWidget):
                 parts.append("uncovered: " + ", ".join(label_of.get(t, t) for t in rep.uncovered))
             if rep.overlaps:
                 parts.append(f"{len(rep.overlaps)} array overlap(s)")
+            zrep = cp.zone_coverage_report(cfg)
+            if zrep.zones:
+                covered_areas = sum(1 for z in zrep.zones if z.centroid_covered)
+                parts.append(f"{covered_areas}/{len(zrep.zones)} coverage area(s) in pickup")
+                if zrep.contended:
+                    parts.append(f"{len(zrep.contended)} area(s) contended")
             self.coverage_lbl.setText("  ·  ".join(parts))
         # routing
         s = cp.routing_summary(cfg)
@@ -1450,9 +1511,48 @@ class Inspector(QWidget):
             self._talker_props(t)
         elif sel["kind"] == "zone":
             self.sel_layout.addWidget(QLabel(f"Zone {sel['zone_id']} on {sel['array_id']}"))
+            self._zone_props(sel["array_id"], sel["zone_id"])
             rm = QPushButton("Delete zone")
             rm.clicked.connect(lambda: self.state.set_config(cp.remove_coverage_zone(cfg, sel["array_id"], sel["zone_id"])))
             self.sel_layout.addWidget(rm)
+
+    def _zone_props(self, array_id, zone_id):
+        """Per-coverage-area output channel + gain (Designer steerable coverage)."""
+        cfg = self.state.config
+        arr = next((d for d in cfg.devices if d.id == array_id), None)
+        zone = next((z for z in arr.zones if z.id == zone_id), None) if arr else None
+        if zone is None or zone.type == "exclusion":
+            return  # exclusion zones carry no output channel
+        form = QFormLayout()
+        ch = QComboBox()
+        ch.addItem("— (mixed only)", None)
+        for i in range(1, cp.MAX_ZONES_PER_ARRAY + 1):
+            ch.addItem(str(i), i)
+        cur = 0 if zone.output_channel is None else zone.output_channel
+        ch.setCurrentIndex(cur)
+
+        def _set_channel(_idx):
+            if self._refreshing:
+                return
+            val = ch.currentData()
+            try:
+                self.state.set_config(cp.set_zone_output_channel(self.state.config, array_id, zone_id, val))
+            except cp.CoverageError as e:
+                ch.setCurrentIndex(0 if zone.output_channel is None else zone.output_channel)
+                self.coverage_lbl.setText(f"⚠ {e}")
+        ch.currentIndexChanged.connect(_set_channel)
+        form.addRow("Output channel", ch)
+
+        gain = NoWheelDoubleSpinBox()
+        gain.setRange(cp.ZONE_GAIN_DB_MIN, cp.ZONE_GAIN_DB_MAX)
+        gain.setSingleStep(0.5)
+        gain.setSuffix(" dB")
+        gain.setValue(zone.gain_db if zone.gain_db is not None else 0.0)
+        gain.valueChanged.connect(
+            lambda v: None if self._refreshing else self.state.set_config(cp.set_zone_gain_db(self.state.config, array_id, zone_id, float(v)))
+        )
+        form.addRow("Area gain", gain)
+        self.sel_layout.addLayout(form)
 
     def _device_props(self, d):
         form = QFormLayout()

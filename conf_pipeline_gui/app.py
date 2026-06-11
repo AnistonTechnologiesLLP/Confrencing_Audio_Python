@@ -13,12 +13,14 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QSplitter,
     QToolBar,
+    QVBoxLayout,
     QWidget,
 )
 
 import conf_pipeline as cp
 
 from .canvas import Canvas
+from .guide import GuidePanel
 from .inspector import Inspector
 from .scenarios import SCENARIOS
 from .state import AppState, now_iso
@@ -53,6 +55,9 @@ QToolButton:hover {{ background: {hover}; color: {text}; }}
 QToolButton:pressed {{ background: {surface3}; }}
 QToolButton:checked {{ background: {surface3}; color: {accent_bright}; border: 1px solid {border_strong}; }}
 QToolButton:disabled {{ color: {faint}; }}
+QToolButton[primary="true"] {{ color: {accent_bright}; font-weight: 700; }}
+QToolButton[primary="true"]:hover {{ background: {sel}; color: {accent_bright}; border: 1px solid {accent}; }}
+QLabel[toolbarSection="true"] {{ color: {faint}; font-size: 9px; font-weight: 800; letter-spacing: 1px; padding: 0 7px 0 3px; }}
 
 QPushButton {{ background: {surface2}; color: {text_dim}; border: 1px solid {border}; border-radius: 8px; padding: 6px 12px; font-weight: 500; }}
 QPushButton:hover {{ background: {hover}; border-color: {border_strong}; color: {text}; }}
@@ -110,6 +115,23 @@ QFrame[card="true"] {{ border: 1px solid {border}; border-radius: 7px; }}
 QFrame[frameShape="4"], QFrame[frameShape="5"] {{ color: {border}; background: {border}; max-height: 1px; }}
 QStatusBar {{ background: {surface}; color: {muted}; border-top: 1px solid {border}; }}
 QStatusBar::item {{ border: 0; }}
+
+QFrame[guidePanel="true"] {{ background: {surface2}; border-bottom: 1px solid {border}; }}
+QLabel[guideHeader="true"] {{ color: {text}; font-weight: 800; font-size: 12px; }}
+QLabel[guideSub="true"] {{ color: {muted}; font-size: 11px; padding-left: 8px; }}
+QLabel[guideArrow="true"] {{ color: {faint}; font-size: 13px; }}
+QWidget[guideStep="true"] {{ background: {surface3}; border: 1px solid {border}; border-radius: 9px; }}
+QWidget[guideStep="true"][done="true"] {{ background: {sel}; border: 1px solid {ok}; }}
+QLabel[guideDot="true"] {{ color: {muted}; font-size: 13px; font-weight: 700; }}
+QLabel[guideTitle="true"] {{ color: {text_dim}; font-weight: 600; }}
+QLabel[guideTitle="true"][done="true"] {{ color: {ok}; }}
+QWidget[guideStep="true"] QPushButton {{ background: {accent}; color: {on_accent}; border: 0; border-radius: 6px; padding: 4px 9px; font-weight: 700; }}
+QWidget[guideStep="true"] QPushButton:hover {{ background: {accent_bright}; }}
+
+QLabel[inspectorBanner="true"] {{ background: {surface2}; border-bottom: 1px solid {border}; font-size: 12px; }}
+QLabel[inspectorBanner="true"][level="error"] {{ background: {surface2}; border-bottom: 1px solid {err}; }}
+QLabel[inspectorBanner="true"][level="warn"] {{ background: {surface2}; border-bottom: 1px solid {warn}; }}
+QLabel[inspectorBanner="true"][level="ok"] {{ background: {surface2}; border-bottom: 1px solid {ok}; }}
 """
 
 
@@ -139,7 +161,22 @@ class MainWindow(QMainWindow):
         split.setStretchFactor(0, 1)
         split.setStretchFactor(1, 0)
         split.setSizes([820, 420])
-        self.setCentralWidget(split)
+
+        # Central column: guided getting-started strip above the editor split.
+        central = QWidget()
+        col = QVBoxLayout(central)
+        col.setContentsMargins(0, 0, 0, 0)
+        col.setSpacing(0)
+        self.guide = GuidePanel(self.state, {
+            "rect_room": self._rect_room,
+            "add_array": self._guide_add_array,
+            "zone_tool": lambda: self._set_tool("zone", sync=True),
+            "talker_tool": lambda: self._set_tool("talker", sync=True),
+            "optimize": self._optimize_room,
+        })
+        col.addWidget(self.guide)
+        col.addWidget(split, 1)
+        self.setCentralWidget(central)
 
         self._build_toolbar()
         self._build_statusbar()
@@ -148,103 +185,131 @@ class MainWindow(QMainWindow):
         self._sync_toolbar()
 
     # ----------------------------------------------------------------- toolbar
+    def _section_label(self, text: str) -> QLabel:
+        """A small uppercase caption that titles a toolbar group."""
+        lbl = QLabel(text.upper())
+        lbl.setProperty("toolbarSection", "true")
+        return lbl
+
+    def _act(self, glyph: str, label: str, slot, tip: str, *, checkable=False, primary=False) -> QAction:
+        """Build a tooltip-rich toolbar action. ``glyph`` is a leading unicode icon."""
+        act = QAction(f"{glyph}  {label}" if glyph else label, self, checkable=checkable)
+        act.setToolTip(f"{label} — {tip}")
+        act.setStatusTip(tip)
+        if slot is not None:
+            act.triggered.connect(slot)
+        if primary:
+            act.setProperty("primary", "true")
+        return act
+
     def _build_toolbar(self):
+        # Text-beside-icon, grouped into captioned sections so 25 actions read as
+        # six small clusters instead of one undifferentiated row.
         tb = QToolBar("Main")
         tb.setMovable(False)
+        tb.setIconSize(tb.iconSize())
+        tb.setStyleSheet("")  # inherit app QSS
         self.addToolBar(tb)
+        self._toolbar = tb
 
+        def group(caption: str):
+            tb.addWidget(self._section_label(caption))
+
+        # ---- Tools (canvas edit mode) ----
+        group("Tools")
         self.tool_group = QActionGroup(self)
         self.tool_group.setExclusive(True)
-        for key, label in [("select", "Select"), ("connect", "Connect"), ("room", "Room"), ("zone", "Zone"), ("talker", "Talker")]:
-            act = QAction(label, self, checkable=True)
+        tool_meta = [
+            ("select", "▲", "Select", "Move and select devices, zones, talkers, room corners"),
+            ("connect", "↔", "Connect", "Click device → device to wire a route"),
+            ("room", "▭", "Room", "Click to draw the room outline; double-click to close"),
+            ("zone", "◰", "Zone", "Drag a coverage/exclusion area on the floor"),
+            ("talker", "☺", "Talker", "Click to drop a person (talker)"),
+        ]
+        for key, glyph, label, tip in tool_meta:
+            act = self._act(glyph, label, lambda _c, k=key: self._set_tool(k), tip, checkable=True)
             act.setData(key)
-            act.triggered.connect(lambda _checked, k=key: self._set_tool(k))
             self.tool_group.addAction(act)
             tb.addAction(act)
             if key == "select":
                 act.setChecked(True)
         tb.addSeparator()
 
+        # ---- View ----
+        group("View")
         self.view_group = QActionGroup(self)
-        for key, label in [("2d", "2D"), ("3d", "3D")]:
-            act = QAction(label, self, checkable=True)
-            act.triggered.connect(lambda _c, k=key: self._set_view(k))
+        for key, glyph, tip in [("2d", "▦", "Top-down 2D plan view"), ("3d", "◳", "Orbit 3D view")]:
+            act = self._act(glyph, key.upper(), lambda _c, k=key: self._set_view(k), tip, checkable=True)
             self.view_group.addAction(act)
             tb.addAction(act)
             if key == "2d":
                 act.setChecked(True)
+        self.act_coverage = self._act("◎", "Coverage", self._toggle_coverage,
+                                      "Overlay each array's floor coverage circle", checkable=True)
+        tb.addAction(self.act_coverage)
         tb.addSeparator()
 
-        self.act_undo = QAction("Undo", self)
-        self.act_undo.triggered.connect(self.state.undo)
-        self.act_redo = QAction("Redo", self)
-        self.act_redo.triggered.connect(self.state.redo)
+        # ---- Edit ----
+        group("Edit")
+        self.act_undo = self._act("↶", "Undo", self.state.undo, "Undo the last change")
+        self.act_redo = self._act("↷", "Redo", self.state.redo, "Redo")
         tb.addAction(self.act_undo)
         tb.addAction(self.act_redo)
         tb.addSeparator()
 
-        auto = QAction("Auto-configure", self)
-        auto.triggered.connect(self._auto)
-        tb.addAction(auto)
-        auto_route = QAction("Auto-Route", self)
-        auto_route.triggered.connect(self._auto_route)
+        # ---- Design (the one-click automation — primary actions) ----
+        group("Design")
+        optimize = self._act("✨", "Optimize room", self._optimize_room,
+                             "One click: place arrays, assign coverage channels, route everything", primary=True)
+        tb.addAction(optimize)
+        auto_route = self._act("⚡", "Auto-Route", self._auto_route,
+                               "AEC references + automixer + far-end & near-end routing", primary=True)
         tb.addAction(auto_route)
-        rect = QAction("Rect room", self)
-        rect.triggered.connect(self._rect_room)
+        auto = self._act("⚙", "Auto-configure", self._auto, "AEC + automixer buses only (no reinforcement routing)")
+        tb.addAction(auto)
+        tb.addSeparator()
+
+        # ---- Room / floor plan ----
+        group("Room")
+        rect = self._act("▭", "Rect room", self._rect_room, "Drop a rectangular room you can resize")
         tb.addAction(rect)
-        self.act_coverage = QAction("Show coverage", self, checkable=True)
-        self.act_coverage.triggered.connect(self._toggle_coverage)
-        tb.addAction(self.act_coverage)
-        plan = QAction("Floor plan…", self)
-        plan.triggered.connect(self._import_floor_plan)
+        plan = self._act("🖼", "Floor plan…", self._import_floor_plan, "Place a floor-plan image under the room")
         tb.addAction(plan)
-        calib = QAction("Calibrate…", self)
-        calib.triggered.connect(self._calibrate_scale)
+        calib = self._act("📏", "Calibrate…", self._calibrate_scale, "Drag a known distance to set the floor-plan scale")
         tb.addAction(calib)
         tb.addSeparator()
 
+        # ---- Project (samples + multi-room) ----
+        group("Project")
         self.scenario = QComboBox()
+        self.scenario.setToolTip("Load a sample room to explore")
         self.scenario.addItem("Load sample…", "")
         for key, label, _fn in SCENARIOS:
             self.scenario.addItem(label, key)
         self.scenario.addItem("Empty", "empty")
         self.scenario.currentIndexChanged.connect(self._load_scenario)
         tb.addWidget(self.scenario)
-        tb.addSeparator()
-
-        tb.addWidget(QLabel(" Room "))
         self.room_combo = QComboBox()
         self.room_combo.setMinimumWidth(120)
+        self.room_combo.setToolTip("Switch between rooms in this project")
         self._updating_rooms = False
         self.room_combo.currentIndexChanged.connect(self._room_changed)
         tb.addWidget(self.room_combo)
-        add_room = QAction("+ Room", self)
-        add_room.triggered.connect(lambda: self.state.add_room())
-        tb.addAction(add_room)
-        rm_room = QAction("− Room", self)
-        rm_room.triggered.connect(lambda: self.state.remove_room(self.state.active_room))
-        tb.addAction(rm_room)
-        name_act = QAction("Auto-name", self)
-        name_act.triggered.connect(self._auto_name)
-        tb.addAction(name_act)
-        deploy_act = QAction("Deploy", self)
-        deploy_act.triggered.connect(self._deploy)
-        tb.addAction(deploy_act)
+        tb.addAction(self._act("＋", "Room", lambda: self.state.add_room(), "Add a new room to the project"))
+        tb.addAction(self._act("－", "Room", lambda: self.state.remove_room(self.state.active_room), "Remove the current room"))
+        tb.addAction(self._act("🏷", "Auto-name", self._auto_name, "Apply a consistent naming scheme to all devices"))
+        tb.addAction(self._act("⇪", "Deploy", self._deploy, "Mark the current design as deployed and show the diff"))
         tb.addSeparator()
 
-        exp = QAction("Export JSON", self)
-        exp.triggered.connect(self._export)
-        imp = QAction("Import JSON", self)
-        imp.triggered.connect(self._import)
-        rep = QAction("Export report", self)
-        rep.triggered.connect(self._export_report)
-        tb.addAction(exp)
-        tb.addAction(imp)
-        tb.addAction(rep)
+        # ---- File ----
+        group("File")
+        tb.addAction(self._act("📂", "Import", self._import, "Load a config from JSON"))
+        tb.addAction(self._act("💾", "Export", self._export, "Save this config to JSON"))
+        tb.addAction(self._act("📄", "Report", self._export_report, "Export a shareable Markdown/HTML design report"))
         tb.addSeparator()
-        theme = QAction("◐ Theme", self)
-        theme.triggered.connect(self._toggle_theme)
-        tb.addAction(theme)
+        tb.addAction(self._act("◐", "Theme", self._toggle_theme, "Toggle dark / light theme"))
+        # Help re-opens the guided panel.
+        tb.addAction(self._act("？", "Guide", self._toggle_guide, "Show the step-by-step getting-started guide"))
 
     def _build_statusbar(self):
         self.coord_label = QLabel("x — , y —")
@@ -295,8 +360,29 @@ class MainWindow(QMainWindow):
         QMessageBox.information(self, "Auto-Route", "\n".join(f"• {c}" for c in res.changes) or "No changes.")
         self.toast("Auto-Route complete")
 
+    def _optimize_room(self):
+        res = cp.optimize_room(self.state.config)
+        self.state.set_config(res.config)  # one undo step
+        QMessageBox.information(self, "Optimize room", "\n".join(f"• {c}" for c in res.changes) or "No changes.")
+        self.toast("Optimize room complete")
+
     def _rect_room(self):
         self.state.set_config(cp.set_room(self.state.config, cp.rectangular_room(9, 7, 3)))
+
+    def _guide_add_array(self):
+        """Guide step 2: add a ceiling array at the room centre (one-click)."""
+        cfg = self.state.config
+        if cfg.room is None:
+            cfg = cp.set_room(cfg, cp.rectangular_room(9, 7, 3))
+        did = self.state.next_device_id("microphoneArray")
+        cfg = cp.add_device(cfg, cp.create_microphone_array(did, f"Ceiling Array {did}", "automatic"))
+        xs = [v.x for v in cfg.room.vertices]
+        ys = [v.y for v in cfg.room.vertices]
+        center = cp.Point2D(round((sum(xs) / len(xs)) * 4) / 4, round((sum(ys) / len(ys)) * 4) / 4)
+        cfg = cp.set_device_position(cfg, did, center)
+        self.state.selection = {"kind": "device", "id": did}
+        self.state.set_config(cfg)
+        self.toast(f"Added {did} at the room centre")
 
     def _toggle_coverage(self, on):
         self.state.show_coverage = bool(on)
@@ -436,6 +522,12 @@ class MainWindow(QMainWindow):
             )
         else:
             self.room_label.setText("No room")
+
+    def _toggle_guide(self):
+        if hasattr(self, "guide"):
+            self.guide.setVisible(not self.guide.isVisible())
+            if self.guide.isVisible():
+                self.guide.refresh()
 
     def _toggle_theme(self):
         self._light = not self._light

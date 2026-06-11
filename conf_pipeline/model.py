@@ -20,6 +20,9 @@ CONFIG_VERSION = 2
 MAX_ZONES_PER_ARRAY = 8
 MAX_MANUAL_LOBES = 8
 DEFAULT_DEDICATED_ZONE_SIZE_M = 1.8
+# Per-coverage-area output channel + trim (v1.12.0, Designer-style steerable coverage).
+ZONE_GAIN_DB_MIN = -60.0
+ZONE_GAIN_DB_MAX = 12.0
 GATING_SENSITIVITY_MIN = 0.0
 GATING_SENSITIVITY_MAX = 1.0
 NLP_LEVELS: tuple[str, ...] = ("off", "low", "medium", "high")
@@ -124,6 +127,13 @@ class CoverageZone:
     shape: ZoneShape
     always_on: bool
     label: str
+    # v1.12.0 — Designer-style per-area output: a pickup zone may carry its own
+    # numbered output channel (1..MAX_ZONES_PER_ARRAY) so it feeds a dedicated
+    # bus/lobe-out (à la MXA920 steerable coverage). None = mixed into the array's
+    # automix only. ``gain_db`` is the per-area trim. Both optional → omitted from
+    # JSON when absent, so v2 configs (and the TS version) round-trip unchanged.
+    output_channel: Optional[int] = None
+    gain_db: Optional[float] = None
 
 
 def is_pickup_zone(zone: CoverageZone) -> bool:
@@ -188,6 +198,37 @@ class MuteLink:
     linked_device_ids: list[str]
     sync_to_codec: bool
     muted: bool
+
+
+# --------------------------------------------------------------------------- #
+# Logic / control (v1.12.0) — config-only commissioning parity with Designer's
+# mute-control / logic blocks. Models mute GROUPS (a named set of devices and/or
+# coverage-area output channels that mute together) plus an optional external
+# mute trigger. No audio, no real logic I/O — settings + validation only.
+# --------------------------------------------------------------------------- #
+MuteTrigger = Literal["software", "logicIn", "button"]
+
+
+@dataclass
+class ZoneChannelRef:
+    """A reference to a coverage area's own output channel on an array."""
+    array_id: str
+    zone_id: str
+
+
+@dataclass
+class MuteGroup:
+    id: str
+    label: str
+    device_ids: list[str] = field(default_factory=list)        # devices muted together
+    zone_refs: list[ZoneChannelRef] = field(default_factory=list)  # per-area outputs muted together
+    trigger: MuteTrigger = "software"
+    muted: bool = False
+
+
+@dataclass
+class ControlConfig:
+    mute_groups: list[MuteGroup] = field(default_factory=list)
 
 
 # --------------------------------------------------------------------------- #
@@ -398,6 +439,7 @@ class SystemConfig:
     metadata: dict[str, str]
     room: Optional[RoomLayout] = None
     deployment: Optional[DeploymentState] = None
+    control: Optional[ControlConfig] = None
 
 
 def find_port(config: SystemConfig, port_id: str) -> Optional[Port]:
@@ -509,7 +551,10 @@ def _dsp_block(d: dict[str, Any]) -> DspBlock:
 
 
 def _zone(d: dict[str, Any]) -> CoverageZone:
-    return CoverageZone(id=d["id"], type=d["type"], shape=_shape(d["shape"]), always_on=d["alwaysOn"], label=d["label"])
+    return CoverageZone(
+        id=d["id"], type=d["type"], shape=_shape(d["shape"]), always_on=d["alwaysOn"], label=d["label"],
+        output_channel=d.get("outputChannel"), gain_db=d.get("gainDb"),
+    )
 
 
 def _device(d: dict[str, Any]) -> Device:
@@ -589,5 +634,21 @@ def config_from_dict(d: dict[str, Any]) -> SystemConfig:
         metadata=dict(d["metadata"]),
         room=_room(d["room"]) if d.get("room") is not None else None,
         deployment=DeploymentState(status=d["deployment"]["status"], last_deployed_at=d["deployment"].get("lastDeployedAt")) if d.get("deployment") is not None else None,
+        control=_control(d["control"]) if d.get("control") is not None else None,
     )
     return cfg
+
+
+def _mute_group(d: dict[str, Any]) -> MuteGroup:
+    return MuteGroup(
+        id=d["id"],
+        label=d["label"],
+        device_ids=list(d.get("deviceIds", [])),
+        zone_refs=[ZoneChannelRef(array_id=z["arrayId"], zone_id=z["zoneId"]) for z in d.get("zoneRefs", [])],
+        trigger=d.get("trigger", "software"),
+        muted=d.get("muted", False),
+    )
+
+
+def _control(d: dict[str, Any]) -> ControlConfig:
+    return ControlConfig(mute_groups=[_mute_group(g) for g in d.get("muteGroups", [])])
