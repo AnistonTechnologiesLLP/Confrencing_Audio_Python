@@ -482,6 +482,18 @@ with cp.ControlApiServer(holder.get, holder.apply, port=8765) as srv:
 Recall responses include the scene's `steer` / `activeZones` hints so the
 caller can aim the live beamformer.
 
+**Scheduling** — schedules live in the config (additive on v3): recall a scene
+at a local time on chosen weekdays, every week. `cp.SceneScheduler` executes
+them through the same `get/apply` pair as the API (injectable clock,
+`run_pending()` manual tick, or a daemon polling thread):
+
+```python
+c = cp.add_scene_schedule(c, cp.create_scene_schedule("morning", "meeting", "08:30", ["mon", "tue", "wed", "thu", "fri"]))
+holder = cp.ConfigHolder(c)
+with cp.SceneScheduler(holder.get, holder.apply) as sched:
+    ...  # fires at 08:30 on weekdays; sched.next_fire() tells you when
+```
+
 ## Designer-inspired workflow (1.8.0)
 
 Vendor-neutral, config/validation-only features (no audio/Dante/discovery/

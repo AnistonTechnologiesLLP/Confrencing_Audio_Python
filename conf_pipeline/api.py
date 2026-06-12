@@ -29,10 +29,12 @@ from .model import (
     RoomBackground,
     RoomLayout,
     Scene,
+    SceneSchedule,
     SceneSteer,
     SceneZoneState,
     SystemConfig,
     Talker,
+    WEEKDAYS,
     ZoneChannelRef,
     ZoneShape,
     default_elevation,
@@ -762,6 +764,45 @@ def capture_scene(config: SystemConfig, id: str, label: str) -> Scene:
             if is_pickup_zone(z):
                 zone_states.append(SceneZoneState(array_id=d.id, zone_id=z.id, gain_db=z.gain_db))
     return Scene(id=id, label=label, mute_states=mute_states, zone_states=zone_states)
+
+
+def create_scene_schedule(
+    id: str,
+    scene_id: str,
+    time: str,
+    days: Optional[list[str]] = None,
+    enabled: bool = True,
+) -> SceneSchedule:
+    """A weekly schedule entry: recall ``scene_id`` at local ``time`` ("HH:MM")
+    on the given weekday keys (``mon``…``sun``; default: every day)."""
+    return SceneSchedule(
+        id=id, scene_id=scene_id, time=time,
+        days=list(days) if days is not None else list(WEEKDAYS),
+        enabled=enabled,
+    )
+
+
+def add_scene_schedule(config: SystemConfig, schedule: SceneSchedule) -> SystemConfig:
+    ctrl = _ensure_control(config)
+    if any(s.id == schedule.id for s in ctrl.schedules):
+        raise ValueError(f"Duplicate schedule id: {schedule.id}")
+    return _clone(config, control=_with(ctrl, schedules=[*ctrl.schedules, schedule]))
+
+
+def remove_scene_schedule(config: SystemConfig, schedule_id: str) -> SystemConfig:
+    if config.control is None:
+        return config
+    schedules = [s for s in config.control.schedules if s.id != schedule_id]
+    if len(schedules) == len(config.control.schedules):
+        return config
+    return _clone(config, control=_with(config.control, schedules=schedules))
+
+
+def set_scene_schedule_enabled(config: SystemConfig, schedule_id: str, enabled: bool) -> SystemConfig:
+    if config.control is None:
+        raise ValueError("No control config.")
+    schedules = [_with(s, enabled=enabled) if s.id == schedule_id else s for s in config.control.schedules]
+    return _clone(config, control=_with(config.control, schedules=schedules))
 
 
 def recall_scene(config: SystemConfig, scene_id: str) -> SystemConfig:

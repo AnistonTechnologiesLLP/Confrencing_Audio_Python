@@ -42,10 +42,12 @@ from .model import (  # noqa: F401
     RoomObject,
     Route,
     Scene,
+    SceneSchedule,
     SceneSteer,
     SceneZoneState,
     SystemConfig,
     Talker,
+    WEEKDAYS,
     WiredMic,
     WirelessMic,
     ZoneChannelRef,
@@ -190,6 +192,8 @@ from .files import (  # noqa: F401
 )
 # ---- local HTTP control API: scene recall / mute / status ----
 from .control_api import ConfigHolder, ControlApiServer  # noqa: F401
+# ---- scene scheduler: recall a scene at a time ----
+from .scheduler import SceneScheduler  # noqa: F401
 from .naming import TYPE_LABEL, apply_naming_scheme, label_collisions, suggested_label  # noqa: F401
 from .routing import (  # noqa: F401
     Subscription,
@@ -239,14 +243,18 @@ from .api import (  # noqa: F401
     clear_room,
     configure_automixer,
     add_scene,
+    add_scene_schedule,
     capture_scene,
     create_config,
     create_mute_group,
     create_scene,
+    create_scene_schedule,
     create_talker,
     get_scene,
     recall_scene,
     remove_scene,
+    remove_scene_schedule,
+    set_scene_schedule_enabled,
     matrix_for,
     optimize_room,
     rectangular_room,

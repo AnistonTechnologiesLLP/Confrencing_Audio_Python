@@ -12,6 +12,7 @@ from .model import (
     MAX_MANUAL_LOBES,
     MAX_ZONES_PER_ARRAY,
     NLP_LEVELS,
+    WEEKDAYS,
     ZONE_GAIN_DB_MAX,
     ZONE_GAIN_DB_MIN,
     RectShape,
@@ -21,6 +22,7 @@ from .model import (
     is_mic_device,
     is_pickup_zone,
     is_processor,
+    parse_hhmm,
 )
 from .profiles import device_capabilities, get_device_profile
 
@@ -42,6 +44,7 @@ CODE_DESCRIPTIONS: dict[str, str] = {
     "COVERAGE_GAIN_INVALID": "Coverage-area gain trim is out of range.",
     "CONTROL_MUTE_GROUP_INVALID": "A mute group references a missing device or coverage area, or is empty.",
     "SCENE_INVALID": "A scene is empty, duplicates another scene's id, or references a missing mute group, array, or coverage area.",
+    "SCHEDULE_INVALID": "A scene schedule has a bad time/day, duplicates another schedule's id, or recalls a missing scene.",
     "MANUAL_LOBE_LIMIT": "Manual mode with more than 8 pickup lobes.",
     "AUTOMIXER_INVALID": "Automixer value out of range or output bus unresolved.",
     "DEVICE_PROFILE_UNKNOWN": "Device references a profile id not in the catalog.",
@@ -280,6 +283,21 @@ def _validate_control(config: SystemConfig, add: AddIssue) -> None:
             arr = find_device(config, st.array_id)
             if arr is None or arr.type != "microphoneArray":
                 add("error", "SCENE_INVALID", f'Scene "{scene.id}" steers a missing array "{st.array_id}".', [scene.id, st.array_id])
+    scene_ids = {s.id for s in config.control.scenes}
+    seen_schedule_ids: set[str] = set()
+    for sched in config.control.schedules:
+        if sched.id in seen_schedule_ids:
+            add("error", "SCHEDULE_INVALID", f'Duplicate schedule id "{sched.id}".', [sched.id])
+        seen_schedule_ids.add(sched.id)
+        if sched.scene_id not in scene_ids:
+            add("error", "SCHEDULE_INVALID", f'Schedule "{sched.id}" recalls missing scene "{sched.scene_id}".', [sched.id, sched.scene_id])
+        if parse_hhmm(sched.time) is None:
+            add("error", "SCHEDULE_INVALID", f'Schedule "{sched.id}" has invalid time "{sched.time}" (expected "HH:MM").', [sched.id])
+        if not sched.days:
+            add("error", "SCHEDULE_INVALID", f'Schedule "{sched.id}" has no days.', [sched.id])
+        for day in sched.days:
+            if day not in WEEKDAYS:
+                add("error", "SCHEDULE_INVALID", f'Schedule "{sched.id}" has unknown day "{day}" (expected one of {", ".join(WEEKDAYS)}).', [sched.id])
 
 
 def _validate_naming(config: SystemConfig, add: AddIssue) -> None:

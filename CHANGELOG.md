@@ -34,6 +34,32 @@ schema is unchanged.
   content, and a numpy cross-check that the stdlib per-band weights equal the
   live runtime's per-FFT-bin weights (skipped without the `[control]` extra).
 
+**Scene scheduling (C3)** — recall a scene at a time, on the room's weekly
+rhythm.
+
+### Added
+- **`SceneSchedule`** (`ControlConfig.schedules` — additive optional, schema
+  **stays v3**, matching the 1.12 precedent for optional fields): recall
+  ``sceneId`` at local ``"HH:MM"`` on the given weekday keys, every week;
+  per-entry ``enabled``. Builders `create_scene_schedule` /
+  `add_scene_schedule` / `remove_scene_schedule` /
+  `set_scene_schedule_enabled`; `parse_hhmm` joins the model helpers.
+- **`SceneScheduler`** (`conf_pipeline/scheduler.py`, stdlib): executes the
+  config's schedule entries through the same `get_config`/`apply` pair as the
+  control API, so GUI, HTTP, and scheduler mutate one consistent config.
+  Deterministic by construction — injectable clock, `run_pending()` manual
+  tick (fires at most once per scheduled minute, skips vanished scenes),
+  `next_fire()`, and an optional daemon polling thread for headless use.
+- **Validation**: `SCHEDULE_INVALID` — duplicate ids, missing scene, bad
+  `"HH:MM"`, empty/unknown days.
+- `GET /api/status` now reports the schedule list.
+- Tests (`tests/test_scheduler.py`, 13): additive round-trip (v3 unchanged,
+  pre-schedule v3 files load), builder guards, the validation matrix, and
+  clock-driven firing — due/day/disabled/wrong-minute filters, once-per-minute
+  dedup + re-arm a week later, multi-entry minutes, dangling-scene skip,
+  `next_fire` same-day vs week-wrap, thread lifecycle, and the status
+  endpoint.
+
 **External control API (C2)** — a local HTTP surface for room-control
 integrations: scene recall / mute / status.
 

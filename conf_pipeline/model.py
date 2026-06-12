@@ -265,10 +265,39 @@ class Scene:
     steer: list[SceneSteer] = field(default_factory=list)
 
 
+# Weekday keys for scene schedules, Monday-first (datetime.weekday() order).
+WEEKDAYS: tuple[str, ...] = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
+
+
+def parse_hhmm(text: str) -> Optional[tuple[int, int]]:
+    """Parse a strict 24-hour ``"HH:MM"`` → ``(hour, minute)``, or None."""
+    parts = text.split(":")
+    if len(parts) != 2 or not all(len(p) == 2 and p.isdigit() for p in parts):
+        return None
+    hour, minute = int(parts[0]), int(parts[1])
+    if not (0 <= hour <= 23 and 0 <= minute <= 59):
+        return None
+    return hour, minute
+
+
+@dataclass
+class SceneSchedule:
+    """Recall ``scene_id`` at ``time`` (local "HH:MM") on the given weekdays,
+    every week. Additive optional field on :class:`ControlConfig` — the schema
+    stays v3 and files without schedules are unaffected."""
+
+    id: str
+    scene_id: str
+    time: str                                                      # "HH:MM", local
+    days: list[str] = field(default_factory=lambda: list(WEEKDAYS))
+    enabled: bool = True
+
+
 @dataclass
 class ControlConfig:
     mute_groups: list[MuteGroup] = field(default_factory=list)
     scenes: list[Scene] = field(default_factory=list)              # v3
+    schedules: list[SceneSchedule] = field(default_factory=list)   # v3, additive
 
 
 # --------------------------------------------------------------------------- #
@@ -714,8 +743,19 @@ def _scene(d: dict[str, Any]) -> Scene:
     )
 
 
+def _schedule(d: dict[str, Any]) -> SceneSchedule:
+    return SceneSchedule(
+        id=d["id"],
+        scene_id=d["sceneId"],
+        time=d["time"],
+        days=[str(x) for x in d.get("days", list(WEEKDAYS))],
+        enabled=d.get("enabled", True),
+    )
+
+
 def _control(d: dict[str, Any]) -> ControlConfig:
     return ControlConfig(
         mute_groups=[_mute_group(g) for g in d.get("muteGroups", [])],
         scenes=[_scene(s) for s in d.get("scenes", [])],
+        schedules=[_schedule(s) for s in d.get("schedules", [])],
     )

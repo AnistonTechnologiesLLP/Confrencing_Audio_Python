@@ -72,6 +72,10 @@ def _status_payload(config: SystemConfig) -> dict[str, Any]:
             {"id": s.id, "label": s.label}
             for s in (ctrl.scenes if ctrl is not None else [])
         ],
+        "schedules": [
+            {"id": s.id, "sceneId": s.scene_id, "time": s.time, "days": list(s.days), "enabled": s.enabled}
+            for s in (ctrl.schedules if ctrl is not None else [])
+        ],
     }
 
 
