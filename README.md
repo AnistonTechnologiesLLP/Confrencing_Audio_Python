@@ -32,6 +32,10 @@ conf_pipeline/        the engine (pure dataclasses + functions, no Qt)
   api.py              public builder API, auto_configure, auto_route, talkers, angles, coverage, floor-plan
   coverage_check.py   array coverage circles + covered/uncovered/overlap report
   report.py           shareable design report (Markdown / HTML)
+  transport.py        DeviceTransport seam + SimulatedTransport, online status, push + reconcile
+  files.py            project file manager: recent files, autosave, crash recovery, migration notice
+  control_api.py      local HTTP control API (scene recall / mute / status; stdlib http.server)
+  scheduler.py        scene scheduler (weekly "HH:MM" recalls; injectable clock)
   sim/                placement simulation (scoring, search, pluggable validation)
 conf_pipeline_gui/    the PySide6 app — "Stagebar" workflow-modes shell
   state.py            AppState (undo/redo, selection, tool, mode, camera, live overlay)
@@ -58,7 +62,7 @@ conf_pipeline_control/ host-side array-microphone control (optional [control] ex
   octovox_bridge.py   zones → azimuths + HTTP client to the OCTOVOX clean server
   octovox_monitor.py  near-live cleaned monitor (rolling chunk → clean → playback)
   ab_test.py          A/B harness: record → beamform N ways → WAVs + dB report
-tests/                pytest suite (259 tests; incl. headless GUI smoke)
+tests/                pytest suite (357 tests; incl. headless GUI smoke)
 run_gui.py            launcher
 ```
 
@@ -461,7 +465,7 @@ res = client.clean_8ch(y8, 44100, target_az=za.target_az, interferer_az=za.inter
   talkback** (OCTOVOX's neural stages are whole-file/offline), with audible seams
   at chunk boundaries. Use headphones. `cc.CleanMonitor` drives it.
 
-## Scenes & external control (unreleased)
+## Scenes & external control (1.15.0)
 
 **Scenes** (schema v3) are named, recallable snapshots of the control surface —
 mute-group states and per-area gain trims, plus config-inert live-layer hints

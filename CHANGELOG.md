@@ -1,11 +1,21 @@
 # Changelog
 
 Python port of the Conferencing Audio Pipeline. Format based on
-[Keep a Changelog](https://keepachangelog.com/); versions track the TypeScript
-project they were ported from. The JSON **config schema** (`CONFIG_VERSION` = 1,
-camelCase keys) is identical to the TS version, so configs interoperate.
+[Keep a Changelog](https://keepachangelog.com/); versions originally tracked
+the TypeScript project they were ported from. The JSON **config schema** is
+camelCase, currently `CONFIG_VERSION` = 3 (v1/v2 files migrate losslessly);
+the TS sibling tracks v2 and needs a matching update to read v3 exports.
 
-## [Unreleased]
+## [1.15.0] - 2026-06-12
+
+**Commissioning, scenes & broadband honesty** — the phased evolution plan
+landed in full: repository hygiene (CI, type checking, pinned dev deps),
+wideband beam design with measured DI/beamwidth-vs-frequency curves, the
+simulated commissioning workflow (device transport, per-device online state,
+push + reconcile, project file manager), and the control story (scenes,
+a local HTTP control API, scene scheduling). Schema v2 → v3 (scenes), with
+schedules additive on v3. 357 tests (was 259); `conf_pipeline/` and
+`conf_pipeline_control/` are mypy-clean.
 
 **Wideband (subband) beam design** — the published beam design is now verified
 across the speech band (250 Hz–8 kHz) instead of asserted at a single 1 kHz
