@@ -39,11 +39,11 @@ def win(qapp):
 
 def test_window_builds(win):
     assert win.guide is not None
-    assert win.inspector is not None
-    # the Stagebar shell exposes the five workflow modes + the primary actions
+    # the Stagebar shell exposes the five workflow modes + a panel per mode
     from conf_pipeline_gui import workflow
 
     assert set(win.modebar.buttons) == set(workflow.MODES)
+    assert set(win.panels) == set(workflow.MODES)
     assert "Optimize room" in win.act_optimize.text()
     assert "Auto-Route" in win.act_auto_route.text()
 
@@ -71,7 +71,7 @@ def test_guide_steps_track_progress(win):
 
 
 def test_mute_group_add_toggle_remove(win):
-    ins = win.inspector
+    ins = win.panels["route"]
     c = cp.create_config("T", "2026-06-11T00:00:00Z")
     c = cp.add_device(c, cp.create_microphone_array("A", "Array"))
     c = cp.add_device(c, cp.create_wireless_mic("WM", "Lapel", "dante"))
@@ -95,17 +95,34 @@ def test_mute_group_add_toggle_remove(win):
 
 
 def test_mute_group_no_mics_is_noop(win):
-    ins = win.inspector
+    ins = win.panels["route"]
     win.state.set_config(cp.create_config("Empty", "2026-06-11T00:00:00Z"))
     ins._add_mute_group()  # no mute-capable mics → must not raise or add
     assert win.state.config.control is None or not win.state.config.control.mute_groups
 
 
-def test_inspector_banner_updates(win):
-    ins = win.inspector
+def test_validation_pill_and_issues_drawer(win):
     win.state.set_config(cp.create_config("Empty", "2026-06-11T00:00:00Z"))
-    ins.refresh()
-    assert ins.banner.text()  # non-empty status line
+    assert win.val_pill.text()  # non-empty status pill
+    assert win.val_pill.property("level") in ("ok", "warn", "error")
+    win._show_issues()
+    assert win.issues_drawer.isVisible()
+    assert win.issues_drawer.issue_badge.text()
+    win.issues_drawer.close_drawer()
+    assert not win.issues_drawer.isVisible()
+
+
+def test_hidden_panel_catches_up_on_show(win):
+    # edit in DESIGN while ROUTE is hidden; switching must show fresh data
+    win.state.set_mode("design")
+    c = cp.create_config("T", "2026-06-11T00:00:00Z")
+    c = cp.add_device(c, cp.create_processor("P", "DSP"))
+    c = cp.add_device(c, cp.create_codec("C", "Codec", "dante"))
+    win.state.set_config(cp.auto_route(c).config)
+    win.state.set_mode("route")
+    route = win.panels["route"]
+    route.refresh()  # the app refreshes via showEvent; force it offscreen
+    assert "route" in route.routing_summary_lbl.text()
 
 
 def test_canvas_context_helpers(win):

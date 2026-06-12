@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (
     QMenu,
     QMessageBox,
     QSplitter,
+    QStackedWidget,
     QToolButton,
     QVBoxLayout,
     QWidget,
@@ -32,16 +33,15 @@ import conf_pipeline as cp
 from . import icons, workflow
 from .canvas import Canvas
 from .guide import GuidePanel
-from .inspector import Inspector
+from .issues import IssuesDrawer
 from .modebar import ModeBar
+from .panels import DesignPanel, DeployPanel, LivePanel, RoutePanel, SimulatePanel
 from .scenarios import SCENARIOS
 from .state import AppState, now_iso
 from .theme import DARK_QSS, LIGHT_QSS, build_qss, palette  # noqa: F401 (re-exported)
 from .toolrail import MODE_TOOLS, ToolRail
 from .viewbar import ViewBar
 
-# Mode → inspector tab (bridge until the per-mode panels land).
-MODE_TAB = {"design": "Build", "simulate": "Simulate", "route": "Routing", "deploy": "Issues", "live": "Live"}
 # Pressing a tool key outside its home mode hops there first (Fusion-style).
 TOOL_HOME_MODE = {"room": "design", "zone": "design", "talker": "design", "connect": "route"}
 
@@ -54,8 +54,20 @@ class MainWindow(QMainWindow):
         self.state = AppState()
 
         self.canvas = Canvas(self.state)
-        self.inspector = Inspector(self.state)
         self.canvas.coord_cb = lambda s: self.coord_label.setText(s)
+
+        # per-mode right panels
+        self.panels = {
+            "design": DesignPanel(self.state),
+            "simulate": SimulatePanel(self.state),
+            "route": RoutePanel(self.state),
+            "deploy": DeployPanel(self.state),
+            "live": LivePanel(self.state),
+        }
+        self.panel_stack = QStackedWidget()
+        self.panel_stack.setMinimumWidth(380)
+        for mode in workflow.MODES:
+            self.panel_stack.addWidget(self.panels[mode])
 
         # floating view bar over the canvas's top-left corner
         self.viewbar = ViewBar(self.canvas)
@@ -71,13 +83,13 @@ class MainWindow(QMainWindow):
 
         split = QSplitter()
         split.addWidget(self.canvas)
-        split.addWidget(self.inspector)
+        split.addWidget(self.panel_stack)
         split.setStretchFactor(0, 1)
         split.setStretchFactor(1, 0)
         split.setSizes([860, 420])
 
-        row = QWidget()
-        row_lay = QHBoxLayout(row)
+        self._row = QWidget()
+        row_lay = QHBoxLayout(self._row)
         row_lay.setContentsMargins(0, 0, 0, 0)
         row_lay.setSpacing(0)
         row_lay.addWidget(self.toolrail)
@@ -96,8 +108,11 @@ class MainWindow(QMainWindow):
             "optimize": self._optimize_room,
         })
         col.addWidget(self.guide)
-        col.addWidget(row, 1)
+        col.addWidget(self._row, 1)
         self.setCentralWidget(central)
+
+        # the Issues drawer slides over the right panel, in every mode
+        self.issues_drawer = IssuesDrawer(self.state, central)
 
         self._build_statusbar()
         self._shortcuts()
@@ -274,21 +289,33 @@ class MainWindow(QMainWindow):
         self.toolrail.set_mode(mode)
         if self.state.tool not in MODE_TOOLS.get(mode, ["select"]):
             self._set_tool("select")
-        self._select_inspector_tab(MODE_TAB.get(mode, "Build"))
+        self.panel_stack.setCurrentWidget(self.panels[mode])
         # per-mode overlay defaults (user-overridable afterwards)
         if mode in ("simulate", "live") and not self.state.show_coverage:
             self.state.show_coverage = True
         self.canvas.update()
 
-    def _select_inspector_tab(self, name: str):
-        tabs = self.inspector.tabs
-        for i in range(tabs.count()):
-            if tabs.tabText(i) == name:
-                tabs.setCurrentIndex(i)
-                return
+    def _goto_mode(self, mode: str):
+        self.state.set_mode(mode)
 
     def _show_issues(self):
-        self._select_inspector_tab("Issues")
+        self.issues_drawer.open_drawer(self._row.geometry())
+
+    def _live_session_changed(self, busy: bool):
+        self.modebar.set_live_connected(busy)
+        if busy and self.state.mode != "live":
+            self.toast("Live session running — the LIVE dot stays red until you disconnect")
+
+    def resizeEvent(self, e):  # noqa: N802 (Qt override)
+        super().resizeEvent(e)
+        if hasattr(self, "issues_drawer"):
+            self.issues_drawer.reposition(self._row.geometry())
+
+    def closeEvent(self, e):  # noqa: N802 (Qt override)
+        live = self.panels.get("live")
+        if live is not None and live._live_busy():
+            live._live_disconnect()
+        super().closeEvent(e)
 
     # ------------------------------------------------------------------ actions
     def _set_tool(self, tool):
@@ -360,10 +387,8 @@ class MainWindow(QMainWindow):
         self.canvas.update()
 
     def _toggle_heatmap(self, on):
-        # Bridge to the Simulate surface's checkbox so its compute logic runs.
-        chk = getattr(self.inspector, "sim_heat_chk", None)
-        if chk is not None and chk.isChecked() != bool(on):
-            chk.setChecked(bool(on))
+        # Bridge to the Simulate panel's checkbox so its compute logic runs.
+        self.panels["simulate"].set_heatmap(bool(on))
 
     def _import_floor_plan(self):
         path, _ = QFileDialog.getOpenFileName(self, "Floor plan image", "", "Images (*.png *.jpg *.jpeg *.bmp *.gif)")

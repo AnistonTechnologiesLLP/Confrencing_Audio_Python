@@ -1,0 +1,390 @@
+"""DESIGN panel: room, devices, coverage zones, talkers, selection editor.
+
+The old Build tab plus the room/floor-plan actions that used to live in the
+toolbar. The zone *kind* now comes from the tool rail's flyout (state.zone_kind).
+"""
+from __future__ import annotations
+
+import math
+
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import (
+    QComboBox,
+    QFormLayout,
+    QGroupBox,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QListWidget,
+    QListWidgetItem,
+    QPushButton,
+    QVBoxLayout,
+    QWidget,
+)
+
+import conf_pipeline as cp
+from conf_pipeline.model import Point2D, RectShape
+
+from .common import DEVICE_TYPES, NoWheelDoubleSpinBox, PanelBase, clear_layout
+
+
+class DesignPanel(PanelBase):
+    MODE = "design"
+    TITLE = "Design"
+
+    def __init__(self, state):
+        super().__init__(state)
+        root = QVBoxLayout(self)
+        root.setContentsMargins(10, 8, 10, 8)
+        root.addWidget(self._header())
+
+        optimize = QPushButton("✨ Optimize room")
+        optimize.setProperty("accent", "true")
+        optimize.setToolTip("One click: place arrays, assign coverage channels, route everything")
+        optimize.clicked.connect(lambda: self._win("_optimize_room"))
+        root.addWidget(optimize)
+
+        root.addWidget(self._scroll(self._build_body()), 1)
+        self.refresh()
+
+    def _build_body(self) -> QWidget:
+        w = QWidget()
+        lay = QVBoxLayout(w)
+
+        room = QGroupBox("Room")
+        rl = QHBoxLayout(room)
+        rect = QPushButton("Rect room")
+        rect.setToolTip("Drop a rectangular room you can resize")
+        rect.clicked.connect(lambda: self._win("_rect_room"))
+        plan = QPushButton("Floor plan…")
+        plan.setToolTip("Place a floor-plan image under the room")
+        plan.clicked.connect(lambda: self._win("_import_floor_plan"))
+        calib = QPushButton("Calibrate…")
+        calib.setToolTip("Drag a known distance to set the floor-plan scale")
+        calib.clicked.connect(lambda: self._win("_calibrate_scale"))
+        rl.addWidget(rect)
+        rl.addWidget(plan)
+        rl.addWidget(calib)
+        lay.addWidget(room)
+
+        add = QGroupBox("Add device")
+        f = QHBoxLayout(add)
+        self.dev_type = QComboBox()
+        for label, val in DEVICE_TYPES:
+            self.dev_type.addItem(label, val)
+        self.dev_transport = QComboBox()
+        self.dev_transport.addItems(["dante", "analog"])
+        add_btn = QPushButton("Add")
+        add_btn.setProperty("accent", "true")
+        add_btn.clicked.connect(self._add_device)
+        f.addWidget(self.dev_type, 2)
+        f.addWidget(self.dev_transport, 1)
+        f.addWidget(add_btn)
+        lay.addWidget(add)
+
+        self.dev_list = QListWidget()
+        self.dev_list.setMaximumHeight(240)
+        self.dev_list.itemClicked.connect(self._on_device_click)
+        lay.addWidget(QLabel("Devices"))
+        lay.addWidget(self.dev_list, 1)
+        row = QHBoxLayout()
+        rm = QPushButton("Remove selected")
+        rm.clicked.connect(self._remove_selected_device)
+        row.addWidget(rm)
+        lay.addLayout(row)
+
+        cov = QGroupBox("Coverage (selected array)")
+        cl = QVBoxLayout(cov)
+        modes = QHBoxLayout()
+        self.mode_auto = QPushButton("Automatic")
+        self.mode_manual = QPushButton("Manual")
+        self.mode_auto.clicked.connect(lambda: self._set_mode("automatic"))
+        self.mode_manual.clicked.connect(lambda: self._set_mode("manual"))
+        modes.addWidget(self.mode_auto)
+        modes.addWidget(self.mode_manual)
+        cl.addLayout(modes)
+        addz = QPushButton("+ Zone")
+        addz.setToolTip("Add a default zone of the kind picked on the Zone tool's flyout")
+        addz.clicked.connect(self._add_zone_default)
+        cl.addWidget(addz)
+        cl.addWidget(QLabel("Tip: pick the Zone tool (Z) and drag on the canvas."))
+        lay.addWidget(cov)
+
+        people = QGroupBox("People (talkers)")
+        pl = QVBoxLayout(people)
+        addt = QPushButton("+ Add talker")
+        addt.setProperty("accent", "true")
+        addt.clicked.connect(self._add_talker)
+        pl.addWidget(addt)
+        self.talker_list = QListWidget()
+        self.talker_list.setMaximumHeight(200)
+        self.talker_list.itemClicked.connect(self._on_talker_click)
+        pl.addWidget(self.talker_list)
+        lay.addWidget(people)
+
+        self.sel_box = QGroupBox("Selection")
+        self.sel_layout = QVBoxLayout(self.sel_box)
+        lay.addWidget(self.sel_box)
+        lay.addStretch(1)
+        return w
+
+    # --------------------------------------------------------------- actions
+    def _add_device(self):
+        dtype = self.dev_type.currentData()
+        transport = self.dev_transport.currentText()
+        did = self.state.next_device_id(dtype)
+        label = f"{dtype} {did}"
+        if dtype == "processor":
+            dev = cp.create_processor(did, label)
+        elif dtype == "microphoneArray":
+            dev = cp.create_microphone_array(did, label, "automatic")
+        elif dtype == "wirelessMic":
+            dev = cp.create_wireless_mic(did, label, transport)
+        elif dtype == "wiredMic":
+            dev = cp.create_wired_mic(did, label, transport)
+        elif dtype == "loudspeaker":
+            dev = cp.create_loudspeaker(did, label, transport)
+        else:
+            dev = cp.create_codec(did, label, transport)
+        cfg = cp.add_device(self.state.config, dev)
+        cfg = cp.set_device_position(cfg, did, self._default_placement(cfg))
+        self.state.selection = {"kind": "device", "id": did}
+        self.state.set_config(cfg)
+
+    def _default_placement(self, cfg):
+        n = sum(1 for d in cfg.devices if d.position) + len(cfg.talkers)
+        # spiral around the centre of the current bounds
+        pts = [d.position for d in cfg.devices if d.position] + [t.position for t in cfg.talkers]
+        if cfg.room:
+            pts += cfg.room.vertices
+        if pts:
+            cx = sum(p.x for p in pts) / len(pts)
+            cy = sum(p.y for p in pts) / len(pts)
+        else:
+            cx, cy = 6, 4.5
+        ang = n * 1.35
+        rad = 1.0 + n * 0.25
+        return Point2D(round((cx + math.cos(ang) * rad) * 4) / 4, round((cy + math.sin(ang) * rad) * 4) / 4)
+
+    def _remove_selected_device(self):
+        sel = self.state.selection
+        if sel and sel["kind"] == "device":
+            self.state.set_config(cp.remove_device(self.state.config, sel["id"]))
+
+    def _on_device_click(self, item):
+        self.state.select({"kind": "device", "id": item.data(Qt.UserRole)})
+
+    def _on_talker_click(self, item):
+        self.state.select({"kind": "talker", "id": item.data(Qt.UserRole)})
+
+    def _selected_array_id(self):
+        sel = self.state.selection
+        arrays = [d for d in self.state.config.devices if d.type == "microphoneArray"]
+        if sel and sel.get("kind") == "device" and any(a.id == sel["id"] for a in arrays):
+            return sel["id"]
+        return arrays[0].id if arrays else None
+
+    def _set_mode(self, mode):
+        aid = self._selected_array_id()
+        if aid:
+            self.state.set_config(cp.set_coverage_mode(self.state.config, aid, mode))
+
+    def _add_zone_default(self):
+        aid = self._selected_array_id()
+        if not aid:
+            return
+        zid = self.state.next_zone_id(aid)
+        kind = self.state.zone_kind
+        if kind == "dedicated":
+            z = cp.dedicated_zone(zid, f"Always-on {zid}", Point2D(1, 1))
+        elif kind == "exclusion":
+            z = cp.exclusion_zone(zid, f"No-pickup {zid}", RectShape(origin=Point2D(1, 1), width=2, height=2))
+        else:
+            z = cp.dynamic_zone(zid, f"Records {zid}", RectShape(origin=Point2D(1, 1), width=2, height=2))
+        self.state.set_config(cp.add_coverage_zone(self.state.config, aid, z))
+
+    def _add_talker(self):
+        tid = self.state.next_talker_id()
+        cfg = cp.add_talker(self.state.config, cp.create_talker(tid, f"Talker {tid}", self._default_placement(self.state.config)))
+        self.state.selection = {"kind": "talker", "id": tid}
+        self.state.set_config(cfg)
+
+    # --------------------------------------------------------------- refresh
+    def refresh(self):
+        super().refresh()
+        self._refreshing = True
+        try:
+            cfg = self.state.config
+            self.dev_list.clear()
+            for d in cfg.devices:
+                ins = sum(1 for p in d.ports if p.kind == "input")
+                outs = sum(1 for p in d.ports if p.kind == "output")
+                it = QListWidgetItem(f"{d.label}  ·  {d.type} · {d.id} · {ins}in/{outs}out")
+                it.setData(Qt.UserRole, d.id)
+                self.dev_list.addItem(it)
+            self.talker_list.clear()
+            arrays = [d for d in cfg.devices if d.type == "microphoneArray" and d.position]
+            for t in cfg.talkers:
+                cov = cp.talker_coverage(cfg, t.id)
+                badge = "recorded" if cov.captured else ("excluded" if cov.excluded_by else "not covered")
+                angs = []
+                for a in arrays:
+                    ang = cp.array_to_talker_angles(cfg, a.id, t.id)
+                    if ang:
+                        angs.append(f"{a.label} {round(ang.off_nadir_deg)}°·{ang.distance:.1f}m")
+                ang_txt = "   ".join(angs) if angs else "(no placed array)"
+                it = QListWidgetItem(f"{t.label}  [{badge}]\n   {ang_txt}")
+                it.setData(Qt.UserRole, t.id)
+                self.talker_list.addItem(it)
+            self._refresh_selection()
+        finally:
+            self._refreshing = False
+
+    # ---- selection property editor ----
+    def _refresh_selection(self):
+        clear_layout(self.sel_layout)
+        sel = self.state.selection
+        cfg = self.state.config
+        if not sel:
+            self.sel_layout.addWidget(QLabel("Nothing selected."))
+            return
+        if sel["kind"] == "device":
+            d = next((x for x in cfg.devices if x.id == sel["id"]), None)
+            if not d:
+                return
+            self._device_props(d)
+        elif sel["kind"] == "talker":
+            t = next((x for x in cfg.talkers if x.id == sel["id"]), None)
+            if not t:
+                return
+            self._talker_props(t)
+        elif sel["kind"] == "zone":
+            self.sel_layout.addWidget(QLabel(f"Zone {sel['zone_id']} on {sel['array_id']}"))
+            self._zone_props(sel["array_id"], sel["zone_id"])
+            rm = QPushButton("Delete zone")
+            rm.clicked.connect(lambda: self.state.set_config(cp.remove_coverage_zone(cfg, sel["array_id"], sel["zone_id"])))
+            self.sel_layout.addWidget(rm)
+
+    def _zone_props(self, array_id, zone_id):
+        """Per-coverage-area output channel + gain (Designer steerable coverage)."""
+        cfg = self.state.config
+        arr = next((d for d in cfg.devices if d.id == array_id), None)
+        zone = next((z for z in arr.zones if z.id == zone_id), None) if arr else None
+        if zone is None or zone.type == "exclusion":
+            return  # exclusion zones carry no output channel
+        form = QFormLayout()
+        ch = QComboBox()
+        ch.addItem("— (mixed only)", None)
+        for i in range(1, cp.MAX_ZONES_PER_ARRAY + 1):
+            ch.addItem(str(i), i)
+        cur = 0 if zone.output_channel is None else zone.output_channel
+        ch.setCurrentIndex(cur)
+
+        def _set_channel(_idx):
+            if self._refreshing:
+                return
+            val = ch.currentData()
+            try:
+                self.state.set_config(cp.set_zone_output_channel(self.state.config, array_id, zone_id, val))
+            except cp.CoverageError as e:
+                ch.setCurrentIndex(0 if zone.output_channel is None else zone.output_channel)
+                self._toast(f"⚠ {e}")
+        ch.currentIndexChanged.connect(_set_channel)
+        form.addRow("Output channel", ch)
+
+        gain = NoWheelDoubleSpinBox()
+        gain.setRange(cp.ZONE_GAIN_DB_MIN, cp.ZONE_GAIN_DB_MAX)
+        gain.setSingleStep(0.5)
+        gain.setSuffix(" dB")
+        gain.setValue(zone.gain_db if zone.gain_db is not None else 0.0)
+        gain.valueChanged.connect(
+            lambda v: None if self._refreshing else self.state.set_config(cp.set_zone_gain_db(self.state.config, array_id, zone_id, float(v)))
+        )
+        form.addRow("Area gain", gain)
+        self.sel_layout.addLayout(form)
+
+    def _device_props(self, d):
+        form = QFormLayout()
+        name = QLineEdit(d.label)
+        name.editingFinished.connect(lambda: self.state.set_config(cp.rename_device(self.state.config, d.id, name.text() or d.id)))
+        form.addRow("Label", name)
+        if d.position:
+            sx = self._spin(d.position.x, lambda v: self._set_pos(d.id, v, None))
+            sy = self._spin(d.position.y, lambda v: self._set_pos(d.id, None, v))
+            form.addRow("X (m)", sx)
+            form.addRow("Y (m)", sy)
+        from conf_pipeline.model import default_elevation
+        elev = d.elevation if d.elevation is not None else default_elevation(d, self.state.config.room.height if self.state.config.room else 3.0)
+        sz = self._spin(elev, lambda v: self.state.set_config(cp.set_device_elevation(self.state.config, d.id, v)))
+        form.addRow("Z height (m)", sz)
+        prof = QComboBox()
+        applicable = [p for p in cp.DEVICE_PROFILES.values() if d.type in p.applies_to]
+        ids = [p.id for p in applicable]
+        if d.profile_id and d.profile_id not in ids:
+            prof.addItem(f"{d.profile_id} (mismatch)", d.profile_id)
+        for p in applicable:
+            prof.addItem(p.label, p.id)
+        i = prof.findData(d.profile_id)
+        if i >= 0:
+            prof.setCurrentIndex(i)
+        prof.currentIndexChanged.connect(lambda *_a: None if self._refreshing else self.state.set_config(cp.assign_device_profile(self.state.config, d.id, prof.currentData())))
+        form.addRow("Profile", prof)
+        caps = cp.device_capabilities(d)
+        captxt = " · ".join([s for s, on in [("AEC", caps.aec), ("automix", caps.automix), ("mute", caps.mute)] if on]) or "—"
+        form.addRow("Caps", QLabel(captxt))
+        self.sel_layout.addLayout(form)
+        if cp.is_mic_device(d) or d.type == "processor":
+            dsp = QPushButton("Edit DSP chain →")
+            dsp.setToolTip("Open the Route panel's processing chain for this device")
+            dsp.clicked.connect(lambda: self._win("_goto_mode", "route"))
+            self.sel_layout.addWidget(dsp)
+        rm = QPushButton("Delete device")
+        rm.clicked.connect(lambda: self.state.set_config(cp.remove_device(self.state.config, d.id)))
+        self.sel_layout.addWidget(rm)
+
+    def _set_pos(self, did, x, y):
+        d = next(z for z in self.state.config.devices if z.id == did)
+        nx = x if x is not None else d.position.x
+        ny = y if y is not None else d.position.y
+        self.state.set_config(cp.set_device_position(self.state.config, did, Point2D(nx, ny)))
+
+    def _talker_props(self, t):
+        form = QFormLayout()
+        name = QLineEdit(t.label)
+        name.editingFinished.connect(lambda: self.state.set_config(cp.rename_talker(self.state.config, t.id, name.text() or t.id)))
+        form.addRow("Label", name)
+        sx = self._spin(t.position.x, lambda v: self._set_tpos(t.id, v, None))
+        sy = self._spin(t.position.y, lambda v: self._set_tpos(t.id, None, v))
+        form.addRow("X (m)", sx)
+        form.addRow("Y (m)", sy)
+        sz = self._spin(cp.talker_elevation(t), lambda v: self.state.set_config(cp.set_talker_elevation(self.state.config, t.id, v)))
+        form.addRow("Mouth Z (m)", sz)
+        self.sel_layout.addLayout(form)
+        cov = cp.talker_coverage(self.state.config, t.id)
+        cap = "✓ recorded" if cov.captured else (f"excluded by {', '.join(cov.excluded_by)}" if cov.excluded_by else "not in any pickup zone")
+        self.sel_layout.addWidget(QLabel(f"Capture: {cap}"))
+        self.sel_layout.addWidget(QLabel("Steering angle from each array:"))
+        for a in [d for d in self.state.config.devices if d.type == "microphoneArray"]:
+            ang = cp.array_to_talker_angles(self.state.config, a.id, t.id)
+            if ang:
+                self.sel_layout.addWidget(QLabel(f"  {a.label}: {ang.distance:.2f} m · az {round(ang.azimuth_deg)}° · tilt {round(ang.downtilt_deg)}° · nadir {round(ang.off_nadir_deg)}°"))
+            else:
+                self.sel_layout.addWidget(QLabel(f"  {a.label}: array unplaced"))
+        rm = QPushButton("Delete talker")
+        rm.clicked.connect(lambda: self.state.set_config(cp.remove_talker(self.state.config, t.id)))
+        self.sel_layout.addWidget(rm)
+
+    def _spin(self, value, cb):
+        s = NoWheelDoubleSpinBox()
+        s.setRange(-1000, 1000)
+        s.setSingleStep(0.1)
+        s.setDecimals(2)
+        s.setValue(value)
+        s.valueChanged.connect(lambda v: None if self._refreshing else cb(v))
+        return s
+
+    def _set_tpos(self, tid, x, y):
+        t = next(z for z in self.state.config.talkers if z.id == tid)
+        nx = x if x is not None else t.position.x
+        ny = y if y is not None else t.position.y
+        self.state.set_config(cp.set_talker_position(self.state.config, tid, Point2D(nx, ny)))
