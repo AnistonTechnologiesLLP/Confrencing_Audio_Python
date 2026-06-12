@@ -34,6 +34,40 @@ schema is unchanged.
   content, and a numpy cross-check that the stdlib per-band weights equal the
   live runtime's per-FFT-bin weights (skipped without the `[control]` extra).
 
+**Scenes (C1)** — named, recallable snapshots of the control surface.
+**Schema v2 → v3** (lossless migration; the TS sibling needs a matching update
+before it can read v3 exports — v1/v2 files keep loading here).
+
+### Added
+- **`Scene`** (`ControlConfig.scenes`, schema v3): typed sections —
+  `muteStates` (mute-group id → muted), `zoneStates`
+  (`{arrayId, zoneId, gainDb?, active?}`), and `steer`
+  (`{arrayId, azimuthDeg, offNadirDeg}`). `gainDb` applies to the config on
+  recall; **`active` and `steer` are config-inert live-layer hints** (which
+  pickup areas to beamform and where to aim) — deliberately, because the
+  config-side `always_on` flag is a zone-*type* invariant (dedicated ⇔ True),
+  not an operational toggle, so recall must not touch it. `None` fields mean
+  "leave as-is", so scenes can be partial.
+- **API**: `create_scene` / `add_scene` / `remove_scene` / `get_scene`,
+  `capture_scene` (snapshot every mute group's state + every pickup area's
+  gain trim), `recall_scene` (pure config→config; entries referencing vanished
+  things are skipped — validation owns flagging them). Mute-group builders now
+  preserve scenes when rebuilding `ControlConfig`.
+- **Migration**: `CONFIG_VERSION` 2 → 3 with a chained, lossless
+  `_migrate_v2_to_v3` (adds an empty `control.scenes`; v1 files run the
+  existing v1→v2 step first). Unsupported versions are still rejected.
+- **Validation**: `SCENE_INVALID` — empty scene, duplicate scene ids, or a
+  scene referencing a missing mute group / array / coverage area (incl. steer
+  targets).
+- **GUI**: a **Scenes** editor in the Route panel — capture the current
+  surface as a named scene, recall, remove — beside the mute-group editor.
+- Tests (`tests/test_scenes.py`, 12 + 1 smoke): camelCase round-trip incl.
+  field omission, v2→v3 lossless upgrade (byte-compared modulo the additive
+  fields), the v1→v2→v3 chain, capture→drift→recall restoring the surface,
+  dangling-ref recall safety, purity/idempotence, scene↔mute-group
+  coexistence, and the validation matrix. Existing hardcoded `version == 2`
+  asserts now track `CONFIG_VERSION`.
+
 **Push + reconcile (A3)** — "Deploy to online devices": push the design through
 the transport, read back, and reconcile device-reported vs designed.
 

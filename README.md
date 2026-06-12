@@ -13,8 +13,9 @@ and steering angles are planning abstractions; the optional **placement simulato
 placement, with an opt-in physics-validation backend — still no real-time DSP.
 
 The engine is a faithful port of the TypeScript version and writes the **same
-JSON schema** (`version` 1, camelCase keys), so configs interoperate between the
-two.
+JSON schema** (camelCase keys; currently `version` 3 — older v1/v2 files load
+and migrate losslessly). The TS sibling tracks v2, so it needs a matching v3
+update to read configs exported with scenes.
 
 ## Layout
 

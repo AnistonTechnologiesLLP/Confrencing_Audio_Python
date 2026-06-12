@@ -92,11 +92,11 @@ def test_project_round_trip_and_migration():
     p = cp.update_room(p, "room-1", room)
     restored = cp.deserialize_project(cp.serialize_project(p))
     assert restored.rooms[0].config.devices[0].id == "A"
-    assert restored.rooms[0].config.version == 2
+    assert restored.rooms[0].config.version == cp.CONFIG_VERSION
     # v1 room migration inside project
     doc = json.loads(cp.serialize_project(p))
     doc["rooms"][0]["config"]["version"] = 1
     for d in doc["rooms"][0]["config"]["devices"]:
         d.pop("profileId", None)
     restored2 = cp.deserialize_project(json.dumps(doc))
-    assert restored2.rooms[0].config.version == 2
+    assert restored2.rooms[0].config.version == cp.CONFIG_VERSION

@@ -16,7 +16,7 @@ from typing import Any, Literal, Optional, TypeGuard, Union
 # --------------------------------------------------------------------------- #
 # Constants
 # --------------------------------------------------------------------------- #
-CONFIG_VERSION = 2
+CONFIG_VERSION = 3
 MAX_ZONES_PER_ARRAY = 8
 MAX_MANUAL_LOBES = 8
 DEFAULT_DEDICATED_ZONE_SIZE_M = 1.8
@@ -226,9 +226,49 @@ class MuteGroup:
     muted: bool = False
 
 
+# --------------------------------------------------------------------------- #
+# Scenes (v3) — a named, recallable snapshot of the operational control surface:
+# mute-group states, per-coverage-area gains / active flags, and an optional
+# per-array steer hint. Recall is a pure config→config transform; the steer
+# hints are config-inert (the live layer reads them to aim the beamformer).
+# --------------------------------------------------------------------------- #
+@dataclass
+class SceneZoneState:
+    """One coverage area's settings inside a scene. ``None`` = leave as-is.
+
+    ``gain_db`` is applied to the config on recall. ``active`` is a **live-layer
+    hint** (include this pickup area when designing beams) — config-inert, like
+    a scene's steer entries, because the config-side ``always_on`` flag is a
+    type invariant (dedicated ⇔ True), not an operational toggle."""
+
+    array_id: str
+    zone_id: str
+    gain_db: Optional[float] = None
+    active: Optional[bool] = None
+
+
+@dataclass
+class SceneSteer:
+    """A live-layer steer hint: aim this array at a bearing on recall."""
+
+    array_id: str
+    azimuth_deg: float
+    off_nadir_deg: float = 90.0
+
+
+@dataclass
+class Scene:
+    id: str
+    label: str
+    mute_states: dict[str, bool] = field(default_factory=dict)     # mute-group id → muted
+    zone_states: list[SceneZoneState] = field(default_factory=list)
+    steer: list[SceneSteer] = field(default_factory=list)
+
+
 @dataclass
 class ControlConfig:
     mute_groups: list[MuteGroup] = field(default_factory=list)
+    scenes: list[Scene] = field(default_factory=list)              # v3
 
 
 # --------------------------------------------------------------------------- #
@@ -650,5 +690,32 @@ def _mute_group(d: dict[str, Any]) -> MuteGroup:
     )
 
 
+def _scene_zone_state(d: dict[str, Any]) -> SceneZoneState:
+    return SceneZoneState(
+        array_id=d["arrayId"], zone_id=d["zoneId"],
+        gain_db=d.get("gainDb"), active=d.get("active"),
+    )
+
+
+def _scene_steer(d: dict[str, Any]) -> SceneSteer:
+    return SceneSteer(
+        array_id=d["arrayId"], azimuth_deg=d["azimuthDeg"],
+        off_nadir_deg=d.get("offNadirDeg", 90.0),
+    )
+
+
+def _scene(d: dict[str, Any]) -> Scene:
+    return Scene(
+        id=d["id"],
+        label=d["label"],
+        mute_states={str(k): bool(v) for k, v in d.get("muteStates", {}).items()},
+        zone_states=[_scene_zone_state(z) for z in d.get("zoneStates", [])],
+        steer=[_scene_steer(s) for s in d.get("steer", [])],
+    )
+
+
 def _control(d: dict[str, Any]) -> ControlConfig:
-    return ControlConfig(mute_groups=[_mute_group(g) for g in d.get("muteGroups", [])])
+    return ControlConfig(
+        mute_groups=[_mute_group(g) for g in d.get("muteGroups", [])],
+        scenes=[_scene(s) for s in d.get("scenes", [])],
+    )

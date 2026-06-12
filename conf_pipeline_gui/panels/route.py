@@ -97,6 +97,32 @@ class RoutePanel(PanelBase):
         row2.addStretch(1)
         mgl.addLayout(row2)
         lay.addWidget(mg)
+
+        sc = QGroupBox("Scenes")
+        scl = QVBoxLayout(sc)
+        scl.addWidget(QLabel("Named, recallable snapshots of mutes and per-area gains (plus live steer hints)."))
+        self.scene_list = QListWidget()
+        self.scene_list.setMaximumHeight(120)
+        scl.addWidget(self.scene_list)
+        srow = QHBoxLayout()
+        self.scene_name = QLineEdit()
+        self.scene_name.setPlaceholderText("New scene name…")
+        cap_sc = QPushButton("+ Capture current")
+        cap_sc.setToolTip("Snapshot the current mute-group states and per-area gain trims as a scene")
+        cap_sc.clicked.connect(self._capture_scene)
+        srow.addWidget(self.scene_name, 1)
+        srow.addWidget(cap_sc)
+        scl.addLayout(srow)
+        srow2 = QHBoxLayout()
+        self.scene_recall = QPushButton("Recall")
+        self.scene_recall.clicked.connect(self._recall_selected_scene)
+        rm_sc = QPushButton("Remove")
+        rm_sc.clicked.connect(self._remove_selected_scene)
+        srow2.addWidget(self.scene_recall)
+        srow2.addWidget(rm_sc)
+        srow2.addStretch(1)
+        scl.addLayout(srow2)
+        lay.addWidget(sc)
         lay.addStretch(1)
         return w
 
@@ -152,6 +178,63 @@ class RoutePanel(PanelBase):
             if g.id == prev:
                 self.mute_group_list.setCurrentItem(it)
         self.mute_group_toggle.setEnabled(bool(groups))
+
+    # ---- scene actions ----
+    def _selected_scene_id(self):
+        it = self.scene_list.currentItem()
+        return it.data(Qt.UserRole) if it is not None else None
+
+    def _capture_scene(self):
+        cfg = self.state.config
+        existing = cfg.control.scenes if cfg.control is not None else []
+        n = len(existing) + 1
+        ids = {s.id for s in existing}
+        sid = f"sc{n}"
+        while sid in ids:
+            n += 1
+            sid = f"sc{n}"
+        name = self.scene_name.text().strip() or f"Scene {n}"
+        try:
+            scene = cp.capture_scene(cfg, sid, name)
+            self.state.set_config(cp.add_scene(cfg, scene))
+            self.scene_name.clear()
+            self._toast(f"Captured “{name}” ({len(scene.mute_states)} mute state(s), {len(scene.zone_states)} area(s))")
+        except Exception as exc:
+            self._toast(str(exc))
+
+    def _recall_selected_scene(self):
+        sid = self._selected_scene_id()
+        if sid is None:
+            return
+        try:
+            self.state.set_config(cp.recall_scene(self.state.config, sid))
+            self._toast("Scene recalled")
+        except ValueError as exc:
+            self._toast(str(exc))
+
+    def _remove_selected_scene(self):
+        sid = self._selected_scene_id()
+        if sid is not None:
+            self.state.set_config(cp.remove_scene(self.state.config, sid))
+
+    def _refresh_scenes(self, cfg):
+        prev = self._selected_scene_id()
+        self.scene_list.clear()
+        scenes = cfg.control.scenes if cfg.control is not None else []
+        for s in scenes:
+            parts = []
+            if s.mute_states:
+                parts.append(f"{len(s.mute_states)} mute(s)")
+            if s.zone_states:
+                parts.append(f"{len(s.zone_states)} area(s)")
+            if s.steer:
+                parts.append(f"{len(s.steer)} steer")
+            it = QListWidgetItem(f"{s.label}" + (f"  ·  {' · '.join(parts)}" if parts else ""))
+            it.setData(Qt.UserRole, s.id)
+            self.scene_list.addItem(it)
+            if s.id == prev:
+                self.scene_list.setCurrentItem(it)
+        self.scene_recall.setEnabled(bool(scenes))
 
     # ---- AEC / automixer / DSP chain (moved verbatim) ----
     def _refresh_dsp(self):
@@ -331,6 +414,7 @@ class RoutePanel(PanelBase):
             self.routing_summary_lbl.setText(f"{s['total']} route(s) · {s['dante']} Dante · {s['analog']} analog")
             self.routing_view.setPlainText(cp.signal_flow_report(cfg))
             self._refresh_mute_groups(cfg)
+            self._refresh_scenes(cfg)
             self._refresh_dsp()
         finally:
             self._refreshing = False

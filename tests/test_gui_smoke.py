@@ -405,6 +405,36 @@ def test_deploy_panel_online_group(win):
     win.state.set_mode("design")
 
 
+def test_scene_capture_recall_remove_cycle(win):
+    from conf_pipeline.model import RectShape
+
+    c = cp.create_config("T", "2026-06-12T00:00:00Z")
+    c = cp.add_device(c, cp.create_microphone_array("A1", "Array"))
+    c = cp.add_coverage_zone(c, "A1", cp.CoverageZone("z1", "dynamic", RectShape(Point2D(1, 1), 2, 2), False, "Table"))
+    c = cp.add_mute_group(c, cp.create_mute_group("mg1", "Room", device_ids=["A1"]))
+    c = cp.set_zone_gain_db(c, "A1", "z1", -6.0)
+    win.state.set_config(c)
+    panel = win.panels["route"]
+    panel.refresh()
+
+    panel.scene_name.setText("Meeting")
+    panel._capture_scene()                               # snapshot current surface
+    scenes = win.state.config.control.scenes
+    assert len(scenes) == 1 and scenes[0].label == "Meeting"
+    assert scenes[0].zone_states[0].gain_db == -6.0
+
+    # drift, then recall via the list selection
+    win.state.set_config(cp.set_zone_gain_db(win.state.config, "A1", "z1", 0.0))
+    panel.refresh()
+    panel.scene_list.setCurrentRow(0)
+    panel._recall_selected_scene()
+    assert cp.find_device(win.state.config, "A1").zones[0].gain_db == -6.0
+
+    panel.scene_list.setCurrentRow(0)
+    panel._remove_selected_scene()
+    assert win.state.config.control.scenes == []
+
+
 def test_push_online_clean_marks_deployed_and_dot_done(win):
     from conf_pipeline_gui import workflow
 

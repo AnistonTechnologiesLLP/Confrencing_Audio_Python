@@ -28,6 +28,9 @@ from .model import (
     Route,
     RoomBackground,
     RoomLayout,
+    Scene,
+    SceneSteer,
+    SceneZoneState,
     SystemConfig,
     Talker,
     ZoneChannelRef,
@@ -35,6 +38,7 @@ from .model import (
     default_elevation,
     find_device,
     is_mic_device,
+    is_pickup_zone,
     is_processor,
     point_in_shape,
     to_jsonable,
@@ -661,7 +665,7 @@ def auto_route(config: SystemConfig) -> AutoRouteResult:
 # Logic / control — mute groups (v1.12.0)
 # --------------------------------------------------------------------------- #
 def _ensure_control(config: SystemConfig) -> ControlConfig:
-    return config.control if config.control is not None else ControlConfig(mute_groups=[])
+    return config.control if config.control is not None else ControlConfig()
 
 
 def create_mute_group(
@@ -684,7 +688,7 @@ def add_mute_group(config: SystemConfig, group: MuteGroup) -> SystemConfig:
     ctrl = _ensure_control(config)
     if any(g.id == group.id for g in ctrl.mute_groups):
         raise ValueError(f"Duplicate mute-group id: {group.id}")
-    return _clone(config, control=ControlConfig(mute_groups=[*ctrl.mute_groups, group]))
+    return _clone(config, control=_with(ctrl, mute_groups=[*ctrl.mute_groups, group]))
 
 
 def remove_mute_group(config: SystemConfig, group_id: str) -> SystemConfig:
@@ -693,14 +697,99 @@ def remove_mute_group(config: SystemConfig, group_id: str) -> SystemConfig:
     groups = [g for g in config.control.mute_groups if g.id != group_id]
     if len(groups) == len(config.control.mute_groups):
         return config
-    return _clone(config, control=ControlConfig(mute_groups=groups))
+    return _clone(config, control=_with(config.control, mute_groups=groups))
 
 
 def set_mute_group_muted(config: SystemConfig, group_id: str, muted: bool) -> SystemConfig:
     if config.control is None:
         raise ValueError("No control config.")
     groups = [_with(g, muted=muted) if g.id == group_id else g for g in config.control.mute_groups]
-    return _clone(config, control=ControlConfig(mute_groups=groups))
+    return _clone(config, control=_with(config.control, mute_groups=groups))
+
+
+# --------------------------------------------------------------------------- #
+# Scenes (v3) — named, recallable snapshots of the control surface
+# --------------------------------------------------------------------------- #
+def create_scene(
+    id: str,
+    label: str,
+    mute_states: Optional[dict[str, bool]] = None,
+    zone_states: Optional[list[SceneZoneState]] = None,
+    steer: Optional[list[SceneSteer]] = None,
+) -> Scene:
+    return Scene(
+        id=id, label=label,
+        mute_states=dict(mute_states or {}),
+        zone_states=list(zone_states or []),
+        steer=list(steer or []),
+    )
+
+
+def add_scene(config: SystemConfig, scene: Scene) -> SystemConfig:
+    ctrl = _ensure_control(config)
+    if any(s.id == scene.id for s in ctrl.scenes):
+        raise ValueError(f"Duplicate scene id: {scene.id}")
+    return _clone(config, control=_with(ctrl, scenes=[*ctrl.scenes, scene]))
+
+
+def remove_scene(config: SystemConfig, scene_id: str) -> SystemConfig:
+    if config.control is None:
+        return config
+    scenes = [s for s in config.control.scenes if s.id != scene_id]
+    if len(scenes) == len(config.control.scenes):
+        return config
+    return _clone(config, control=_with(config.control, scenes=scenes))
+
+
+def get_scene(config: SystemConfig, scene_id: str) -> Optional[Scene]:
+    if config.control is None:
+        return None
+    return next((s for s in config.control.scenes if s.id == scene_id), None)
+
+
+def capture_scene(config: SystemConfig, id: str, label: str) -> Scene:
+    """Snapshot the current control surface: every mute group's muted state and
+    every pickup area's gain trim. ``active`` flags and steer hints are
+    live-layer state, not config, so a captured scene leaves them unset. A zone
+    whose trim is unset is captured as ``None`` ("leave as-is" on recall)."""
+    ctrl = config.control
+    mute_states = {g.id: g.muted for g in (ctrl.mute_groups if ctrl is not None else [])}
+    zone_states = []
+    for d in config.devices:
+        if d.type != "microphoneArray":
+            continue
+        for z in d.zones:
+            if is_pickup_zone(z):
+                zone_states.append(SceneZoneState(array_id=d.id, zone_id=z.id, gain_db=z.gain_db))
+    return Scene(id=id, label=label, mute_states=mute_states, zone_states=zone_states)
+
+
+def recall_scene(config: SystemConfig, scene_id: str) -> SystemConfig:
+    """Apply a scene: mute-group states and per-area gain trims. Pure —
+    returns a new config. Entries referencing things that no longer exist are
+    skipped (validation flags them as ``SCENE_INVALID``); ``None`` fields mean
+    "leave as-is". A scene's ``active`` flags and steer hints are config-inert —
+    the live layer reads them (``get_scene(...)``) to choose which areas to
+    beamform and where to aim."""
+    scene = get_scene(config, scene_id)
+    if scene is None:
+        raise ValueError(f"Unknown scene: {scene_id}")
+    new = config
+    ctrl = new.control
+    assert ctrl is not None  # the scene was found in it
+    groups = [
+        _with(g, muted=scene.mute_states[g.id]) if g.id in scene.mute_states else g
+        for g in ctrl.mute_groups
+    ]
+    new = _clone(new, control=_with(ctrl, mute_groups=groups))
+    for zs in scene.zone_states:
+        if zs.gain_db is None:
+            continue
+        arr = find_device(new, zs.array_id)
+        if arr is None or arr.type != "microphoneArray" or not any(z.id == zs.zone_id for z in arr.zones):
+            continue
+        new = set_zone_gain_db(new, zs.array_id, zs.zone_id, zs.gain_db)
+    return new
 
 
 # --------------------------------------------------------------------------- #

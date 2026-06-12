@@ -32,7 +32,7 @@ def test_camelcase_schema():
     c = rich()
     import json
     d = json.loads(cp.serialize(c))
-    assert d["version"] == 2
+    assert d["version"] == cp.CONFIG_VERSION
     proc = next(x for x in d["devices"] if x["type"] == "processor")
     assert "inputBuses" in proc["matrix"] and "processorId" in proc["matrix"]
     mic = next(x for x in d["devices"] if x["id"] == "M")

@@ -41,6 +41,7 @@ CODE_DESCRIPTIONS: dict[str, str] = {
     "COVERAGE_CHANNEL_DUPLICATE": "Two coverage areas on the same array share an output channel.",
     "COVERAGE_GAIN_INVALID": "Coverage-area gain trim is out of range.",
     "CONTROL_MUTE_GROUP_INVALID": "A mute group references a missing device or coverage area, or is empty.",
+    "SCENE_INVALID": "A scene is empty, duplicates another scene's id, or references a missing mute group, array, or coverage area.",
     "MANUAL_LOBE_LIMIT": "Manual mode with more than 8 pickup lobes.",
     "AUTOMIXER_INVALID": "Automixer value out of range or output bus unresolved.",
     "DEVICE_PROFILE_UNKNOWN": "Device references a profile id not in the catalog.",
@@ -258,6 +259,27 @@ def _validate_control(config: SystemConfig, add: AddIssue) -> None:
                 add("error", "CONTROL_MUTE_GROUP_INVALID", f'Mute group "{group.id}" references missing array "{ref.array_id}".', [group.id, ref.array_id])
             elif not any(z.id == ref.zone_id for z in arr.zones):
                 add("error", "CONTROL_MUTE_GROUP_INVALID", f'Mute group "{group.id}" references missing zone "{ref.zone_id}" on array "{ref.array_id}".', [group.id, ref.array_id, ref.zone_id])
+    group_ids = {g.id for g in config.control.mute_groups}
+    seen_scene_ids: set[str] = set()
+    for scene in config.control.scenes:
+        if scene.id in seen_scene_ids:
+            add("error", "SCENE_INVALID", f'Duplicate scene id "{scene.id}".', [scene.id])
+        seen_scene_ids.add(scene.id)
+        if not scene.mute_states and not scene.zone_states and not scene.steer:
+            add("error", "SCENE_INVALID", f'Scene "{scene.id}" is empty (no mute states, zone states, or steer).', [scene.id])
+        for gid in scene.mute_states:
+            if gid not in group_ids:
+                add("error", "SCENE_INVALID", f'Scene "{scene.id}" references missing mute group "{gid}".', [scene.id, gid])
+        for zs in scene.zone_states:
+            arr = find_device(config, zs.array_id)
+            if arr is None or arr.type != "microphoneArray":
+                add("error", "SCENE_INVALID", f'Scene "{scene.id}" references missing array "{zs.array_id}".', [scene.id, zs.array_id])
+            elif not any(z.id == zs.zone_id for z in arr.zones):
+                add("error", "SCENE_INVALID", f'Scene "{scene.id}" references missing zone "{zs.zone_id}" on array "{zs.array_id}".', [scene.id, zs.array_id, zs.zone_id])
+        for st in scene.steer:
+            arr = find_device(config, st.array_id)
+            if arr is None or arr.type != "microphoneArray":
+                add("error", "SCENE_INVALID", f'Scene "{scene.id}" steers a missing array "{st.array_id}".', [scene.id, st.array_id])
 
 
 def _validate_naming(config: SystemConfig, add: AddIssue) -> None:

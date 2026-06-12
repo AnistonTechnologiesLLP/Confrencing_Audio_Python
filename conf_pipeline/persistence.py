@@ -28,8 +28,8 @@ def deserialize(text: str) -> SystemConfig:
         raise DeserializeError("Config must be a JSON object.")
     if not isinstance(parsed.get("version"), int):
         raise DeserializeError('Missing numeric "version".')
-    if parsed["version"] not in (1, CONFIG_VERSION):
-        raise DeserializeError(f'Unsupported config version {parsed["version"]}; expected 1 or {CONFIG_VERSION}.')
+    if parsed["version"] not in (1, 2, CONFIG_VERSION):
+        raise DeserializeError(f'Unsupported config version {parsed["version"]}; expected 1, 2 or {CONFIG_VERSION}.')
     for fld in ("devices", "routes", "matrix", "automixer", "muteLinks", "metadata"):
         if fld not in parsed:
             raise DeserializeError(f'Missing required field "{fld}".')
@@ -38,8 +38,11 @@ def deserialize(text: str) -> SystemConfig:
     # Backward-compatible: talkers added after v1 shipped.
     if not isinstance(parsed.get("talkers"), list):
         parsed["talkers"] = []
+    # Migration chain: each step is lossless and bumps one version.
     if parsed["version"] == 1:
         _migrate_v1_to_v2(parsed)
+    if parsed["version"] == 2:
+        _migrate_v2_to_v3(parsed)
     return config_from_dict(parsed)
 
 
@@ -50,4 +53,14 @@ def _migrate_v1_to_v2(obj: dict) -> None:
             d["profileId"] = default_profile_id(d["type"])
         if not isinstance(d.get("dspBlocks"), list):
             d["dspBlocks"] = []
+    obj["version"] = 2
+
+
+def _migrate_v2_to_v3(obj: dict) -> None:
+    """v3 adds ``control.scenes`` (named recallable scenes) — purely additive:
+    a v2 file gains an empty scene list (when it has a control section at all)
+    and loses nothing."""
+    control = obj.get("control")
+    if isinstance(control, dict) and not isinstance(control.get("scenes"), list):
+        control["scenes"] = []
     obj["version"] = CONFIG_VERSION
