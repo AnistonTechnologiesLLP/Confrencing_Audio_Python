@@ -188,6 +188,8 @@ from .files import (  # noqa: F401
     RecoveryInfo,
     default_state_dir,
 )
+# ---- local HTTP control API: scene recall / mute / status ----
+from .control_api import ConfigHolder, ControlApiServer  # noqa: F401
 from .naming import TYPE_LABEL, apply_naming_scheme, label_collisions, suggested_label  # noqa: F401
 from .routing import (  # noqa: F401
     Subscription,

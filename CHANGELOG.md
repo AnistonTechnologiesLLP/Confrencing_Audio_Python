@@ -34,6 +34,26 @@ schema is unchanged.
   content, and a numpy cross-check that the stdlib per-band weights equal the
   live runtime's per-FFT-bin weights (skipped without the `[control]` extra).
 
+**External control API (C2)** — a local HTTP surface for room-control
+integrations: scene recall / mute / status.
+
+### Added
+- **`conf_pipeline/control_api.py`** (pure stdlib — `http.server`, **no new
+  dependency**, not even an optional extra): `ControlApiServer` bound to
+  localhost (ephemeral port by default) exposing JSON routes in the OCTOVOX
+  `/api/…` style — `GET /api/status` (name, schema version, deployment state,
+  mute groups, scenes), `GET /api/scenes`, `POST /api/scenes/<id>/recall`, and
+  `POST /api/mute-groups/<id>` (`{"muted": bool}`), with JSON 400/404 errors.
+  The recall response carries the scene's config-inert live-layer hints
+  (`steer`, `activeZones`) so the external controller can aim the beamformer.
+- The server owns no config: the host supplies `get_config` / `apply`
+  callables. `ConfigHolder` is the thread-safe headless/test owner; the GUI
+  can supply a main-thread-marshalled pair later.
+- Tests (`tests/test_control_api.py`, 9): live request/response against an
+  ephemeral-port server via urllib — status/scene payloads, recall side
+  effects + hints, unknown-scene/group 404s, body validation 400s, unknown
+  routes, sequential-consistency, and the start/stop lifecycle.
+
 **Scenes (C1)** — named, recallable snapshots of the control surface.
 **Schema v2 → v3** (lossless migration; the TS sibling needs a matching update
 before it can read v3 exports — v1/v2 files keep loading here).

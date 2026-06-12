@@ -461,6 +461,27 @@ res = client.clean_8ch(y8, 44100, target_az=za.target_az, interferer_az=za.inter
   talkback** (OCTOVOX's neural stages are whole-file/offline), with audible seams
   at chunk boundaries. Use headphones. `cc.CleanMonitor` drives it.
 
+## Scenes & external control (unreleased)
+
+**Scenes** (schema v3) are named, recallable snapshots of the control surface —
+mute-group states and per-area gain trims, plus config-inert live-layer hints
+(**active** areas and per-array **steer** bearings) that tell the beamformer
+what to do on recall. Capture/recall/remove from the Route panel or the API
+(`cp.capture_scene`, `cp.recall_scene`). Older v1/v2 files migrate losslessly.
+
+**External control API** — a pure-stdlib local HTTP server for room-control
+integrations (no extra deps):
+
+```python
+holder = cp.ConfigHolder(config)
+with cp.ControlApiServer(holder.get, holder.apply, port=8765) as srv:
+    ...  # GET /api/status · GET /api/scenes
+         # POST /api/scenes/<id>/recall · POST /api/mute-groups/<id> {"muted": true}
+```
+
+Recall responses include the scene's `steer` / `activeZones` hints so the
+caller can aim the live beamformer.
+
 ## Designer-inspired workflow (1.8.0)
 
 Vendor-neutral, config/validation-only features (no audio/Dante/discovery/
