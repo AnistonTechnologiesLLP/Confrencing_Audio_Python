@@ -32,7 +32,6 @@ import conf_pipeline as cp
 
 from . import icons, workflow
 from .canvas import Canvas
-from .guide import GuidePanel
 from .issues import IssuesDrawer
 from .modebar import ModeBar
 from .panels import DesignPanel, DeployPanel, LivePanel, RoutePanel, SimulatePanel
@@ -100,14 +99,6 @@ class MainWindow(QMainWindow):
         col.setContentsMargins(0, 0, 0, 0)
         col.setSpacing(0)
         col.addWidget(self._build_topbar())
-        self.guide = GuidePanel(self.state, {
-            "rect_room": self._rect_room,
-            "add_array": self._guide_add_array,
-            "zone_tool": lambda: self._shortcut_tool("zone"),
-            "talker_tool": lambda: self._shortcut_tool("talker"),
-            "optimize": self._optimize_room,
-        })
-        col.addWidget(self.guide)
         col.addWidget(self._row, 1)
         self.setCentralWidget(central)
 
@@ -211,7 +202,6 @@ class MainWindow(QMainWindow):
         m.addAction("Deploy (snapshot design)", self._deploy)
         m.addSeparator()
         m.addAction("Toggle dark / light theme", self._toggle_theme)
-        m.addAction("Show getting-started guide", self._toggle_guide)
         return m
 
     def _fill_room_menu(self, menu: QMenu):
@@ -368,7 +358,7 @@ class MainWindow(QMainWindow):
         self.state.set_config(cp.set_room(self.state.config, cp.rectangular_room(9, 7, 3)))
 
     def _guide_add_array(self):
-        """Guide step 2: add a ceiling array at the room centre (one-click)."""
+        """Quick-add a ceiling array at the room centre (one click, room if needed)."""
         cfg = self.state.config
         if cfg.room is None:
             cfg = cp.set_room(cfg, cp.rectangular_room(9, 7, 3))
@@ -493,12 +483,6 @@ class MainWindow(QMainWindow):
         if diff.routes_removed:
             parts.append(f"-{len(diff.routes_removed)} route")
         self.toast("Deployed — " + ", ".join(parts))
-
-    def _toggle_guide(self):
-        if hasattr(self, "guide"):
-            self.guide.setVisible(not self.guide.isVisible())
-            if self.guide.isVisible():
-                self.guide.refresh()
 
     def _toggle_theme(self):
         self.state.theme = "light" if self.state.theme == "dark" else "dark"

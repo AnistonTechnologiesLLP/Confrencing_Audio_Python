@@ -252,19 +252,27 @@ class Canvas(QWidget):
         self._paint_empty_hint(p)
 
     def _paint_empty_hint(self, p):
-        """Centered hint when there is nothing on the canvas yet — no blank stare."""
+        """Centered, mode-aware hint when there is nothing on the canvas yet."""
         cfg = self.cfg
         has_room = cfg.room is not None and len(cfg.room.vertices) >= 3
         if has_room or cfg.devices or cfg.talkers:
             return
         cx, cy = self.width() / 2, self.height() / 2
-        lines = [
-            ("Start your room design", QColor("#c4c5d2"), 15, QFont.DemiBold),
-            ("", None, 6, QFont.Normal),
-            ("• Use the Getting-started guide at the top, or", QColor("#8a93ad"), 11, QFont.Normal),
-            ("• Press the Room tool (R) and click to draw an outline", QColor("#8a93ad"), 11, QFont.Normal),
-            ("• Or load a sample from “Load sample…”", QColor("#8a93ad"), 11, QFont.Normal),
-        ]
+        mode = getattr(self.state, "mode", "design")
+        if mode == "design":
+            lines = [
+                ("Start your room design", QColor("#c4c5d2"), 15, QFont.DemiBold),
+                ("", None, 6, QFont.Normal),
+                ("• Press the Room tool (R) and click to draw an outline", QColor("#8a93ad"), 11, QFont.Normal),
+                ("• Or load a sample from the ☰ menu", QColor("#8a93ad"), 11, QFont.Normal),
+            ]
+        else:
+            verb = {"simulate": "simulate", "route": "route", "deploy": "deploy", "live": "drive"}.get(mode, "show")
+            lines = [
+                (f"Nothing to {verb} yet", QColor("#c4c5d2"), 15, QFont.DemiBold),
+                ("", None, 6, QFont.Normal),
+                ("• Switch to DESIGN (Ctrl+1) and build the room first", QColor("#8a93ad"), 11, QFont.Normal),
+            ]
         y = cy - 36
         for text, color, size, weight in lines:
             if not text:

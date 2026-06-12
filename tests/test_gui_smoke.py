@@ -38,7 +38,6 @@ def win(qapp):
 
 
 def test_window_builds(win):
-    assert win.guide is not None
     # the Stagebar shell exposes the five workflow modes + a panel per mode
     from conf_pipeline_gui import workflow
 
@@ -62,12 +61,19 @@ def test_mode_switch_updates_shell(win):
     win.state.set_mode("design")
 
 
-def test_guide_steps_track_progress(win):
-    g = win.guide
-    assert all(s.property("done") == "false" for s in g.steps)
+def test_workflow_dots_track_progress(win):
+    from conf_pipeline_gui import workflow
+
+    win.state.set_config(cp.create_config("Empty", "2026-06-11T00:00:00Z"))
+    assert workflow.stage_status(win.state)["design"] == workflow.TODO
     win._guide_add_array()  # adds room + array
-    assert g.steps[0].property("done") == "true"  # room
-    assert g.steps[1].property("done") == "true"  # array
+    st = workflow.stage_status(win.state)
+    assert st["design"] == workflow.PARTIAL  # room + array done, zone + talker missing
+    # the ModeBar received the same status via _sync_chrome
+    assert win.modebar._status["design"] == workflow.PARTIAL
+    # panel hint chip points at the next step
+    win.panels["design"].refresh()
+    assert "zone" in win.panels["design"].hint_chip.text().lower()
 
 
 def test_mute_group_add_toggle_remove(win):

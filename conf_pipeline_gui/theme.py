@@ -133,22 +133,6 @@ QFrame[drawer="true"] {{ background: {surface2}; border-left: 1px solid {border_
 QPushButton[cardHeader="true"] {{ background: transparent; border: 0; color: {text}; font-weight: 700; text-align: left; padding: 6px 4px; }}
 QPushButton[cardHeader="true"]:hover {{ color: {accent_bright}; }}
 
-QFrame[guidePanel="true"] {{ background: {surface2}; border-bottom: 1px solid {border}; }}
-QLabel[guideHeader="true"] {{ color: {text}; font-weight: 800; font-size: 12px; }}
-QLabel[guideSub="true"] {{ color: {muted}; font-size: 11px; padding-left: 8px; }}
-QLabel[guideArrow="true"] {{ color: {faint}; font-size: 13px; }}
-QWidget[guideStep="true"] {{ background: {surface3}; border: 1px solid {border}; border-radius: 9px; }}
-QWidget[guideStep="true"][done="true"] {{ background: {sel}; border: 1px solid {ok}; }}
-QLabel[guideDot="true"] {{ color: {muted}; font-size: 13px; font-weight: 700; }}
-QLabel[guideTitle="true"] {{ color: {text_dim}; font-weight: 600; }}
-QLabel[guideTitle="true"][done="true"] {{ color: {ok}; }}
-QWidget[guideStep="true"] QPushButton {{ background: {accent}; color: {on_accent}; border: 0; border-radius: 6px; padding: 4px 9px; font-weight: 700; }}
-QWidget[guideStep="true"] QPushButton:hover {{ background: {accent_bright}; }}
-
-QLabel[inspectorBanner="true"] {{ background: {surface2}; border-bottom: 1px solid {border}; font-size: 12px; }}
-QLabel[inspectorBanner="true"][level="error"] {{ background: {surface2}; border-bottom: 1px solid {err}; }}
-QLabel[inspectorBanner="true"][level="warn"] {{ background: {surface2}; border-bottom: 1px solid {warn}; }}
-QLabel[inspectorBanner="true"][level="ok"] {{ background: {surface2}; border-bottom: 1px solid {ok}; }}
 """
 
 
