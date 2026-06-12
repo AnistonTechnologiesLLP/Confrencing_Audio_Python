@@ -99,7 +99,8 @@ QScrollBar::add-page, QScrollBar::sub-page {{ background: transparent; }}
 
 QLabel {{ color: {text_dim}; }}
 QFrame[card="true"] {{ border: 1px solid {border}; border-radius: 7px; }}
-QFrame[frameShape="4"], QFrame[frameShape="5"] {{ color: {border}; background: {border}; max-height: 1px; }}
+QFrame[frameShape="4"] {{ color: {border}; background: {border}; max-height: 1px; }}
+QFrame[frameShape="5"] {{ color: {border}; background: {border}; max-width: 1px; }}
 QStatusBar {{ background: {surface}; color: {muted}; border-top: 1px solid {border}; }}
 QStatusBar::item {{ border: 0; }}
 

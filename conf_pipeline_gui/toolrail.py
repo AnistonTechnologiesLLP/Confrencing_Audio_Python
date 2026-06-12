@@ -25,7 +25,7 @@ TOOL_META = {
     "select": ("Select", "V", "Move and select devices, zones, talkers, room corners"),
     "connect": ("Connect", "C", "Click device → device to wire a route"),
     "room": ("Room", "R", "Click to draw the room outline; double-click to close"),
-    "zone": ("Zone", "Z", "Drag a coverage/exclusion area on the floor"),
+    "zone": ("Zone", "Z", "Drag a coverage/exclusion area on the floor; click the arrow to pick the zone kind"),
     "talker": ("Talker", "T", "Click to drop a person (talker)"),
 }
 ZONE_KINDS = [("dynamic", "Records (dynamic)"), ("dedicated", "Always-on (dedicated)"),
@@ -64,9 +64,11 @@ class ToolRail(QFrame):
         lay.addStretch(1)
         self.buttons["select"].setChecked(True)
 
-        # zone-kind flyout on the Zone button
+        # zone-kind flyout on the Zone button — MenuButtonPopup renders a
+        # visible split-arrow section (a hold-to-open DelayedPopup would be
+        # undiscoverable, especially with menu indicators styled away)
         zb = self.buttons["zone"]
-        zb.setPopupMode(QToolButton.DelayedPopup)
+        zb.setPopupMode(QToolButton.MenuButtonPopup)
         menu = QMenu(zb)
         grp = QActionGroup(menu)
         grp.setExclusive(True)

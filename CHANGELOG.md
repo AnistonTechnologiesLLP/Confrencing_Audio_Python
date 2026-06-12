@@ -61,8 +61,33 @@ toolbar and the 7-tab inspector. Python-only and GUI-only: the engine, the
 ### Tests
 - Smoke suite reworked for the shell: mode switching, workflow dots, validation
   pill + drawer, hidden-panel staleness, LIVE overlay painting without hardware,
-  deploy badges, and a simulated-backend live connect/disconnect round-trip
-  (the session lifecycle is finally under test). **256 tests total.**
+  deploy badges, a simulated-backend live connect/disconnect round-trip (the
+  session lifecycle is finally under test), context-menu construction (catching
+  a long-standing right-click crash), 3D drag gating, and the processor hint.
+  **259 tests total.**
+
+### Fixed (post-redesign review)
+- Right-clicking the canvas raised IndexError before the context menu could
+  open (the handler passed the string ``"2d"`` as the view transform —
+  long-standing; menu construction is now split from the modal exec and tested).
+- The 3D view bypassed the new mode gating: devices/talkers were draggable in
+  every mode; now it follows the same profile as 2D, and the hover cursor only
+  advertises drags the mode allows.
+- Hint chips dead-ended in processor-less designs (suggested the documented
+  no-op Auto-Route); they now point to adding a processor first, like the old
+  banner did.
+- The Issues drawer rebuilt its list synchronously inside its own item-click
+  (the NoWheel crash class) — refreshes are now coalesced onto the next tick.
+- A live session's overlay repainted the full canvas ~17×/s even when idle
+  (payloads now dedup), could attach to the wrong array (session array is
+  pinned at connect; no fallback), and silently vanished in the 3D view (a
+  hint label now says where it went). Pickers stay stable during a session.
+- An armed floor-plan calibration leaked into other modes; the zone-kind
+  flyout was undiscoverable (now a visible split-arrow button); manual sample
+  rates were reset by unrelated refreshes; ☰-menu tooltips never showed; the
+  view-bar separator rendered as a dot; mode switches refreshed panels twice;
+  the deploy-badge cache could go stale after garbage collection; and
+  ``Ctrl+Shift+J`` now jumps to the raw config JSON.
 
 ## [1.13.0] - 2026-06-11
 

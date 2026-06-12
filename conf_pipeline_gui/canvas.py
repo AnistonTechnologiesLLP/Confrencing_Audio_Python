@@ -100,7 +100,11 @@ class Canvas(QWidget):
         return palette(getattr(self.state, "theme", "dark"))
 
     def _on_live_overlay(self):
-        if getattr(self.state, "mode", "design") == "live":
+        # The overlay is drawn in the 2D view; in 3D only the session-ended
+        # transition (overlay -> None) needs a repaint to drop the hint label.
+        if getattr(self.state, "mode", "design") == "live" and (
+            self.state.view == "2d" or self.state.live_overlay is None
+        ):
             self.update()
 
     # ----------------------------------------------------------------- helpers
@@ -685,13 +689,15 @@ class Canvas(QWidget):
         base = room.get("last_deployed")
         if base is None:
             return
-        key = (id(base), id(self.cfg))
-        if self._diff_cache_key != key:
+        # cache on strong references compared by identity — id() ints could be
+        # recycled after the undo history drops a config
+        cached = self._diff_cache_key
+        if cached is None or cached[0] is not base or cached[1] is not self.cfg:
             try:
                 self._diff_cache = cp.deployment_diff(base, self.cfg)
             except Exception:
                 self._diff_cache = None
-            self._diff_cache_key = key
+            self._diff_cache_key = (base, self.cfg)
         diff = self._diff_cache
         if diff is None or diff.identical:
             return
@@ -710,10 +716,10 @@ class Canvas(QWidget):
 
     # ---- LIVE operations overlay (sector wedge + DOA rays + level halo) ----
     def _live_array_pos(self, ov):
+        # Only the session's own array — never fall back to an unrelated one,
+        # or the telemetry would be visually attributed to the wrong device.
         aid = ov.get("array_id")
         d = next((x for x in self.cfg.devices if x.id == aid and x.position), None)
-        if d is None:
-            d = next((x for x in self.cfg.devices if x.type == "microphoneArray" and x.position), None)
         return d.position if d else None
 
     @staticmethod
@@ -868,6 +874,14 @@ class Canvas(QWidget):
                 p.drawEllipse(QPointF(s[0] + r * 0.9, s[1] - r), 3, 3)
                 self._label(p, s[0] + r + 3, s[1] + 4, obj.label, "#ffd6ea")
         self._paint_recommendation(p, project=self.project, cam=cam)
+        # the LIVE overlay and DEPLOY badges are 2D-only (v1) — say so instead
+        # of letting them silently vanish when the user presses 3
+        mode = getattr(self.state, "mode", "design")
+        ov = getattr(self.state, "live_overlay", None)
+        if mode == "live" and ov and ov.get("connected"):
+            self._label(p, 14, 24, "LIVE overlay is shown in the 2D view — press 2", "#ff9eae")
+        elif mode == "deploy" and self.state.rooms[self.state.active_room].get("last_deployed") is not None:
+            self._label(p, 14, 24, "Deploy change badges are shown in the 2D view — press 2", "#ffd24a")
 
     def _draw_routes_3d(self, p, cam):
         err, _ = self._error_refs()
@@ -947,11 +961,17 @@ class Canvas(QWidget):
 
     # ---- right-click context menu (2D; geometry editing is a DESIGN job) ----
     def contextMenuEvent(self, e):
+        menu = self._build_context_menu(e.pos())
+        if menu is not None and not menu.isEmpty():
+            menu.exec(e.globalPos())
+
+    def _build_context_menu(self, pos):
+        """Menu construction split from the modal exec so it is testable."""
         if self.state.view != "2d" or getattr(self.state, "mode", "design") != "design":
-            return
+            return None
         from PySide6.QtWidgets import QMenu
-        v = "2d"
-        world = self.s2w(e.pos().x(), e.pos().y(), v)
+        v = self.view2d()
+        world = self.s2w(pos.x(), pos.y(), v)
         hit = self._hit_test(world, v)
         menu = QMenu(self)
 
@@ -977,9 +997,7 @@ class Canvas(QWidget):
                 menu.addAction("Add mic array here", lambda: self._ctx_add_array(world))
             if self.cfg.room is None:
                 menu.addAction("Add rectangular room", lambda: self.state.set_config(cp.set_room(self.cfg, cp.rectangular_room(9, 7, 3))))
-
-        if not menu.isEmpty():
-            menu.exec(e.globalPos())
+        return menu
 
     def _ctx_select(self, sel):
         self.state.select(sel)
@@ -1065,13 +1083,7 @@ class Canvas(QWidget):
         try:
             if tool == "select":
                 hit = self._hit_test(w, v)
-                prof = self._profile()
-                drag_ok = hit is not None and (
-                    (hit["kind"] == "device" and prof["drag_devices"])
-                    or (hit["kind"] == "talker" and prof["drag_talkers"])
-                    or (hit["kind"] in ("zone-move", "zone-resize", "vertex") and prof["edit"])
-                )
-                self.drag = hit if drag_ok and hit["kind"] != "route" else None
+                self.drag = hit if self._drag_allowed(hit) and hit["kind"] != "route" else None
                 if hit and hit["kind"] == "device":
                     self.state.select({"kind": "device", "id": hit["id"]})
                 elif hit and hit["kind"] == "talker":
@@ -1108,6 +1120,18 @@ class Canvas(QWidget):
         except Exception as exc:  # surface engine errors without crashing
             self._toast(str(exc))
 
+    def _drag_allowed(self, hit) -> bool:
+        """Whether the current mode profile lets this hit be dragged (shared by
+        press handling and hover cursor so the affordance never lies)."""
+        if hit is None:
+            return False
+        prof = self._profile()
+        return (
+            (hit["kind"] == "device" and prof["drag_devices"])
+            or (hit["kind"] == "talker" and prof["drag_talkers"])
+            or (hit["kind"] in ("zone-move", "zone-resize", "vertex") and prof["edit"])
+        )
+
     def _update_hover_cursor(self, world, v):
         """Cursor feedback so interactive items feel grabbable in the Select tool."""
         if self.state.tool != "select":
@@ -1117,10 +1141,12 @@ class Canvas(QWidget):
         hit = self._hit_test(world, v)
         if hit is None:
             self.setCursor(Qt.ArrowCursor)
-        elif hit["kind"] == "zone-resize":
+        elif hit["kind"] == "zone-resize" and self._drag_allowed(hit):
             self.setCursor(Qt.SizeFDiagCursor)
-        elif hit["kind"] in ("device", "talker", "vertex", "zone-move"):
+        elif self._drag_allowed(hit):
             self.setCursor(Qt.OpenHandCursor)
+        elif hit["kind"] in ("device", "talker", "zone-move", "zone-resize"):
+            self.setCursor(Qt.PointingHandCursor)  # selectable, not draggable here
         else:
             self.setCursor(Qt.ArrowCursor)
 
@@ -1245,14 +1271,19 @@ class Canvas(QWidget):
             return
         hit = self._pick3d(pos, cam)
         if hit:
+            # selection works in every mode; dragging follows the mode profile,
+            # same as the 2D path
+            prof = self._profile()
             if hit[0] == "talker":
                 t = next(x for x in self.cfg.talkers if x.id == hit[1])
                 self.state.select({"kind": "talker", "id": hit[1]})
-                self.move3 = {"id": hit[1], "type": "talker", "h": self.talker_elev(t)}
+                if prof["drag_talkers"]:
+                    self.move3 = {"id": hit[1], "type": "talker", "h": self.talker_elev(t)}
             else:
                 d = next(x for x in self.cfg.devices if x.id == hit[1])
                 self.state.select({"kind": "device", "id": hit[1]})
-                self.move3 = {"id": hit[1], "type": "device", "h": self.elev3d(d)}
+                if prof["drag_devices"]:
+                    self.move3 = {"id": hit[1], "type": "device", "h": self.elev3d(d)}
             return
         self.state.select(None)
         self.orbit = {"x": pos.x(), "y": pos.y()}

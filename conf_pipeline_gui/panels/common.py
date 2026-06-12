@@ -253,7 +253,9 @@ class PanelBase(QWidget):
     def showEvent(self, event):  # noqa: N802 (Qt override)
         super().showEvent(event)
         if self._stale:
-            self.refresh()
+            # coalesce with the mode-switch's own changed-signal refresh so a
+            # mode entry costs one rebuild, not two
+            self._schedule_refresh()
 
     def refresh(self):
         """Override; first call ``super().refresh()`` to clear staleness and

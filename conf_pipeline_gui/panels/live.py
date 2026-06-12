@@ -58,6 +58,7 @@ class LivePanel(PanelBase):
         self._calib_workers = set()      # strong refs to front-calibration runnables
         self._clean_monitor = None       # CleanMonitor while OCTOVOX cleaning is live
         self._autosteer = None           # AutoSteerController while auto-following talkers
+        self._session_array_id = None    # the array the running session was started with
 
         root = QVBoxLayout(self)
         root.setContentsMargins(10, 8, 10, 8)
@@ -677,6 +678,7 @@ class LivePanel(PanelBase):
             self.live_status.setText(f"Connect failed: {exc}")
             return
         self._live_ctl = ctl
+        self._session_array_id = self._live_array_id()
         self.live_connect.setText("Disconnect")
         st = ctl.state()
         beams = f", {st.design_zones} beam(s)" if st.design_zones else ""
@@ -724,6 +726,7 @@ class LivePanel(PanelBase):
             self.live_octovox_status.setText(f"Could not start: {exc}")
             return
         self._clean_monitor = mon
+        self._session_array_id = aid
         self.live_connect.setText("Disconnect")
         if steer:
             mode = f"steered to {za.target_az:.0f}°, {len(za.interferer_az)} excluded" if za.target_az is not None else "steered (no pickup zone)"
@@ -765,6 +768,7 @@ class LivePanel(PanelBase):
             self.live_status.setText(f"Auto-steer connect failed: {exc}")
             return
         self._autosteer = ctrl
+        self._session_array_id = self._live_array_id()
         self.live_connect.setText("Disconnect")
         # the gate owns muting while auto-steering; avoid a fight with the manual button
         self.live_mute.setEnabled(not self.live_autosteer_gate.isChecked())
@@ -809,10 +813,12 @@ class LivePanel(PanelBase):
                 self._live_ctl.disconnect()
             finally:
                 self._live_ctl = None
+        self._session_array_id = None
         self.live_connect.setText("Connect")
         self.live_meter.setValue(0)
         self.live_status.setText("Disconnected.")
         self._notify_session_changed()
+        self._publish_overlay()  # clear the canvas operations view promptly
         self.refresh()
 
     def _live_toggle_mute(self):
@@ -850,7 +856,8 @@ class LivePanel(PanelBase):
             except Exception:
                 detections = []
         self.state.set_live_overlay({
-            "array_id": self._live_array_id(),
+            # pinned at connect — the combo may show another room's arrays
+            "array_id": self._session_array_id,
             "sector": sector,
             "detections": detections,
             "level": self.live_meter.value() / 100.0,
@@ -906,21 +913,22 @@ class LivePanel(PanelBase):
                     "Live audio backend not installed — running in simulation. "
                     "Install with:  pip install -e \".[control]\""
                 )
-            # array picker (preserve selection)
-            cur = self._live_array_id()
-            self.live_array.blockSignals(True)
-            self.live_array.clear()
-            arrays = [d for d in self.state.config.devices if d.type == "microphoneArray"]
-            for a in arrays:
-                placed = "" if a.position else "  (no position)"
-                self.live_array.addItem(f"{a.label} · {a.id}{placed}", a.id)
-            if cur is not None:
-                idx = self.live_array.findData(cur)
-                if idx >= 0:
-                    self.live_array.setCurrentIndex(idx)
-            self.live_array.blockSignals(False)
-            # device picker (only when idle; don't disrupt a live session)
+            # pickers rebuild only when idle; a running session keeps its combos
+            # stable (the room switcher may have swapped in another room's devices)
             if not self._live_busy():
+                # array picker (preserve selection)
+                cur = self._live_array_id()
+                self.live_array.blockSignals(True)
+                self.live_array.clear()
+                arrays = [d for d in self.state.config.devices if d.type == "microphoneArray"]
+                for a in arrays:
+                    placed = "" if a.position else "  (no position)"
+                    self.live_array.addItem(f"{a.label} · {a.id}{placed}", a.id)
+                if cur is not None:
+                    idx = self.live_array.findData(cur)
+                    if idx >= 0:
+                        self.live_array.setCurrentIndex(idx)
+                self.live_array.blockSignals(False)
                 curd = self.live_device.currentData()
                 self.live_device.blockSignals(True)
                 self.live_device.clear()
@@ -938,7 +946,9 @@ class LivePanel(PanelBase):
                     if i >= 0:
                         self.live_device.setCurrentIndex(i)
                 self.live_device.blockSignals(False)
-                self._on_live_device_changed()  # match the rate to the selected device
+                if self.live_device.currentData() != curd:
+                    self._on_live_device_changed()  # device changed — match its native rate
+                # (an unchanged device keeps the user's manually chosen rate)
 
                 # output devices (for monitoring)
                 from conf_pipeline_control.audio import list_output_devices

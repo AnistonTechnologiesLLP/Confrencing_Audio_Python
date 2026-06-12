@@ -132,6 +132,52 @@ def test_hidden_panel_catches_up_on_show(win):
     assert "route" in route.routing_summary_lbl.text()
 
 
+def test_canvas_context_menu_builds(win):
+    from PySide6.QtCore import QPoint
+
+    win.state.set_mode("design")
+    win.state.set_config(cp.set_room(cp.create_config("T", "2026-06-11T00:00:00Z"), cp.rectangular_room(8, 6, 3)))
+    # regression: the handler passed the string "2d" as the view transform and
+    # raised IndexError before the menu ever appeared
+    menu = win.canvas._build_context_menu(QPoint(50, 50))
+    assert menu is not None and not menu.isEmpty()
+    win.state.set_mode("route")
+    assert win.canvas._build_context_menu(QPoint(50, 50)) is None  # DESIGN-only
+    win.state.set_mode("design")
+
+
+def test_hint_suggests_processor_before_noop_routing(win):
+    from conf_pipeline_gui import workflow
+
+    c = cp.set_room(cp.create_config("T", "2026-06-11T00:00:00Z"), cp.rectangular_room(8, 6, 3))
+    c = cp.add_device(c, cp.create_microphone_array("A1", "Array"))
+    win.state.set_config(c)
+    # without a processor, Auto-Route is a documented no-op — the hint must not point at it
+    assert "processor" in workflow.next_hint(win.state, "route").lower()
+
+
+def test_3d_drag_gated_by_mode(win):
+    from PySide6.QtCore import QPointF
+
+    c = cp.set_room(cp.create_config("T", "2026-06-11T00:00:00Z"), cp.rectangular_room(8, 6, 3))
+    c = cp.add_device(c, cp.create_microphone_array("A1", "Array"))
+    c = cp.set_device_position(c, "A1", Point2D(4, 3))
+    win.state.set_config(c)
+    win.state.view = "3d"
+    cv = win.canvas
+    cam = cv.camera()
+    s = cv.project(cv.dev3(next(d for d in win.state.config.devices)), cam)
+    assert s is not None
+    for mode, draggable in (("route", False), ("design", True)):
+        win.state.set_mode(mode)
+        cv.move3 = None
+        cv._down3d(QPointF(s[0], s[1]))
+        assert (cv.move3 is not None) == draggable
+        cv.move3 = None
+    win.state.view = "2d"
+    win.state.set_mode("design")
+
+
 def test_canvas_context_helpers(win):
     cv = win.canvas
     win.state.set_config(cp.set_room(cp.create_config("T", "2026-06-11T00:00:00Z"), cp.rectangular_room(8, 6, 3)))

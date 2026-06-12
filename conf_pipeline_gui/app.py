@@ -167,6 +167,7 @@ class MainWindow(QMainWindow):
 
     def _build_app_menu(self) -> QMenu:
         m = QMenu(self)
+        m.setToolTipsVisible(True)  # QMenu hides action tooltips by default
 
         samples = m.addMenu("Load sample")
         for key, label, _fn in SCENARIOS:
@@ -242,6 +243,14 @@ class MainWindow(QMainWindow):
         QShortcut(QKeySequence("3"), self, lambda: self._set_view("3d"))
         for i, mode in enumerate(workflow.MODES, start=1):
             QShortcut(QKeySequence(f"Ctrl+{i}"), self, lambda m=mode: self.state.set_mode(m))
+        QShortcut(QKeySequence("Ctrl+Shift+J"), self, self._show_json)
+
+    def _show_json(self):
+        """Jump straight to the raw config JSON (Deploy panel's Data card)."""
+        self.state.set_mode("deploy")
+        deploy = self.panels["deploy"]
+        deploy.data_card.set_open(True)
+        deploy._maybe_fill_json()
 
     def _sync_chrome(self):
         self.undo_btn.setEnabled(self.state.can_undo())
@@ -275,6 +284,7 @@ class MainWindow(QMainWindow):
 
     # ------------------------------------------------------------------- modes
     def _apply_mode(self, mode: str):
+        self.state.calibrating = False  # an armed calibration drag is a DESIGN affair
         self.modebar.set_active(mode)
         self.toolrail.set_mode(mode)
         if self.state.tool not in MODE_TOOLS.get(mode, ["select"]):
@@ -283,6 +293,8 @@ class MainWindow(QMainWindow):
         # per-mode overlay defaults (user-overridable afterwards)
         if mode in ("simulate", "live") and not self.state.show_coverage:
             self.state.show_coverage = True
+        if mode != "live" and self.panels["live"]._live_busy():
+            self.toast("Live session running — the LIVE dot stays red until you disconnect")
         self.canvas.update()
 
     def _goto_mode(self, mode: str):
@@ -293,8 +305,6 @@ class MainWindow(QMainWindow):
 
     def _live_session_changed(self, busy: bool):
         self.modebar.set_live_connected(busy)
-        if busy and self.state.mode != "live":
-            self.toast("Live session running — the LIVE dot stays red until you disconnect")
 
     def resizeEvent(self, e):  # noqa: N802 (Qt override)
         super().resizeEvent(e)

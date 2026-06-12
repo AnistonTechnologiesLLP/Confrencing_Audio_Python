@@ -41,6 +41,10 @@ def has_talker(c) -> bool:
     return len(c.talkers) > 0
 
 
+def has_processor(c) -> bool:
+    return any(d.type == "processor" for d in c.devices)
+
+
 def is_optimized(c) -> bool:
     # "optimized" ≈ arrays placed AND at least one route exists (auto-route ran)
     arrays = [d for d in c.devices if d.type == "microphoneArray"]
@@ -110,6 +114,8 @@ def next_hint(state, mode: str) -> str:
             return "Next: drag a coverage zone (Z)"
         if not has_talker(c):
             return "Next: place a talker (T)"
+        if not has_processor(c):
+            return "Next: add a processor (DSP) — AEC & the automixer live there"
         if not is_optimized(c):
             return "Next: run Optimize room"
         return ""
@@ -122,6 +128,8 @@ def next_hint(state, mode: str) -> str:
     if mode == "route":
         if not c.devices:
             return "Nothing to route — add devices in Design"
+        if not has_processor(c):
+            return "Add a processor (DSP) in Design — nothing to route without one"
         if not c.routes:
             return "Next: run Auto-Route to wire the system"
         return ""

@@ -61,6 +61,10 @@ class AppState(QObject):
         self.changed.emit()
 
     def set_live_overlay(self, data) -> None:
+        # dedup: the Live panel republishes every 60 ms; identical payloads
+        # (idle/muted session) must not drive full-canvas repaints
+        if data == self.live_overlay:
+            return
         self.live_overlay = data
         self.liveOverlayChanged.emit()
 

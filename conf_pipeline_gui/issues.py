@@ -6,7 +6,7 @@ panel's selection card follows).
 """
 from __future__ import annotations
 
-from PySide6.QtCore import QEasingCurve, QPropertyAnimation, QRect, Qt
+from PySide6.QtCore import QEasingCurve, QPropertyAnimation, QRect, Qt, QTimer
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QFrame,
@@ -32,6 +32,7 @@ class IssuesDrawer(QFrame):
         self.setProperty("drawer", "true")
         self.setVisible(False)
         self._anim = None
+        self._refresh_pending = False
 
         lay = QVBoxLayout(self)
         lay.setContentsMargins(12, 10, 12, 10)
@@ -57,7 +58,7 @@ class IssuesDrawer(QFrame):
         self.coverage_lbl.setWordWrap(True)
         lay.addWidget(self.coverage_lbl)
 
-        state.changed.connect(self._on_changed)
+        state.changed.connect(self._schedule_refresh)
 
     # ---- open / close ----
     def open_drawer(self, host_rect: QRect):
@@ -90,7 +91,17 @@ class IssuesDrawer(QFrame):
         super().keyPressEvent(e)
 
     # ---- content ----
-    def _on_changed(self):
+    def _schedule_refresh(self):
+        """Coalesce onto the next tick — clicking an issue selects a device,
+        which emits ``changed``; rebuilding the list synchronously would destroy
+        the clicked item inside its own event (the NoWheel crash class)."""
+        if self._refresh_pending:
+            return
+        self._refresh_pending = True
+        QTimer.singleShot(0, self._do_refresh)
+
+    def _do_refresh(self):
+        self._refresh_pending = False
         if self.isVisible():
             self.refresh()
 
