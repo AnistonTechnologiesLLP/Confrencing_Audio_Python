@@ -1,323 +1,230 @@
-"""Main window + application entry point."""
+"""Main window + application entry point — the "Stagebar" workflow-modes shell.
+
+Navigation is the workflow itself: five top-level modes (DESIGN → SIMULATE →
+ROUTE → DEPLOY → LIVE) in a centered ModeBar with live status dots. The left
+tool rail shows only the current mode's canvas tools, the right panel follows
+the mode, and a validation pill in the top bar is visible from everywhere.
+"""
 from __future__ import annotations
 
 import sys
 
-from PySide6.QtGui import QAction, QActionGroup, QFont, QGuiApplication, QKeySequence, QShortcut
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QAction, QFont, QGuiApplication, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
-    QComboBox,
     QFileDialog,
+    QFrame,
+    QHBoxLayout,
+    QInputDialog,
     QLabel,
     QMainWindow,
+    QMenu,
     QMessageBox,
     QSplitter,
-    QToolBar,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
 
 import conf_pipeline as cp
 
+from . import icons, workflow
 from .canvas import Canvas
 from .guide import GuidePanel
 from .inspector import Inspector
+from .modebar import ModeBar
 from .scenarios import SCENARIOS
 from .state import AppState, now_iso
+from .theme import DARK_QSS, LIGHT_QSS, build_qss, palette  # noqa: F401 (re-exported)
+from .toolrail import MODE_TOOLS, ToolRail
+from .viewbar import ViewBar
 
-# "Conduit" design system, translated to QSS (a constrained CSS subset: no
-# variables/box-shadow/transitions). One template -> dark + light builds.
-_PALETTES = {
-    "dark": dict(
-        bg="#0a0a0e", surface="#0e0e13", surface2="#13131a", surface3="#181820", hover="#1f1f2a", elev="#1a1a23",
-        border="#262633", border_soft="#1c1c26", border_strong="#33333f",
-        text="#edeef4", text_dim="#c4c5d2", muted="#9197ab", faint="#646a82",
-        accent="#6d8bff", accent_bright="#85a0ff", accent_press="#5a78f0", on_accent="#070a16",
-        sel="#1b2138", ok="#3ddc97", warn="#f7c948", err="#ff6b81",
-    ),
-    "light": dict(
-        bg="#f5f6f9", surface="#ffffff", surface2="#f7f8fb", surface3="#eef0f5", hover="#e7eaf1", elev="#ffffff",
-        border="#e1e3eb", border_soft="#eaecf1", border_strong="#cfd2dd",
-        text="#14151c", text_dim="#33353f", muted="#5b6075", faint="#777c90",
-        accent="#5871f2", accent_bright="#4a63ec", accent_press="#4a63ec", on_accent="#ffffff",
-        sel="#e6ebfd", ok="#0fae72", warn="#b8860b", err="#e23b59",
-    ),
-}
-
-_QSS_TEMPLATE = """
-QMainWindow, QWidget {{ background: {bg}; color: {text}; }}
-QToolTip {{ background: {elev}; color: {text}; border: 1px solid {border_strong}; padding: 4px 7px; border-radius: 6px; }}
-
-QToolBar {{ background: {surface}; border: 0; border-bottom: 1px solid {border}; spacing: 4px; padding: 6px 9px; }}
-QToolBar::separator {{ background: {border}; width: 1px; margin: 4px 3px; }}
-QToolButton {{ background: transparent; color: {text_dim}; border: 1px solid transparent; border-radius: 8px; padding: 6px 11px; font-weight: 500; }}
-QToolButton:hover {{ background: {hover}; color: {text}; }}
-QToolButton:pressed {{ background: {surface3}; }}
-QToolButton:checked {{ background: {surface3}; color: {accent_bright}; border: 1px solid {border_strong}; }}
-QToolButton:disabled {{ color: {faint}; }}
-QToolButton[primary="true"] {{ color: {accent_bright}; font-weight: 700; }}
-QToolButton[primary="true"]:hover {{ background: {sel}; color: {accent_bright}; border: 1px solid {accent}; }}
-QLabel[toolbarSection="true"] {{ color: {faint}; font-size: 9px; font-weight: 800; letter-spacing: 1px; padding: 0 7px 0 3px; }}
-
-QPushButton {{ background: {surface2}; color: {text_dim}; border: 1px solid {border}; border-radius: 8px; padding: 6px 12px; font-weight: 500; }}
-QPushButton:hover {{ background: {hover}; border-color: {border_strong}; color: {text}; }}
-QPushButton:pressed {{ background: {surface3}; }}
-QPushButton:disabled {{ color: {faint}; }}
-QPushButton[accent="true"] {{ background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 {accent_bright}, stop:1 {accent}); color: {on_accent}; border: 1px solid {accent}; font-weight: 700; }}
-QPushButton[accent="true"]:hover {{ background: {accent_bright}; }}
-QPushButton[accent="true"]:pressed {{ background: {accent_press}; }}
-
-QGroupBox {{ background: {surface2}; border: 1px solid {border}; border-radius: 12px; margin-top: 15px; padding: 11px 12px 12px; }}
-QGroupBox::title {{ subcontrol-origin: margin; subcontrol-position: top left; left: 12px; top: 1px; padding: 1px 6px; color: {muted}; font-weight: 600; background: {surface3}; border: 1px solid {border}; border-radius: 5px; }}
-
-QLineEdit, QPlainTextEdit, QComboBox, QAbstractSpinBox {{ background: {surface3}; color: {text}; border: 1px solid {border}; border-radius: 8px; padding: 6px 8px; selection-background-color: {accent}; selection-color: {on_accent}; }}
-QLineEdit:hover, QComboBox:hover, QAbstractSpinBox:hover {{ border-color: {border_strong}; }}
-QLineEdit:focus, QPlainTextEdit:focus, QComboBox:focus, QAbstractSpinBox:focus {{ border-color: {accent}; }}
-QComboBox::drop-down {{ subcontrol-origin: padding; subcontrol-position: top right; width: 18px; border: 0; }}
-QAbstractSpinBox::up-button, QAbstractSpinBox::down-button {{ width: 0; height: 0; border: 0; }}
-QComboBox QAbstractItemView {{ background: {elev}; color: {text}; border: 1px solid {border_strong}; border-radius: 8px; padding: 3px; selection-background-color: {accent}; selection-color: {on_accent}; outline: 0; }}
-
-QListWidget {{ background: {surface3}; border: 1px solid {border}; border-radius: 9px; padding: 4px; outline: 0; }}
-QListWidget::item {{ background: transparent; color: {text}; border: 1px solid transparent; border-radius: 7px; padding: 7px 9px; margin: 2px 1px; }}
-QListWidget::item:hover {{ background: {hover}; }}
-QListWidget::item:selected {{ background: {sel}; color: {text}; border: 1px solid {accent}; }}
-
-QTabWidget::pane {{ border: 1px solid {border}; border-radius: 0; top: -1px; }}
-QTabBar {{ background: transparent; }}
-QTabBar::tab {{ background: transparent; color: {muted}; padding: 9px 13px; border: 0; margin-right: 2px; font-weight: 600; }}
-QTabBar::tab:hover {{ color: {text}; }}
-QTabBar::tab:selected {{ color: {text}; border-bottom: 2px solid {accent}; }}
-
-QCheckBox {{ color: {text}; spacing: 7px; }}
-QCheckBox::indicator {{ width: 16px; height: 16px; border-radius: 5px; border: 1px solid {border_strong}; background: {surface}; }}
-QCheckBox::indicator:hover {{ border-color: {accent}; }}
-QCheckBox::indicator:checked {{ background: {accent}; border-color: {accent}; }}
-QRadioButton {{ color: {text}; spacing: 7px; }}
-QRadioButton::indicator {{ width: 15px; height: 15px; border-radius: 8px; border: 1px solid {border_strong}; background: {surface}; }}
-QRadioButton::indicator:checked {{ background: {accent}; border-color: {accent}; }}
-
-QSlider::groove:horizontal {{ height: 4px; background: {surface}; border: 1px solid {border}; border-radius: 2px; }}
-QSlider::sub-page:horizontal {{ background: {accent}; border-radius: 2px; }}
-QSlider::handle:horizontal {{ background: {text_dim}; width: 14px; height: 14px; margin: -6px 0; border-radius: 7px; border: 1px solid {border_strong}; }}
-QSlider::handle:horizontal:hover {{ background: {accent_bright}; }}
-
-QScrollBar:vertical {{ background: transparent; width: 11px; margin: 0; }}
-QScrollBar::handle:vertical {{ background: {border_strong}; min-height: 28px; border-radius: 5px; margin: 2px; }}
-QScrollBar::handle:vertical:hover {{ background: {muted}; }}
-QScrollBar:horizontal {{ background: transparent; height: 11px; margin: 0; }}
-QScrollBar::handle:horizontal {{ background: {border_strong}; min-width: 28px; border-radius: 5px; margin: 2px; }}
-QScrollBar::handle:horizontal:hover {{ background: {muted}; }}
-QScrollBar::add-line, QScrollBar::sub-line {{ width: 0; height: 0; }}
-QScrollBar::add-page, QScrollBar::sub-page {{ background: transparent; }}
-
-QLabel {{ color: {text_dim}; }}
-QFrame[card="true"] {{ border: 1px solid {border}; border-radius: 7px; }}
-QFrame[frameShape="4"], QFrame[frameShape="5"] {{ color: {border}; background: {border}; max-height: 1px; }}
-QStatusBar {{ background: {surface}; color: {muted}; border-top: 1px solid {border}; }}
-QStatusBar::item {{ border: 0; }}
-
-QFrame[guidePanel="true"] {{ background: {surface2}; border-bottom: 1px solid {border}; }}
-QLabel[guideHeader="true"] {{ color: {text}; font-weight: 800; font-size: 12px; }}
-QLabel[guideSub="true"] {{ color: {muted}; font-size: 11px; padding-left: 8px; }}
-QLabel[guideArrow="true"] {{ color: {faint}; font-size: 13px; }}
-QWidget[guideStep="true"] {{ background: {surface3}; border: 1px solid {border}; border-radius: 9px; }}
-QWidget[guideStep="true"][done="true"] {{ background: {sel}; border: 1px solid {ok}; }}
-QLabel[guideDot="true"] {{ color: {muted}; font-size: 13px; font-weight: 700; }}
-QLabel[guideTitle="true"] {{ color: {text_dim}; font-weight: 600; }}
-QLabel[guideTitle="true"][done="true"] {{ color: {ok}; }}
-QWidget[guideStep="true"] QPushButton {{ background: {accent}; color: {on_accent}; border: 0; border-radius: 6px; padding: 4px 9px; font-weight: 700; }}
-QWidget[guideStep="true"] QPushButton:hover {{ background: {accent_bright}; }}
-
-QLabel[inspectorBanner="true"] {{ background: {surface2}; border-bottom: 1px solid {border}; font-size: 12px; }}
-QLabel[inspectorBanner="true"][level="error"] {{ background: {surface2}; border-bottom: 1px solid {err}; }}
-QLabel[inspectorBanner="true"][level="warn"] {{ background: {surface2}; border-bottom: 1px solid {warn}; }}
-QLabel[inspectorBanner="true"][level="ok"] {{ background: {surface2}; border-bottom: 1px solid {ok}; }}
-"""
-
-
-def build_qss(theme: str) -> str:
-    return _QSS_TEMPLATE.format(**_PALETTES[theme])
-
-
-DARK_QSS = build_qss("dark")
-LIGHT_QSS = build_qss("light")
+# Mode → inspector tab (bridge until the per-mode panels land).
+MODE_TAB = {"design": "Build", "simulate": "Simulate", "route": "Routing", "deploy": "Issues", "live": "Live"}
+# Pressing a tool key outside its home mode hops there first (Fusion-style).
+TOOL_HOME_MODE = {"room": "design", "zone": "design", "talker": "design", "connect": "route"}
 
 
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Conferencing Audio Pipeline — Configurator")
-        self.resize(1280, 820)
-        self._light = False
+        self.resize(1320, 840)
         self.state = AppState()
 
         self.canvas = Canvas(self.state)
         self.inspector = Inspector(self.state)
         self.canvas.coord_cb = lambda s: self.coord_label.setText(s)
 
+        # floating view bar over the canvas's top-left corner
+        self.viewbar = ViewBar(self.canvas)
+        self.viewbar.move(12, 12)
+        self.viewbar.viewSelected.connect(self._set_view)
+        self.viewbar.coverageToggled.connect(self._toggle_coverage)
+        self.viewbar.heatmapToggled.connect(self._toggle_heatmap)
+
+        self.toolrail = ToolRail(self.state.theme)
+        self.toolrail.toolSelected.connect(self._set_tool)
+        self.toolrail.zoneKindSelected.connect(self._zone_kind_selected)
+        self.toolrail.set_mode(self.state.mode)
+
         split = QSplitter()
         split.addWidget(self.canvas)
         split.addWidget(self.inspector)
         split.setStretchFactor(0, 1)
         split.setStretchFactor(1, 0)
-        split.setSizes([820, 420])
+        split.setSizes([860, 420])
 
-        # Central column: guided getting-started strip above the editor split.
+        row = QWidget()
+        row_lay = QHBoxLayout(row)
+        row_lay.setContentsMargins(0, 0, 0, 0)
+        row_lay.setSpacing(0)
+        row_lay.addWidget(self.toolrail)
+        row_lay.addWidget(split, 1)
+
         central = QWidget()
         col = QVBoxLayout(central)
         col.setContentsMargins(0, 0, 0, 0)
         col.setSpacing(0)
+        col.addWidget(self._build_topbar())
         self.guide = GuidePanel(self.state, {
             "rect_room": self._rect_room,
             "add_array": self._guide_add_array,
-            "zone_tool": lambda: self._set_tool("zone", sync=True),
-            "talker_tool": lambda: self._set_tool("talker", sync=True),
+            "zone_tool": lambda: self._shortcut_tool("zone"),
+            "talker_tool": lambda: self._shortcut_tool("talker"),
             "optimize": self._optimize_room,
         })
         col.addWidget(self.guide)
-        col.addWidget(split, 1)
+        col.addWidget(row, 1)
         self.setCentralWidget(central)
 
-        self._build_toolbar()
         self._build_statusbar()
         self._shortcuts()
-        self.state.changed.connect(self._sync_toolbar)
-        self._sync_toolbar()
+        self.state.changed.connect(self._sync_chrome)
+        self.state.modeChanged.connect(self._apply_mode)
+        self._sync_chrome()
 
-    # ----------------------------------------------------------------- toolbar
-    def _section_label(self, text: str) -> QLabel:
-        """A small uppercase caption that titles a toolbar group."""
-        lbl = QLabel(text.upper())
-        lbl.setProperty("toolbarSection", "true")
-        return lbl
-
-    def _act(self, glyph: str, label: str, slot, tip: str, *, checkable=False, primary=False) -> QAction:
-        """Build a tooltip-rich toolbar action. ``glyph`` is a leading unicode icon."""
-        act = QAction(f"{glyph}  {label}" if glyph else label, self, checkable=checkable)
-        act.setToolTip(f"{label} — {tip}")
-        act.setStatusTip(tip)
+    # ------------------------------------------------------------------ top bar
+    def _tool_btn(self, icon_name: str, tip: str, slot=None) -> QToolButton:
+        b = QToolButton()
+        b.setToolTip(tip)
+        b.setCursor(Qt.PointingHandCursor)
+        if icon_name:
+            b.setIcon(icons.icon(icon_name, palette(self.state.theme)["muted"],
+                                 active_color=palette(self.state.theme)["accent_bright"]))
         if slot is not None:
-            act.triggered.connect(slot)
-        if primary:
-            act.setProperty("primary", "true")
-        return act
+            b.clicked.connect(slot)
+        return b
 
-    def _build_toolbar(self):
-        # Text-beside-icon, grouped into captioned sections so 25 actions read as
-        # six small clusters instead of one undifferentiated row.
-        tb = QToolBar("Main")
-        tb.setMovable(False)
-        tb.setIconSize(tb.iconSize())
-        tb.setStyleSheet("")  # inherit app QSS
-        self.addToolBar(tb)
-        self._toolbar = tb
+    def _build_topbar(self) -> QFrame:
+        bar = QFrame()
+        bar.setProperty("topbar", "true")
+        lay = QHBoxLayout(bar)
+        lay.setContentsMargins(8, 5, 8, 5)
+        lay.setSpacing(6)
 
-        def group(caption: str):
-            tb.addWidget(self._section_label(caption))
+        self.menu_btn = self._tool_btn("menu", "All commands: samples, import/export, room, deploy, theme")
+        self.menu_btn.setPopupMode(QToolButton.InstantPopup)
+        self.menu_btn.setMenu(self._build_app_menu())
+        lay.addWidget(self.menu_btn)
 
-        # ---- Tools (canvas edit mode) ----
-        group("Tools")
-        self.tool_group = QActionGroup(self)
-        self.tool_group.setExclusive(True)
-        tool_meta = [
-            ("select", "▲", "Select", "Move and select devices, zones, talkers, room corners"),
-            ("connect", "↔", "Connect", "Click device → device to wire a route"),
-            ("room", "▭", "Room", "Click to draw the room outline; double-click to close"),
-            ("zone", "◰", "Zone", "Drag a coverage/exclusion area on the floor"),
-            ("talker", "☺", "Talker", "Click to drop a person (talker)"),
-        ]
-        for key, glyph, label, tip in tool_meta:
-            act = self._act(glyph, label, lambda _c, k=key: self._set_tool(k), tip, checkable=True)
-            act.setData(key)
-            self.tool_group.addAction(act)
-            tb.addAction(act)
-            if key == "select":
-                act.setChecked(True)
-        tb.addSeparator()
+        self.room_btn = QToolButton()
+        self.room_btn.setToolTip("Rooms in this project — switch, add, rename")
+        self.room_btn.setCursor(Qt.PointingHandCursor)
+        self.room_btn.setPopupMode(QToolButton.InstantPopup)
+        self.room_btn.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        self.room_btn.setIcon(icons.icon("rooms", palette(self.state.theme)["muted"]))
+        room_menu = QMenu(self.room_btn)
+        room_menu.aboutToShow.connect(lambda m=room_menu: self._fill_room_menu(m))
+        self.room_btn.setMenu(room_menu)
+        lay.addWidget(self.room_btn)
 
-        # ---- View ----
-        group("View")
-        self.view_group = QActionGroup(self)
-        for key, glyph, tip in [("2d", "▦", "Top-down 2D plan view"), ("3d", "◳", "Orbit 3D view")]:
-            act = self._act(glyph, key.upper(), lambda _c, k=key: self._set_view(k), tip, checkable=True)
-            self.view_group.addAction(act)
-            tb.addAction(act)
-            if key == "2d":
-                act.setChecked(True)
-        self.act_coverage = self._act("◎", "Coverage", self._toggle_coverage,
-                                      "Overlay each array's floor coverage circle", checkable=True)
-        tb.addAction(self.act_coverage)
-        tb.addSeparator()
+        lay.addStretch(1)
+        self.modebar = ModeBar(self.state.theme)
+        self.modebar.modeSelected.connect(self.state.set_mode)
+        lay.addWidget(self.modebar)
+        lay.addStretch(1)
 
-        # ---- Edit ----
-        group("Edit")
-        self.act_undo = self._act("↶", "Undo", self.state.undo, "Undo the last change")
-        self.act_redo = self._act("↷", "Redo", self.state.redo, "Redo")
-        tb.addAction(self.act_undo)
-        tb.addAction(self.act_redo)
-        tb.addSeparator()
+        self.val_pill = QToolButton()
+        self.val_pill.setProperty("pill", "true")
+        self.val_pill.setToolTip("Validation state — click to review the issues")
+        self.val_pill.setCursor(Qt.PointingHandCursor)
+        self.val_pill.clicked.connect(self._show_issues)
+        lay.addWidget(self.val_pill)
 
-        # ---- Design (the one-click automation — primary actions) ----
-        group("Design")
-        optimize = self._act("✨", "Optimize room", self._optimize_room,
-                             "One click: place arrays, assign coverage channels, route everything", primary=True)
-        tb.addAction(optimize)
-        auto_route = self._act("⚡", "Auto-Route", self._auto_route,
-                               "AEC references + automixer + far-end & near-end routing", primary=True)
-        tb.addAction(auto_route)
-        auto = self._act("⚙", "Auto-configure", self._auto, "AEC + automixer buses only (no reinforcement routing)")
-        tb.addAction(auto)
-        tb.addSeparator()
+        self.undo_btn = self._tool_btn("undo", "Undo the last change (Ctrl+Z)", self.state.undo)
+        self.redo_btn = self._tool_btn("redo", "Redo (Ctrl+Shift+Z)", self.state.redo)
+        lay.addWidget(self.undo_btn)
+        lay.addWidget(self.redo_btn)
+        return bar
 
-        # ---- Room / floor plan ----
-        group("Room")
-        rect = self._act("▭", "Rect room", self._rect_room, "Drop a rectangular room you can resize")
-        tb.addAction(rect)
-        plan = self._act("🖼", "Floor plan…", self._import_floor_plan, "Place a floor-plan image under the room")
-        tb.addAction(plan)
-        calib = self._act("📏", "Calibrate…", self._calibrate_scale, "Drag a known distance to set the floor-plan scale")
-        tb.addAction(calib)
-        tb.addSeparator()
+    def _build_app_menu(self) -> QMenu:
+        m = QMenu(self)
 
-        # ---- Project (samples + multi-room) ----
-        group("Project")
-        self.scenario = QComboBox()
-        self.scenario.setToolTip("Load a sample room to explore")
-        self.scenario.addItem("Load sample…", "")
+        samples = m.addMenu("Load sample")
         for key, label, _fn in SCENARIOS:
-            self.scenario.addItem(label, key)
-        self.scenario.addItem("Empty", "empty")
-        self.scenario.currentIndexChanged.connect(self._load_scenario)
-        tb.addWidget(self.scenario)
-        self.room_combo = QComboBox()
-        self.room_combo.setMinimumWidth(120)
-        self.room_combo.setToolTip("Switch between rooms in this project")
-        self._updating_rooms = False
-        self.room_combo.currentIndexChanged.connect(self._room_changed)
-        tb.addWidget(self.room_combo)
-        tb.addAction(self._act("＋", "Room", lambda: self.state.add_room(), "Add a new room to the project"))
-        tb.addAction(self._act("－", "Room", lambda: self.state.remove_room(self.state.active_room), "Remove the current room"))
-        tb.addAction(self._act("🏷", "Auto-name", self._auto_name, "Apply a consistent naming scheme to all devices"))
-        tb.addAction(self._act("⇪", "Deploy", self._deploy, "Mark the current design as deployed and show the diff"))
-        tb.addSeparator()
+            samples.addAction(label, lambda k=key: self._load_scenario(k))
+        samples.addSeparator()
+        samples.addAction("Empty", lambda: self._load_scenario("empty"))
 
-        # ---- File ----
-        group("File")
-        tb.addAction(self._act("📂", "Import", self._import, "Load a config from JSON"))
-        tb.addAction(self._act("💾", "Export", self._export, "Save this config to JSON"))
-        tb.addAction(self._act("📄", "Report", self._export_report, "Export a shareable Markdown/HTML design report"))
-        tb.addSeparator()
-        tb.addAction(self._act("◐", "Theme", self._toggle_theme, "Toggle dark / light theme"))
-        # Help re-opens the guided panel.
-        tb.addAction(self._act("？", "Guide", self._toggle_guide, "Show the step-by-step getting-started guide"))
+        m.addAction("Import config…", self._import)
+        m.addAction("Export config…", self._export)
+        m.addAction("Export design report…", self._export_report)
+        m.addSeparator()
 
+        self.act_optimize = QAction("✨ Optimize room", self)
+        self.act_optimize.setToolTip("One click: place arrays, assign coverage channels, route everything")
+        self.act_optimize.setShortcut(QKeySequence("Ctrl+Shift+O"))
+        self.act_optimize.triggered.connect(self._optimize_room)
+        m.addAction(self.act_optimize)
+        self.act_auto_route = QAction("⚡ Auto-Route", self)
+        self.act_auto_route.setToolTip("AEC references + automixer + far-end & near-end routing")
+        self.act_auto_route.triggered.connect(self._auto_route)
+        m.addAction(self.act_auto_route)
+        self.act_auto = QAction("Auto-configure", self)
+        self.act_auto.setToolTip("AEC + automixer buses only (no reinforcement routing)")
+        self.act_auto.triggered.connect(self._auto)
+        m.addAction(self.act_auto)
+        m.addSeparator()
+
+        m.addAction("Rectangular room", self._rect_room)
+        m.addAction("Import floor plan…", self._import_floor_plan)
+        m.addAction("Calibrate floor-plan scale…", self._calibrate_scale)
+        m.addAction("Auto-name devices", self._auto_name)
+        m.addSeparator()
+        m.addAction("Deploy (snapshot design)", self._deploy)
+        m.addSeparator()
+        m.addAction("Toggle dark / light theme", self._toggle_theme)
+        m.addAction("Show getting-started guide", self._toggle_guide)
+        return m
+
+    def _fill_room_menu(self, menu: QMenu):
+        menu.clear()
+        for i, r in enumerate(self.state.rooms):
+            name = r["config"].metadata.get("name", r["id"])
+            a = QAction(name, menu, checkable=True)
+            a.setChecked(i == self.state.active_room)
+            a.triggered.connect(lambda _c=False, idx=i: self.state.switch_room(idx))
+            menu.addAction(a)
+        menu.addSeparator()
+        menu.addAction("Add room", self.state.add_room)
+        if len(self.state.rooms) > 1:
+            menu.addAction("Remove current room", lambda: self.state.remove_room(self.state.active_room))
+        menu.addAction("Rename room…", self._rename_room)
+
+    def _rename_room(self):
+        cur = self.state.config.metadata.get("name", "")
+        name, ok = QInputDialog.getText(self, "Rename room", "Room name:", text=cur)
+        if ok and name.strip():
+            self.state.rename_room(self.state.active_room, name.strip())
+
+    # ------------------------------------------------------------------ chrome
     def _build_statusbar(self):
         self.coord_label = QLabel("x — , y —")
-        self.val_label = QLabel("")
         self.room_label = QLabel("")
         self.statusBar().addPermanentWidget(self.room_label)
         self.statusBar().addPermanentWidget(self.coord_label)
-        self.statusBar().addWidget(self.val_label)
 
     def _shortcuts(self):
         QShortcut(QKeySequence.Undo, self, self.state.undo)
@@ -325,29 +232,93 @@ class MainWindow(QMainWindow):
         QShortcut(QKeySequence("Delete"), self, self._delete_selection)
         QShortcut(QKeySequence("Backspace"), self, self._delete_selection)
         for k, tool in [("V", "select"), ("C", "connect"), ("R", "room"), ("Z", "zone"), ("T", "talker")]:
-            QShortcut(QKeySequence(k), self, lambda t=tool: self._set_tool(t, sync=True))
-        QShortcut(QKeySequence("2"), self, lambda: self._set_view("2d", sync=True))
-        QShortcut(QKeySequence("3"), self, lambda: self._set_view("3d", sync=True))
+            QShortcut(QKeySequence(k), self, lambda t=tool: self._shortcut_tool(t))
+        QShortcut(QKeySequence("2"), self, lambda: self._set_view("2d"))
+        QShortcut(QKeySequence("3"), self, lambda: self._set_view("3d"))
+        for i, mode in enumerate(workflow.MODES, start=1):
+            QShortcut(QKeySequence(f"Ctrl+{i}"), self, lambda m=mode: self.state.set_mode(m))
+
+    def _sync_chrome(self):
+        self.undo_btn.setEnabled(self.state.can_undo())
+        self.redo_btn.setEnabled(self.state.can_redo())
+        self.room_btn.setText(self.state.config.metadata.get("name", "Room"))
+        res = cp.validate(self.state.config)
+        if res.ok:
+            warn = len(res.warnings)
+            self.val_pill.setText("✓ Valid" + (f" · {warn} ⚠" if warn else ""))
+            self.val_pill.setProperty("level", "warn" if warn else "ok")
+        else:
+            self.val_pill.setText(f"✗ {len(res.errors)} error{'s' if len(res.errors) != 1 else ''}")
+            self.val_pill.setProperty("level", "error")
+        self.val_pill.style().unpolish(self.val_pill)
+        self.val_pill.style().polish(self.val_pill)
+        self.modebar.set_status(workflow.stage_status(self.state, res))
+        room = self.state.config.room
+        if room and room.vertices:
+            xs = [v.x for v in room.vertices]
+            ys = [v.y for v in room.vertices]
+            self.room_label.setText(
+                f"Room {max(xs) - min(xs):.1f} × {max(ys) - min(ys):.1f} × {room.height:.1f} m"
+            )
+        else:
+            self.room_label.setText("No room")
+        self.viewbar.set_view(self.state.view)
+        self.viewbar.set_coverage(self.state.show_coverage)
+        self.viewbar.set_heatmap(self.state.sim_show_heatmap)
+        self.toolrail.set_tool(self.state.tool)
+        self.toolrail.set_zone_kind(self.state.zone_kind)
+
+    # ------------------------------------------------------------------- modes
+    def _apply_mode(self, mode: str):
+        self.modebar.set_active(mode)
+        self.toolrail.set_mode(mode)
+        if self.state.tool not in MODE_TOOLS.get(mode, ["select"]):
+            self._set_tool("select")
+        self._select_inspector_tab(MODE_TAB.get(mode, "Build"))
+        # per-mode overlay defaults (user-overridable afterwards)
+        if mode in ("simulate", "live") and not self.state.show_coverage:
+            self.state.show_coverage = True
+        self.canvas.update()
+
+    def _select_inspector_tab(self, name: str):
+        tabs = self.inspector.tabs
+        for i in range(tabs.count()):
+            if tabs.tabText(i) == name:
+                tabs.setCurrentIndex(i)
+                return
+
+    def _show_issues(self):
+        self._select_inspector_tab("Issues")
 
     # ------------------------------------------------------------------ actions
-    def _set_tool(self, tool, sync=False):
+    def _set_tool(self, tool):
         self.state.tool = tool
         self.canvas.connect_from = None
         self.canvas.draw_pts = []
-        if sync:
-            for a in self.tool_group.actions():
-                a.setChecked(a.data() == tool)
+        self.toolrail.set_tool(tool)
         self.canvas.update()
 
-    def _set_view(self, view, sync=False):
+    def _shortcut_tool(self, tool):
+        """Tool shortcut from anywhere: hop to the tool's home mode if needed."""
+        if tool not in MODE_TOOLS.get(self.state.mode, ["select"]):
+            home = TOOL_HOME_MODE.get(tool)
+            if home is None:
+                return
+            self.state.set_mode(home)
+        self._set_tool(tool)
+
+    def _zone_kind_selected(self, kind):
+        self.state.zone_kind = kind
+        if self.state.mode == "design":
+            self._set_tool("zone")
+
+    def _set_view(self, view):
         self.state.view = view
         if view == "3d":
             b = self.canvas.bounds()
             span = max(b[2] - b[0], b[3] - b[1], self.canvas._room_h() * 1.4)
             self.state.cam["dist"] = max(7.0, span * 1.6)
-        if sync:
-            for a in self.view_group.actions():
-                a.setChecked(a.text().lower() == view)
+        self.viewbar.set_view(view)
         self.canvas.update()
 
     def _auto(self):
@@ -388,6 +359,12 @@ class MainWindow(QMainWindow):
         self.state.show_coverage = bool(on)
         self.canvas.update()
 
+    def _toggle_heatmap(self, on):
+        # Bridge to the Simulate surface's checkbox so its compute logic runs.
+        chk = getattr(self.inspector, "sim_heat_chk", None)
+        if chk is not None and chk.isChecked() != bool(on):
+            chk.setChecked(bool(on))
+
     def _import_floor_plan(self):
         path, _ = QFileDialog.getOpenFileName(self, "Floor plan image", "", "Images (*.png *.jpg *.jpeg *.bmp *.gif)")
         if not path:
@@ -411,7 +388,8 @@ class MainWindow(QMainWindow):
     def _calibrate_scale(self):
         if self.state.config.room is None or self.state.config.room.background is None:
             return self.toast("Import a floor plan first.")
-        self._set_view("2d", sync=True)
+        self.state.set_mode("design")
+        self._set_view("2d")
         self.state.calibrating = True
         self.toast("Drag a line over a known distance, then enter its length.")
 
@@ -431,11 +409,7 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             self.toast(str(exc))
 
-    def _load_scenario(self, idx):
-        which = self.scenario.itemData(idx)
-        if not which:
-            return
-        self.scenario.setCurrentIndex(0)
+    def _load_scenario(self, which):
         self.state.selection = None
         if which == "empty":
             self.state.set_config(cp.create_config("Untitled", now_iso()))
@@ -444,7 +418,7 @@ class MainWindow(QMainWindow):
         if entry is not None:
             _key, label, builder = entry
             self.state.set_config(builder())
-            self.toast(f"Loaded {label} — open the Simulate tab to optimise placement")
+            self.toast(f"Loaded {label} — switch to Simulate to optimise placement")
 
     def _export(self):
         path, _ = QFileDialog.getSaveFileName(self, "Export config", "config.json", "JSON (*.json)")
@@ -474,10 +448,6 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             QMessageBox.warning(self, "Import failed", str(exc))
 
-    def _room_changed(self, i):
-        if not self._updating_rooms and i >= 0:
-            self.state.switch_room(i)
-
     def _auto_name(self):
         self.state.set_config(cp.apply_naming_scheme(self.state.config))
         self.toast("Applied naming scheme")
@@ -499,30 +469,6 @@ class MainWindow(QMainWindow):
             parts.append(f"-{len(diff.routes_removed)} route")
         self.toast("Deployed — " + ", ".join(parts))
 
-    def _refresh_rooms(self):
-        self._updating_rooms = True
-        self.room_combo.clear()
-        for r in self.state.rooms:
-            self.room_combo.addItem(r["config"].metadata.get("name", r["id"]))
-        self.room_combo.setCurrentIndex(self.state.active_room)
-        self._updating_rooms = False
-
-    def _sync_toolbar(self):
-        self.act_undo.setEnabled(self.state.can_undo())
-        self.act_redo.setEnabled(self.state.can_redo())
-        self._refresh_rooms()
-        res = cp.validate(self.state.config)
-        self.val_label.setText(("✓ Valid" if res.ok else f"✗ {len(res.errors)} error(s)") + f" · {len(res.warnings)} warn")
-        room = self.state.config.room
-        if room and room.vertices:
-            xs = [v.x for v in room.vertices]
-            ys = [v.y for v in room.vertices]
-            self.room_label.setText(
-                f"Room {max(xs) - min(xs):.1f} × {max(ys) - min(ys):.1f} × {room.height:.1f} m"
-            )
-        else:
-            self.room_label.setText("No room")
-
     def _toggle_guide(self):
         if hasattr(self, "guide"):
             self.guide.setVisible(not self.guide.isVisible())
@@ -530,11 +476,18 @@ class MainWindow(QMainWindow):
                 self.guide.refresh()
 
     def _toggle_theme(self):
-        self._light = not self._light
-        self.state.theme = "light" if self._light else "dark"
+        self.state.theme = "light" if self.state.theme == "dark" else "dark"
         app = QApplication.instance()
         if app is not None:
-            app.setStyleSheet(LIGHT_QSS if self._light else DARK_QSS)
+            app.setStyleSheet(LIGHT_QSS if self.state.theme == "light" else DARK_QSS)
+        icons.clear_cache()
+        self.toolrail.set_theme(self.state.theme)
+        self.modebar.set_theme(self.state.theme)
+        pal = palette(self.state.theme)
+        self.menu_btn.setIcon(icons.icon("menu", pal["muted"], active_color=pal["accent_bright"]))
+        self.room_btn.setIcon(icons.icon("rooms", pal["muted"]))
+        self.undo_btn.setIcon(icons.icon("undo", pal["muted"], active_color=pal["accent_bright"]))
+        self.redo_btn.setIcon(icons.icon("redo", pal["muted"], active_color=pal["accent_bright"]))
         self.state.changed.emit()  # re-color theme-dependent item foregrounds
 
     def toast(self, msg: str):

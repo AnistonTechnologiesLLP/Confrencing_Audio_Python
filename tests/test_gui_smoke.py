@@ -40,10 +40,26 @@ def win(qapp):
 def test_window_builds(win):
     assert win.guide is not None
     assert win.inspector is not None
-    # toolbar has the new primary actions
-    texts = [a.text() for a in win._toolbar.actions()]
-    assert any("Optimize room" in t for t in texts)
-    assert any("Auto-Route" in t for t in texts)
+    # the Stagebar shell exposes the five workflow modes + the primary actions
+    from conf_pipeline_gui import workflow
+
+    assert set(win.modebar.buttons) == set(workflow.MODES)
+    assert "Optimize room" in win.act_optimize.text()
+    assert "Auto-Route" in win.act_auto_route.text()
+
+
+def test_mode_switch_updates_shell(win):
+    win.state.set_mode("route")
+    assert win.state.mode == "route"
+    assert win.modebar.buttons["route"].isChecked()
+    # ROUTE exposes Select + Connect only
+    assert win.toolrail.buttons["connect"].isVisible() or not win.toolrail.isVisible()
+    assert not win.toolrail.buttons["room"].isVisible()
+    # a gated tool key hops back to its home mode
+    win._shortcut_tool("zone")
+    assert win.state.mode == "design"
+    assert win.state.tool == "zone"
+    win.state.set_mode("design")
 
 
 def test_guide_steps_track_progress(win):
