@@ -163,6 +163,14 @@ from .sim import (  # noqa: F401
 
 # ---- 1.8.0: deployment, naming, routing, templates, projects ----
 from .deployment import DeploymentDiff, deployment_diff, mark_deployed, set_deployment_status  # noqa: F401
+# ---- commissioning: the device-facing transport seam (simulated backend) ----
+from .transport import (  # noqa: F401
+    DeviceStatus,
+    DeviceTransport,
+    DiscoveredDevice,
+    SimulatedTransport,
+    TransportError,
+)
 from .naming import TYPE_LABEL, apply_naming_scheme, label_collisions, suggested_label  # noqa: F401
 from .routing import (  # noqa: F401
     Subscription,

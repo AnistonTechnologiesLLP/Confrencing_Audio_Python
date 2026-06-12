@@ -34,6 +34,27 @@ schema is unchanged.
   content, and a numpy cross-check that the stdlib per-band weights equal the
   live runtime's per-FFT-bin weights (skipped without the `[control]` extra).
 
+**Device transport (A1)** — the device-facing seam of the commissioning
+workflow, simulated behind a clean interface (no real protocols).
+
+### Added
+- **`conf_pipeline/transport.py`** (pure stdlib): abstract `DeviceTransport`
+  (site-level — `discover` / `connect` / `disconnect` / `read_config` /
+  `push_config` / `read_status`) mirroring the `MicController` /
+  `SimulatedMicController` pattern: the base owns the connection registry
+  (idempotent connect/disconnect, config I/O requires a connection, status
+  polling deliberately doesn't, context manager disconnects all). Plus
+  `DiscoveredDevice`, `DeviceStatus`, and `TransportError`.
+- **`SimulatedTransport`**: a deterministic, hardware-free room of devices —
+  seeded with (deep-copied) device configs, `set_offline` simulates unplugging
+  (drops the connection, vanishes from discovery), `add_device` plugs one in,
+  pushes update the device-side store. Seeding with drifted configs is the
+  reconcile-diff story Phase A3 builds on.
+- Tests (`tests/test_transport.py`, 13): discovery determinism + offline
+  filtering, connection bookkeeping + error paths, copy isolation on
+  `read_config`, push round-trip, the seeded-drift → push → reconciled
+  scenario, status-without-connection, and simulation-control guards.
+
 **Broadband verification curves** — directivity index and beamwidth as a
 *function of frequency*, turning the README's honest-fidelity note from an
 assertion into a measured result.
