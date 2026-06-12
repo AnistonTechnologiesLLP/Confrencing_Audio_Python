@@ -34,6 +34,35 @@ schema is unchanged.
   content, and a numpy cross-check that the stdlib per-band weights equal the
   live runtime's per-FFT-bin weights (skipped without the `[control]` extra).
 
+**Online-room state (A2)** — per-device connected / offline / changed-since-
+deploy, surfaced through the existing workflow status-dot infrastructure.
+
+### Added
+- **`online_room_status(config, last_deployed, transport)`** (`transport.py`)
+  → one `OnlineDeviceState` per designed device: `online` / `connected` from
+  the transport, `changed_since_deploy` / `new_since_deploy` from
+  `deployment_diff` (a never-deployed design marks every device new), plus an
+  `in_sync` aggregate. `SimulatedTransport.has_device` joins the simulation
+  controls.
+- **`AppState` online session** (per room): `go_online()` seeds the simulated
+  transport on first use — **from the last deployed snapshot when there is
+  one, else from the current design** — and connects everything discoverable;
+  `go_offline()`, `device_status()`, and `simulate_device_offline()` (the
+  demo/test "unplug" control). `deploy()` now also *installs* newly designed
+  devices into an already-seeded simulated room, so shipping the design makes
+  them discoverable.
+- **Deploy panel**: an **Online room (simulated)** group — Go online/offline
+  button, a summary line (`n/m online · k changed/new since deploy`), and one
+  status row per device (●/○, connected/changed/new tags, and a per-device
+  *offline* checkbox driving the simulated unplug).
+- **Workflow dots**: the DEPLOY dot now regresses to *in progress* while the
+  room is online and any device is changed/new since the last deploy; the
+  hint chip reports offline devices and pending changes.
+- Tests: 4 engine tests (status matrix: never-deployed, changed+new vs
+  deploy, connection/offline reflection, sorting) and 3 GUI smoke tests (the
+  full online lifecycle driving the deploy dot through DONE→PARTIAL,
+  deploy-installs-new-devices, and the panel group rendering).
+
 **Project file manager (A4)** — recent files, autosave, crash recovery, and a
 user-visible migration notice on open.
 

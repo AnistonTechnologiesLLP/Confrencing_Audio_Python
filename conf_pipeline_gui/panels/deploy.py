@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from PySide6.QtGui import QFont, QGuiApplication
 from PySide6.QtWidgets import (
+    QCheckBox,
     QGroupBox,
     QHBoxLayout,
     QLabel,
@@ -62,6 +63,25 @@ class DeployPanel(PanelBase):
         cl.addLayout(nrow)
         lay.addWidget(check)
 
+        online = QGroupBox("Online room (simulated)")
+        ol = QVBoxLayout(online)
+        orow = QHBoxLayout()
+        self.online_btn = QPushButton("Go online")
+        self.online_btn.setToolTip(
+            "Open the simulated room: discover and connect its devices.\n"
+            "The room contains whatever was last deployed (or, before any deploy, the current design)."
+        )
+        self.online_btn.clicked.connect(self._toggle_online)
+        self.online_summary = QLabel("Offline — device status appears here while online.")
+        self.online_summary.setWordWrap(True)
+        orow.addWidget(self.online_btn)
+        orow.addWidget(self.online_summary, 1)
+        ol.addLayout(orow)
+        self.device_rows = QVBoxLayout()
+        self.device_rows.setSpacing(2)
+        ol.addLayout(self.device_rows)
+        lay.addWidget(online)
+
         deploy_btn = QPushButton("⇪ Deploy — snapshot this design")
         deploy_btn.setProperty("accent", "true")
         deploy_btn.setToolTip("Mark the current design as deployed and show the diff since the last deploy")
@@ -100,6 +120,43 @@ class DeployPanel(PanelBase):
         return w
 
     # ---- actions ----
+    def _toggle_online(self):
+        if self.state.online:
+            self.state.go_offline()
+        else:
+            self.state.go_online()
+
+    def _rebuild_device_rows(self):
+        while self.device_rows.count():
+            item = self.device_rows.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.deleteLater()
+        rows = self.state.device_status()
+        for r in rows:
+            roww = QWidget()
+            rl = QHBoxLayout(roww)
+            rl.setContentsMargins(2, 0, 2, 0)
+            dot = "●" if r.online else "○"
+            tags = []
+            if not r.online:
+                tags.append("offline")
+            elif r.connected:
+                tags.append("connected")
+            if r.new_since_deploy:
+                tags.append("new since deploy")
+            elif r.changed_since_deploy:
+                tags.append("changed since deploy")
+            lab = QLabel(f"{dot} {r.device_id} — {r.label}" + (f"  ·  {', '.join(tags)}" if tags else ""))
+            lab.setWordWrap(True)
+            rl.addWidget(lab, 1)
+            sim = QCheckBox("offline")
+            sim.setToolTip("Simulate unplugging this device from the room")
+            sim.setChecked(not r.online)
+            sim.toggled.connect(lambda on, did=r.device_id: self.state.simulate_device_offline(did, on))
+            rl.addWidget(sim)
+            self.device_rows.addWidget(roww)
+
     def _deploy(self):
         diff = self.state.deploy()
         if diff.identical:
@@ -156,6 +213,21 @@ class DeployPanel(PanelBase):
             deployed = self.state.rooms[self.state.active_room].get("last_deployed")
             if deployed is not None and not self.deploy_info.text():
                 self.deploy_info.setText("Previously deployed — Deploy again to snapshot the latest changes.")
+            # online-room status
+            self.online_btn.setText("Go offline" if self.state.online else "Go online")
+            rows = self.state.device_status()
+            if not self.state.online:
+                self.online_summary.setText("Offline — device status appears here while online.")
+            elif not rows:
+                self.online_summary.setText("Online — no devices in the design yet.")
+            else:
+                n_on = sum(1 for r in rows if r.online)
+                n_pending = sum(1 for r in rows if r.changed_since_deploy or r.new_since_deploy)
+                parts = [f"{n_on}/{len(rows)} online"]
+                if n_pending:
+                    parts.append(f"{n_pending} changed/new since deploy")
+                self.online_summary.setText("Online — " + " · ".join(parts))
+            self._rebuild_device_rows()
             # serialize only when the user actually has the card open
             if self.data_card.body.isVisible():
                 self.json_view.setPlainText(cp.serialize(cfg, pretty=True))

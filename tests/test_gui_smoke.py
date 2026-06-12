@@ -337,6 +337,74 @@ def test_recent_menu_populates_and_opens(win, tmp_path):
     assert win.state.config.metadata["name"] == "FromRecent"
 
 
+def test_online_room_lifecycle_drives_deploy_dot(win):
+    from conf_pipeline_gui import workflow
+
+    c = cp.create_config("T", "2026-06-12T00:00:00Z")
+    c = cp.set_room(c, cp.rectangular_room(8, 6, 3))
+    c = cp.add_device(c, cp.create_microphone_array("A1", "Array"))
+    c = cp.set_device_position(c, "A1", Point2D(4, 3))
+    win.state.set_config(c)
+    win.state.deploy()                                   # ship it first
+    assert workflow.stage_status(win.state)["deploy"] == workflow.DONE
+
+    win.state.go_online()                                # seeds from last_deployed
+    assert win.state.online
+    rows = win.state.device_status()
+    assert [r.device_id for r in rows] == ["A1"]
+    assert rows[0].online and rows[0].connected and rows[0].in_sync
+    assert workflow.stage_status(win.state)["deploy"] == workflow.DONE
+
+    c2 = cp.rename_device(win.state.config, "A1", "Array (moved)")
+    win.state.set_config(c2)                             # design drifts
+    rows = win.state.device_status()
+    assert rows[0].changed_since_deploy
+    assert workflow.stage_status(win.state)["deploy"] == workflow.PARTIAL  # dot regressed
+    assert "changed since the last deploy" in workflow.next_hint(win.state, "deploy")
+
+    win.state.simulate_device_offline("A1")              # unplug it
+    rows = win.state.device_status()
+    assert not rows[0].online
+    assert "offline" in workflow.next_hint(win.state, "deploy")
+
+    win.state.simulate_device_offline("A1", False)
+    win.state.go_offline()
+    assert not win.state.online and win.state.device_status() == []
+    win.state.set_mode("design")
+
+
+def test_deploy_installs_new_devices_into_online_room(win):
+    c = cp.create_config("T", "2026-06-12T00:00:00Z")
+    c = cp.add_device(c, cp.create_processor("P1", "DSP"))
+    win.state.set_config(c)
+    win.state.go_online()                                # never deployed → seeds from design
+    c2 = cp.add_device(win.state.config, cp.create_loudspeaker("L1", "Speaker", "analog"))
+    win.state.set_config(c2)
+    rows = {r.device_id: r for r in win.state.device_status()}
+    assert not rows["L1"].online                         # designed, not installed
+    win.state.deploy()                                   # shipping installs it
+    rows = {r.device_id: r for r in win.state.device_status()}
+    assert rows["L1"].online and rows["L1"].in_sync
+    win.state.go_offline()
+
+
+def test_deploy_panel_online_group(win):
+    c = cp.create_config("T", "2026-06-12T00:00:00Z")
+    c = cp.add_device(c, cp.create_microphone_array("A1", "Array"))
+    win.state.set_config(c)
+    win.state.set_mode("deploy")
+    panel = win.panels["deploy"]
+    panel.refresh()
+    assert panel.online_btn.text() == "Go online"
+    panel._toggle_online()
+    panel.refresh()
+    assert panel.online_btn.text() == "Go offline"
+    assert "1/1 online" in panel.online_summary.text()
+    assert panel.device_rows.count() == 1                # one status row per device
+    win.state.go_offline()
+    win.state.set_mode("design")
+
+
 def test_live_design_readout_shows_frequency_curve(win):
     from conf_pipeline.model import RectShape
 

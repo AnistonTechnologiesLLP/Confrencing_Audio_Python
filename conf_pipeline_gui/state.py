@@ -160,8 +160,69 @@ class AppState(QObject):
         diff = cp.deployment_diff(base, self.config)
         self.config = cp.mark_deployed(self.config, now_iso())
         room["last_deployed"] = self.config
+        # a deploy "ships" the design: newly designed devices get installed in
+        # the (simulated) physical room, so a later discovery can find them
+        t = room.get("transport")
+        if t is not None:
+            for d in self.config.devices:
+                if not t.has_device(d.id):
+                    t.add_device(d)
         self.set_config(self.config)
         return diff
+
+    # ---- online room (simulated transport; A2) ----
+    @property
+    def transport(self):
+        return self.rooms[self.active_room].get("transport")
+
+    @property
+    def online(self) -> bool:
+        return bool(self.rooms[self.active_room].get("online"))
+
+    def go_online(self) -> None:
+        """Open the (simulated) room: seed the transport on first use — from the
+        last deployed snapshot when there is one, else from the current design —
+        then connect everything discoverable."""
+        room = self.rooms[self.active_room]
+        t = room.get("transport")
+        if t is None:
+            seed = room.get("last_deployed") or self.config
+            t = cp.SimulatedTransport(seed.devices)
+            room["transport"] = t
+        for d in t.discover():
+            try:
+                t.connect(d.id)
+            except cp.TransportError:
+                pass                       # went offline between discover and connect
+        room["online"] = True
+        self.changed.emit()
+
+    def go_offline(self) -> None:
+        room = self.rooms[self.active_room]
+        t = room.get("transport")
+        if t is not None:
+            t.disconnect_all()
+        room["online"] = False
+        self.changed.emit()
+
+    def device_status(self) -> list:
+        """Per-device online state (empty when the room is offline)."""
+        room = self.rooms[self.active_room]
+        t = room.get("transport")
+        if not room.get("online") or t is None:
+            return []
+        return cp.online_room_status(self.config, room.get("last_deployed"), t)
+
+    def simulate_device_offline(self, device_id: str, offline: bool = True) -> None:
+        """Demo/test control: unplug (or re-plug) a device in the simulated room."""
+        t = self.rooms[self.active_room].get("transport")
+        if t is None or not isinstance(t, cp.SimulatedTransport):
+            return
+        try:
+            t.set_offline(device_id, offline)
+        except ValueError:
+            return                         # designed but not installed — nothing to unplug
+        self.changed.emit()
 
     # ---- selection ----
     def select(self, sel: Optional[dict]) -> None:

@@ -18,9 +18,10 @@ from __future__ import annotations
 import copy
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Iterable
+from typing import Iterable, Optional
 
-from .model import Device
+from .deployment import deployment_diff
+from .model import Device, SystemConfig
 
 
 class TransportError(RuntimeError):
@@ -183,6 +184,10 @@ class SimulatedTransport(DeviceTransport):
             raise ValueError(f"duplicate simulated device id: {device.id}")
         self._store[device.id] = copy.deepcopy(device)
 
+    def has_device(self, device_id: str) -> bool:
+        """True if the device exists in the simulated room (online or not)."""
+        return device_id in self._store
+
     # ---- backend hooks ----
     def _discover(self) -> list[DiscoveredDevice]:
         return [
@@ -223,3 +228,58 @@ class SimulatedTransport(DeviceTransport):
             firmware=self._firmware if known else "",
             detail="simulated" if known else "unknown device",
         )
+
+
+# --------------------------------------------------------------------------- #
+# Online-room status — per-device state for the DEPLOY workflow (A2)
+# --------------------------------------------------------------------------- #
+@dataclass(frozen=True)
+class OnlineDeviceState:
+    """One designed device's live state while the room is online.
+
+    ``changed_since_deploy`` / ``new_since_deploy`` compare the *design* against
+    the last deployed snapshot (via :func:`~conf_pipeline.deployment.deployment_diff`);
+    ``online`` / ``connected`` come from the transport. Device-*reported* drift
+    (room vs design) is the reconcile diff's job, not this one's."""
+
+    device_id: str
+    label: str
+    online: bool                  # reachable on the transport right now
+    connected: bool               # the transport holds a connection to it
+    changed_since_deploy: bool    # designed config drifted from the last deploy
+    new_since_deploy: bool        # designed after the last deploy (or never deployed)
+
+    @property
+    def in_sync(self) -> bool:
+        return self.online and not (self.changed_since_deploy or self.new_since_deploy)
+
+
+def online_room_status(
+    config: SystemConfig,
+    last_deployed: Optional[SystemConfig],
+    transport: DeviceTransport,
+) -> list[OnlineDeviceState]:
+    """Per-designed-device online state, sorted by device id.
+
+    Reuses :func:`deployment_diff` for the changed/new-since-deploy axis; a
+    never-deployed design marks every device new. Status polling never needs a
+    connection, so this is safe to call on every refresh."""
+    if last_deployed is not None:
+        diff = deployment_diff(last_deployed, config)
+        changed, added = set(diff.devices_changed), set(diff.devices_added)
+    else:
+        changed, added = set(), {d.id for d in config.devices}
+    out = []
+    for d in sorted(config.devices, key=lambda dev: dev.id):
+        st = transport.read_status(d.id)
+        out.append(
+            OnlineDeviceState(
+                device_id=d.id,
+                label=d.label,
+                online=st.online,
+                connected=st.connected,
+                changed_since_deploy=d.id in changed,
+                new_since_deploy=d.id in added,
+            )
+        )
+    return out

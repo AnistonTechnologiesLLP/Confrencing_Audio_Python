@@ -148,5 +148,46 @@ def test_add_device_appears_in_next_discovery():
     t = _transport()
     t.add_device(cp.create_codec("C1", "Codec"))
     assert "C1" in [d.id for d in t.discover()]
+    assert t.has_device("C1") and not t.has_device("ghost")
     t.connect("C1")
     assert t.read_config("C1").label == "Codec"
+
+
+# --- online-room status (A2): design vs last-deploy vs transport ---
+def _design():
+    c = cp.create_config("Room", "2026-06-12T00:00:00Z")
+    c = cp.add_device(c, cp.create_processor("P1", "DSP"))
+    c = cp.add_device(c, cp.create_microphone_array("A1", "Ceiling Array"))
+    return c
+
+
+def test_online_status_never_deployed_marks_all_new():
+    c = _design()
+    t = cp.SimulatedTransport(c.devices)
+    rows = cp.online_room_status(c, None, t)
+    assert [r.device_id for r in rows] == ["A1", "P1"]   # sorted
+    assert all(r.new_since_deploy and not r.changed_since_deploy for r in rows)
+    assert all(r.online and not r.connected for r in rows)
+    assert not any(r.in_sync for r in rows)              # new ⇒ not in sync
+
+
+def test_online_status_changed_and_new_since_deploy():
+    deployed = _design()
+    t = cp.SimulatedTransport(deployed.devices)
+    c = cp.rename_device(deployed, "A1", "Ceiling Array (moved)")   # changed
+    c = cp.add_device(c, cp.create_loudspeaker("L1", "Speaker", "analog"))  # new
+    rows = {r.device_id: r for r in cp.online_room_status(c, deployed, t)}
+    assert rows["A1"].changed_since_deploy and not rows["A1"].new_since_deploy
+    assert rows["L1"].new_since_deploy and not rows["L1"].online    # not installed
+    assert rows["P1"].in_sync                                       # untouched + online
+
+
+def test_online_status_reflects_connection_and_offline():
+    c = _design()
+    t = cp.SimulatedTransport(c.devices)
+    t.connect("P1")
+    t.set_offline("A1")
+    rows = {r.device_id: r for r in cp.online_room_status(c, c, t)}
+    assert rows["P1"].connected and rows["P1"].online
+    assert not rows["A1"].online and not rows["A1"].connected
+    assert not rows["A1"].in_sync                                   # offline ⇒ not in sync

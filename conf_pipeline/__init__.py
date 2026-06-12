@@ -168,8 +168,10 @@ from .transport import (  # noqa: F401
     DeviceStatus,
     DeviceTransport,
     DiscoveredDevice,
+    OnlineDeviceState,
     SimulatedTransport,
     TransportError,
+    online_room_status,
 )
 # ---- project file management: recent files, autosave, crash recovery ----
 from .files import (  # noqa: F401
