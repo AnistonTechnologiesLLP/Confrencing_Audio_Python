@@ -10,8 +10,10 @@ from conf_pipeline_gui.app import MainWindow, build_qss
 from conf_pipeline_gui.scenarios import SCENARIOS
 
 app = QApplication.instance() or QApplication([])
-app.setStyleSheet(build_qss(sys.argv[2] if len(sys.argv) > 2 else "dark"))
+theme = sys.argv[2] if len(sys.argv) > 2 else "dark"
+app.setStyleSheet(build_qss(theme))
 win = MainWindow()
+win.state.theme = theme
 win.resize(1320, 840)
 # load the first sample so the canvas has content
 _key, _label, builder = SCENARIOS[0]

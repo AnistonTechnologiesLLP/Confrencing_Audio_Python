@@ -14,6 +14,7 @@ from conf_pipeline.angles import Point3D, steering_angles
 from conf_pipeline.model import Point2D, RectShape, default_elevation
 
 from .state import AppState
+from .theme import palette
 
 DEVICE_STYLE = {
     "processor": ("#9a6dff", "square"),
@@ -94,6 +95,9 @@ class Canvas(QWidget):
 
     def _profile(self) -> dict:
         return MODE_PROFILE.get(getattr(self.state, "mode", "design"), MODE_PROFILE["design"])
+
+    def _pal(self) -> dict:
+        return palette(getattr(self.state, "theme", "dark"))
 
     def _on_live_overlay(self):
         if getattr(self.state, "mode", "design") == "live":
@@ -265,7 +269,7 @@ class Canvas(QWidget):
     def paintEvent(self, _):
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing, True)
-        p.fillRect(self.rect(), QColor("#0a0e18"))
+        p.fillRect(self.rect(), QColor(self._pal()["canvas_bg"]))
         if self.state.view == "3d":
             self._paint3d(p)
         else:
@@ -279,20 +283,22 @@ class Canvas(QWidget):
         if has_room or cfg.devices or cfg.talkers:
             return
         cx, cy = self.width() / 2, self.height() / 2
+        pal = self._pal()
+        head, dim = QColor(pal["canvas_text"]), QColor(pal["canvas_text_dim"])
         mode = getattr(self.state, "mode", "design")
         if mode == "design":
             lines = [
-                ("Start your room design", QColor("#c4c5d2"), 15, QFont.DemiBold),
+                ("Start your room design", head, 15, QFont.DemiBold),
                 ("", None, 6, QFont.Normal),
-                ("• Press the Room tool (R) and click to draw an outline", QColor("#8a93ad"), 11, QFont.Normal),
-                ("• Or load a sample from the ☰ menu", QColor("#8a93ad"), 11, QFont.Normal),
+                ("• Press the Room tool (R) and click to draw an outline", dim, 11, QFont.Normal),
+                ("• Or load a sample from the ☰ menu", dim, 11, QFont.Normal),
             ]
         else:
             verb = {"simulate": "simulate", "route": "route", "deploy": "deploy", "live": "drive"}.get(mode, "show")
             lines = [
-                (f"Nothing to {verb} yet", QColor("#c4c5d2"), 15, QFont.DemiBold),
+                (f"Nothing to {verb} yet", head, 15, QFont.DemiBold),
                 ("", None, 6, QFont.Normal),
-                ("• Switch to DESIGN (Ctrl+1) and build the room first", QColor("#8a93ad"), 11, QFont.Normal),
+                ("• Switch to DESIGN (Ctrl+1) and build the room first", dim, 11, QFont.Normal),
             ]
         y = cy - 36
         for text, color, size, weight in lines:
@@ -306,7 +312,8 @@ class Canvas(QWidget):
             y += fm.height() + 2
 
     def _grid_pen(self, axis):
-        return QPen(QColor("#2c3760" if axis else "#172238"), 1)
+        pal = self._pal()
+        return QPen(QColor(pal["canvas_axis"] if axis else pal["canvas_grid"]), 1)
 
     def _label(self, p, x, y, text, color="#e6e9f2", bg=True):
         p.setFont(QFont("Segoe UI", 8, QFont.DemiBold))
@@ -781,13 +788,13 @@ class Canvas(QWidget):
             a = self.project(Point3D(x, 0, miny), cam)
             b = self.project(Point3D(x, 0, maxy), cam)
             if a and b:
-                p.setPen(QPen(QColor("#39477a" if x == 0 else "#172238"), 1))
+                p.setPen(QPen(QColor(self._pal()["canvas_axis"] if x == 0 else self._pal()["canvas_grid"]), 1))
                 p.drawLine(QPointF(a[0], a[1]), QPointF(b[0], b[1]))
         for z in range(math.ceil(miny), math.floor(maxy) + 1):
             a = self.project(Point3D(minx, 0, z), cam)
             b = self.project(Point3D(maxx, 0, z), cam)
             if a and b:
-                p.setPen(QPen(QColor("#39477a" if z == 0 else "#172238"), 1))
+                p.setPen(QPen(QColor(self._pal()["canvas_axis"] if z == 0 else self._pal()["canvas_grid"]), 1))
                 p.drawLine(QPointF(a[0], a[1]), QPointF(b[0], b[1]))
         fp = self.footprint()
         floor = [self.project(Point3D(x, 0, zz), cam) for (x, zz) in fp]

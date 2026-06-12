@@ -5,6 +5,65 @@ Python port of the Conferencing Audio Pipeline. Format based on
 project they were ported from. The JSON **config schema** (`CONFIG_VERSION` = 1,
 camelCase keys) is identical to the TS version, so configs interoperate.
 
+## [1.14.0] - 2026-06-12
+
+**"Stagebar" UI redesign** — a complete UX + visual overhaul of the desktop app.
+The invisible workflow becomes the navigation: five top-level modes
+(**DESIGN → SIMULATE → ROUTE → DEPLOY → LIVE**, `Ctrl+1…5`) replace the 25-action
+toolbar and the 7-tab inspector. Python-only and GUI-only: the engine, the
+`[control]` live layer, and the JSON config schema are untouched.
+
+### Added
+- **ModeBar** (`modebar.py`): centered five-mode switcher with live status dots
+  (● done · ◔ in progress · ○ untouched) driven by the new `workflow.py` stage
+  predicates; the LIVE dot pulses red while an audio session is connected — from
+  any mode.
+- **Per-mode right panels** (`panels/`): Design (build + room actions + selection
+  editor), Simulate (placement tools), Route (routing + AEC/automixer/DSP chains +
+  mute groups, merged — one job), Deploy (pre-flight checklist, inline deploy
+  diff, import/export/report, raw JSON in a collapsed card), and Live (the old
+  wall of controls folded into four collapsible cards over a **pinned transport
+  footer** — meter / Connect / Mute / gain never scroll out of reach). Panels
+  refresh coalesced and only while visible, catching up on `showEvent`.
+- **LIVE operations view** (`canvas.py`): while a session runs, the floor plan
+  shows the steering-sector wedge, real-time DOA detection rays (green
+  in-sector / red nulled, front-relative bearings matching `doa.sector_gate`),
+  and a level halo breathing with the output meter — published as transient
+  state by the Live panel's meter tick, never entering undo history.
+- **Mode-aware canvas**: geometry editing gated to DESIGN (drags, handles,
+  context menus); SIMULATE keeps talkers draggable for what-if; ROUTE draws
+  routes bold with transport labels over dimmed zones; DEPLOY badges devices
+  added (+) / changed (~) since the last deploy.
+- **Global Issues drawer** (`issues.py`): the validation pill in the top bar
+  opens a slide-in errors/warnings drawer in every mode; clicking an issue
+  selects the offending device on the canvas.
+- **Shell chrome**: left tool rail with per-mode tools and a zone-kind flyout
+  (`toolrail.py`), floating 2D/3D + overlays view bar on the canvas
+  (`viewbar.py`), ☰ app menu + room-switcher popover (with rename, previously
+  unexposed), programmatic theme-tinted line icons (`icons.py`, no assets),
+  next-step hint chips in every panel header, and mode-aware canvas
+  empty-states. Tool keys `V/C/R/Z/T` hop to their home mode from anywhere.
+- `MainWindow.closeEvent` now disconnects a running live session (previously
+  nothing did).
+
+### Changed
+- `theme.py` owns the "Conduit" palettes/QSS (grown with chrome + canvas roles);
+  the canvas backdrop, grid, and hint text follow the palette — the light theme
+  no longer gets a dark canvas.
+- Deploy diffs render inline in the Deploy panel instead of vanishing into a
+  toast; the config JSON view serializes only while actually visible.
+
+### Removed
+- The toolbar, the 7-tab `inspector.py` (carved into `panels/`), and the
+  getting-started strip (`guide.py`) — its predicates live on in `workflow.py`
+  as the ModeBar dots, hint chips, and empty-states.
+
+### Tests
+- Smoke suite reworked for the shell: mode switching, workflow dots, validation
+  pill + drawer, hidden-panel staleness, LIVE overlay painting without hardware,
+  deploy badges, and a simulated-backend live connect/disconnect round-trip
+  (the session lifecycle is finally under test). **256 tests total.**
+
 ## [1.13.0] - 2026-06-11
 
 **Multi-azimuth auto-steer** — host-side, real-time "listen only to the people in

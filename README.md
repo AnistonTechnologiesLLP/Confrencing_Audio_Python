@@ -32,12 +32,20 @@ conf_pipeline/        the engine (pure dataclasses + functions, no Qt)
   coverage_check.py   array coverage circles + covered/uncovered/overlap report
   report.py           shareable design report (Markdown / HTML)
   sim/                placement simulation (scoring, search, pluggable validation)
-conf_pipeline_gui/    the PySide6 app
-  state.py            AppState (undo/redo, selection, tool, camera)
-  canvas.py           2D + 3D editor (QPainter, orbit camera, floor-plan image, coverage circles)
-  inspector.py        Build / AEC-DSP / Routing / Issues / Simulate / Live / JSON tabs
+conf_pipeline_gui/    the PySide6 app — "Stagebar" workflow-modes shell
+  state.py            AppState (undo/redo, selection, tool, mode, camera, live overlay)
+  workflow.py         stage predicates + status powering the ModeBar dots & hint chips
+  canvas.py           2D + 3D editor (QPainter; mode-aware overlays incl. the LIVE operations view)
+  theme.py            "Conduit" palettes → QSS (dark + light, canvas roles included)
+  icons.py            programmatic line-icon factory (no assets, theme-tinted)
+  modebar.py          DESIGN→SIMULATE→ROUTE→DEPLOY→LIVE switcher with status dots
+  toolrail.py         per-mode canvas tools (zone-kind flyout on the Zone tool)
+  viewbar.py          floating 2D/3D + overlays popover on the canvas
+  issues.py           global validation drawer (slides over the panel in any mode)
+  panels/             one purpose-built right panel per mode
+                      (design · simulate · route · deploy · live + shared common)
   scenarios.py        sample configs (boardroom, huddle, meeting, conference, training, lecture, U-shape)
-  app.py              main window + toolbar (Auto-Route, Show coverage, Floor plan, Export report)
+  app.py              main window: top bar (☰ menu, rooms, ModeBar, validation pill)
 conf_pipeline_control/ host-side array-microphone control (optional [control] extra)
   geometry.py         physical capsule layout (ArrayGeometry, sensibel_8)
   steering.py         coverage zones → beamformer look/null directions
@@ -49,7 +57,7 @@ conf_pipeline_control/ host-side array-microphone control (optional [control] ex
   octovox_bridge.py   zones → azimuths + HTTP client to the OCTOVOX clean server
   octovox_monitor.py  near-live cleaned monitor (rolling chunk → clean → playback)
   ab_test.py          A/B harness: record → beamform N ways → WAVs + dB report
-tests/                pytest suite (251 tests; incl. headless GUI smoke)
+tests/                pytest suite (256 tests; incl. headless GUI smoke)
 run_gui.py            launcher
 ```
 
@@ -66,19 +74,21 @@ python -m venv .venv
 .venv\Scripts\python run_gui.py
 ```
 
-The toolbar is grouped into captioned sections — **Tools** (Select / Connect /
-Room / Zone / Talker), **View** (2D / 3D + Coverage), **Edit** (undo/redo),
-**Design** (the one-click ✨ Optimize room / ⚡ Auto-Route / ⚙ Auto-configure),
-**Room** (rect room + floor plan + calibrate), **Project** (samples + multi-room +
-auto-name + deploy), and **File** (import / export / report / theme / guide) —
-each action carrying a tooltip. A dismissible **Getting started** strip under the
-toolbar tracks the natural flow (room → array → zone → talker → optimize) with a
-live ✓ per step and a one-click button for each; reopen it from the **？ Guide**
-button. The inspector shows a status **banner** with the validation state and the
-single most useful next step (clickable to jump to the relevant tab). On the
-canvas, **right-click** a device / zone / talker (or empty floor) for a context
-menu, and the cursor changes to show what's grabbable. The **Load sample…** picker
-has seven rooms — boardroom,
+The app is organised around the workflow itself: a centered **ModeBar** walks
+left-to-right through **DESIGN → SIMULATE → ROUTE → DEPLOY → LIVE** (`Ctrl+1…5`),
+each mode showing only its canvas tools (left rail), its overlays, and a
+purpose-built right panel. Status dots on the mode buttons track progress
+(● done · ◔ in progress · ○ untouched; the LIVE dot pulses red while a session
+is connected), each panel header carries a next-step hint chip, and the
+**validation pill** in the top bar opens the global **Issues drawer** from any
+mode. The **☰ menu** holds samples, import/export/report, room actions, and the
+theme toggle; the room switcher next to it manages multi-room projects. In LIVE
+mode the canvas becomes an **operations view** — the steering-sector wedge,
+real-time DOA rays (green in-sector / red nulled), and a breathing level halo
+are drawn on the same floor plan you designed, while the Live panel's transport
+footer (meter / Connect / Mute / gain) never scrolls out of reach. On the
+canvas, **right-click** (in DESIGN) for context menus, and the cursor changes to
+show what's grabbable. The **Load sample** menu has seven rooms — boardroom,
 huddle, meeting, conference (3 arrays), training/classroom, lecture hall, and a
 U-shape boardroom (polygon table). Load **Boardroom** and select the **Presenter**
 talker to see steering-angle rays from each ceiling array (azimuth / down-tilt /
@@ -93,12 +103,17 @@ not covered).
   free ports by transport).
 - **Room** — click to draw the outline (double-click to close), or *Rect room*.
 - **Zone** — drag a Records (dynamic) / No-pickup (exclusion) zone, or click a
-  dedicated one; pick the kind in the Build tab.
+  dedicated one; pick the kind on the Zone button's flyout in the tool rail.
 - **Talker** — click to drop a person.
 - **3D** — drag to orbit, wheel to zoom, click to select, drag on the floor plane
   to move; devices/talkers sit at their real heights with drop-poles.
 
-Keyboard: `V/C/R/Z/T` tools, `2`/`3` view, `Ctrl+Z`/`Ctrl+Y` undo/redo, `Del` delete.
+Geometry editing lives in DESIGN; SIMULATE still lets you drag talkers for
+what-if exploration, ROUTE adds the Connect tool, and DEPLOY badges devices
+added (+) or changed (~) since the last deploy.
+
+Keyboard: `V/C/R/Z/T` tools (hop to their home mode from anywhere), `2`/`3`
+view, `Ctrl+1…5` modes, `Ctrl+Z`/`Ctrl+Y` undo/redo, `Del` delete.
 
 ## Use the engine directly
 

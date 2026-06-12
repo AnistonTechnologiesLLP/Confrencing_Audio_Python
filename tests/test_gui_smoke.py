@@ -1,10 +1,11 @@
-"""Headless GUI smoke tests for the v1.12.0 UI/UX surfaces.
+"""Headless GUI smoke tests for the Stagebar workflow-modes shell.
 
-These build a real ``MainWindow`` under the Qt *offscreen* platform and drive the
-new control paths (mute-group editor, guide-panel progress, inspector banner,
-canvas context-menu helpers). They guard on PySide6 being importable and force a
-synchronous ``inspector.refresh()`` where the live app would rely on a coalesced
-timer. Skipped entirely when PySide6 is absent.
+These build a real ``MainWindow`` under the Qt *offscreen* platform and drive
+the shell (ModeBar, per-mode panels, issues drawer, live overlay) plus the
+control paths that survived the redesign (mute groups, canvas context-menu
+helpers). They guard on PySide6 being importable and force a synchronous
+``panel.refresh()`` where the live app relies on a coalesced timer / showEvent.
+Skipped entirely when PySide6 is absent.
 """
 import os
 
