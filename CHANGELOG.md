@@ -5,6 +5,30 @@ Python port of the Conferencing Audio Pipeline. Format based on
 project they were ported from. The JSON **config schema** (`CONFIG_VERSION` = 1,
 camelCase keys) is identical to the TS version, so configs interoperate.
 
+## [Unreleased]
+
+**Repository hygiene** — no engine, schema, or GUI behaviour changes.
+
+### Added
+- **GitHub Actions CI** (`.github/workflows/ci.yml`): `pytest` on push/PR across
+  Python 3.10–3.13 (Ubuntu, Qt offscreen + PortAudio system libs), with a
+  coverage report surfaced in the log (reported, not enforced), plus a separate
+  **mypy** job.
+- **mypy type-checking** over `conf_pipeline/` and `conf_pipeline_control/`
+  (`[tool.mypy]` in `pyproject.toml`); the codebase now passes cleanly.
+  `is_mic_device` / `is_processor` became `TypeGuard`s, lazily-bound
+  numpy/sounddevice attributes are typed `Any`, stale `type: ignore` comments
+  were removed, and a handful of annotations tightened (`PortKind`,
+  `DeviceTemplate.transport`/`coverage_mode` Literals). No runtime behaviour
+  change beyond a few `assert <processor> is not None` statements on
+  invariants that already held.
+- **Pinned dev/test dependencies** (`requirements-dev.txt`): exact versions for
+  pytest / pytest-cov / coverage / mypy / PySide6 / numpy / scipy / sounddevice /
+  requests (numpy & scipy pins split at Python 3.11). The `[dev]` extra now
+  includes `pytest-cov` and `mypy`.
+- `.gitignore` grew `.mypy_cache/` and coverage artifacts (`.coverage*`,
+  `coverage.xml`, `htmlcov/`); the index was already free of build artifacts.
+
 ## [1.14.0] - 2026-06-12
 
 **"Stagebar" UI redesign** — a complete UX + visual overhaul of the desktop app.

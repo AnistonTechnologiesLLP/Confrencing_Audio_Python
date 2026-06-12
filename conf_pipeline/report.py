@@ -115,7 +115,7 @@ def _coverage_areas_section(config: SystemConfig) -> str:
     """Per-array coverage areas with their output channel / gain trim, plus the
     zone-vs-coverage findings (Designer-style steerable-coverage view)."""
     arrays = [d for d in config.devices if d.type == "microphoneArray"]
-    pickup_zones = [z for a in arrays for z in a.zones if is_pickup_zone(z)]  # type: ignore[attr-defined]
+    pickup_zones = [z for a in arrays for z in a.zones if is_pickup_zone(z)]
     if not pickup_zones:
         return ""
     lines = [
@@ -125,7 +125,7 @@ def _coverage_areas_section(config: SystemConfig) -> str:
         "| --- | --- | --- | --- | --- |",
     ]
     for a in arrays:
-        for z in a.zones:  # type: ignore[attr-defined]
+        for z in a.zones:
             if not is_pickup_zone(z):
                 continue
             ch = str(z.output_channel) if z.output_channel is not None else "—"

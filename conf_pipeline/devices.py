@@ -9,6 +9,7 @@ from .model import (
     Codec,
     Loudspeaker,
     Port,
+    PortKind,
     Processor,
     Transport,
     WiredMic,
@@ -17,14 +18,14 @@ from .model import (
 from .profiles import default_profile_id
 
 
-def _make_port(device_id: str, kind: str, transport: Transport, index: int) -> Port:
+def _make_port(device_id: str, kind: PortKind, transport: Transport, index: int) -> Port:
     direction = "in" if kind == "input" else "out"
     pretty = "Dante" if transport == "dante" else "Analog"
     pdir = "In" if kind == "input" else "Out"
     return Port(id=f"{device_id}-{direction}-{transport}-{index}", device_id=device_id, kind=kind, transport=transport, label=f"{pretty} {pdir} {index}")
 
 
-def _make_ports(device_id: str, kind: str, transport: Transport, count: int) -> list[Port]:
+def _make_ports(device_id: str, kind: PortKind, transport: Transport, count: int) -> list[Port]:
     return [_make_port(device_id, kind, transport, i) for i in range(1, count + 1)]
 
 

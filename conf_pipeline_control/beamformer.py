@@ -341,7 +341,7 @@ def analyze_lobes(
             continue                                     # negligible ripple
         side.append((az[i], rel[i]))
     side.sort(key=lambda s: -s[1])
-    deduped = []
+    deduped: list[tuple[float, float]] = []
     for a, lv in side:
         if all(min(abs(a - a2), 360.0 - abs(a - a2)) >= min_sep_deg for a2, _ in deduped):
             deduped.append((a, lv))

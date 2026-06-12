@@ -23,7 +23,7 @@ import math
 import queue
 import threading
 import wave
-from typing import Optional
+from typing import Any, Optional
 
 from .audio import controls_available, missing_dependencies
 from .beamformer import BeamDesign
@@ -68,23 +68,25 @@ class LiveBeamController(MicController):
         self.output_device = output_device     # None → system default output
         # opt-in spatial-covariance tap for DOA / auto-steer (off ⇒ zero overhead)
         self.track_covariance = track_covariance
-        self._cov = None           # EMA of band covariance, (n_band, M, M) complex
-        self._cov_freqs = None     # band bin frequencies (n_band,)
-        self._cov_band = None      # band bin indices into the rfft axis
+        # Lazily bound in _open() (numpy / sounddevice objects) — typed Any so the
+        # module stays importable + checkable without the [control] extra.
+        self._cov: Any = None      # EMA of band covariance, (n_band, M, M) complex
+        self._cov_freqs: Any = None  # band bin frequencies (n_band,)
+        self._cov_band: Any = None   # band bin indices into the rfft axis
         self._cov_alpha = 0.05     # EMA rate (~230 ms at 44.1 kHz / 512 hop)
         self._cov_lock = threading.Lock()
-        self._sd = None
-        self._np = None
-        self._stream = None
-        self._out_stream = None    # separate output stream for monitoring
-        self._monitor_q = None     # thread-safe hand-off: input → output
+        self._sd: Any = None
+        self._np: Any = None
+        self._stream: Any = None
+        self._out_stream: Any = None   # separate output stream for monitoring
+        self._monitor_q: Any = None    # thread-safe hand-off: input → output
         self._out_channels = 0     # monitor output channels (0 = not monitoring)
         self._wav: Optional[wave.Wave_write] = None
         self._level = 0.0          # written by audio thread, read by GUI
-        self._weights = None       # numpy (n_bins, M) complex, or None → passthrough sum
-        self._win = None           # Hann window (numpy)
-        self._inbuf = None         # numpy (FRAME, M) sliding input
-        self._ola = None           # numpy (FRAME,) overlap-add tail
+        self._weights: Any = None  # numpy (n_bins, M) complex, or None → passthrough sum
+        self._win: Any = None      # Hann window (numpy)
+        self._inbuf: Any = None    # numpy (FRAME, M) sliding input
+        self._ola: Any = None      # numpy (FRAME,) overlap-add tail
 
     # ---- weight computation (per FFT bin, broadband) ----
     def _compute_weights(self):

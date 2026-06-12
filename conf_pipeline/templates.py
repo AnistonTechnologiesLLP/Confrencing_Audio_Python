@@ -13,7 +13,7 @@ from .devices import (
     create_wired_mic,
     create_wireless_mic,
 )
-from .model import DspBlock
+from .model import CoverageMode, Device, DspBlock, Transport
 
 
 @dataclass
@@ -22,8 +22,8 @@ class DeviceTemplate:
     device_type: str
     profile_id: Optional[str] = None
     dsp_blocks: list[DspBlock] = field(default_factory=list)
-    transport: Optional[str] = None
-    coverage_mode: Optional[str] = None
+    transport: Optional[Transport] = None
+    coverage_mode: Optional[CoverageMode] = None
 
 
 def device_template(name: str, device) -> DeviceTemplate:
@@ -38,8 +38,9 @@ def device_template(name: str, device) -> DeviceTemplate:
 
 
 def instantiate_template(template: DeviceTemplate, id: str, label: str):
-    transport = template.transport or "dante"
+    transport: Transport = template.transport or "dante"
     t = template.device_type
+    dev: Device
     if t == "processor":
         dev = create_processor(id, label)
     elif t == "microphoneArray":

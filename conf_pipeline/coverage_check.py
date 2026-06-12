@@ -174,7 +174,7 @@ def zone_coverage_report(config: SystemConfig, target_height: float = DEFAULT_TA
     rep = ZoneCoverageReport()
     for a in arrays:
         own = circles.get(a.id)
-        for zone in a.zones:  # type: ignore[attr-defined]
+        for zone in a.zones:
             if not is_pickup_zone(zone):
                 continue
             centroid = _zone_centroid(zone)

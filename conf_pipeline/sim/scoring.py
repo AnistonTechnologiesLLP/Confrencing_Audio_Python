@@ -198,7 +198,7 @@ def zone_membership(array: MicrophoneArray, point: Point2D) -> tuple[bool, bool]
 # multi-array helpers: the "table" (pickup zones) and best-covering array
 # --------------------------------------------------------------------------- #
 def microphone_arrays(config: SystemConfig) -> list[MicrophoneArray]:
-    return [d for d in config.devices if d.type == "microphoneArray"]  # type: ignore[misc]
+    return [d for d in config.devices if d.type == "microphoneArray"]
 
 
 def has_any_pickup_zone(config: SystemConfig) -> bool:
@@ -339,7 +339,7 @@ def talker_quality(
 def _find_array(config: SystemConfig, array_id: str) -> MicrophoneArray:
     for d in config.devices:
         if d.id == array_id and d.type == "microphoneArray":
-            return d  # type: ignore[return-value]
+            return d
     raise ValueError(f"No microphone array with id {array_id!r}")
 
 

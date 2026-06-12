@@ -113,10 +113,10 @@ def _resolve_array(config: SystemConfig, array_id: Optional[str]) -> MicrophoneA
     if not arrays:
         raise ValueError("Configuration has no microphone array to place.")
     if array_id is None:
-        return arrays[0]  # type: ignore[return-value]
+        return arrays[0]
     for a in arrays:
         if a.id == array_id:
-            return a  # type: ignore[return-value]
+            return a
     raise ValueError(f"No microphone array with id {array_id!r}")
 
 

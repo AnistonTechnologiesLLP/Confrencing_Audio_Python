@@ -1,6 +1,8 @@
 """DSP block factories + parameter range checking (mirrors the TS version)."""
 from __future__ import annotations
 
+from typing import Any
+
 from .model import DSP_RANGES, PEQ_MAX_BANDS, DspBlock, DspBlockKind
 
 
@@ -16,7 +18,7 @@ def default_peq_band() -> dict:
 
 
 def create_dsp_block(kind: DspBlockKind, block_id: str) -> DspBlock:
-    params = {
+    defaults: dict[str, dict[str, Any]] = {
         "gain": {"gainDb": 0},
         "mute": {"muted": False},
         "peq4": {"bands": [default_peq_band()]},
@@ -25,8 +27,8 @@ def create_dsp_block(kind: DspBlockKind, block_id: str) -> DspBlock:
         "delay": {"delayMs": 0},
         "noiseReduction": {"amountDb": 12},
         "deverb": {"amount": 0.3},
-    }[kind]
-    return DspBlock(id=block_id, kind=kind, enabled=True, params=dict(params))
+    }
+    return DspBlock(id=block_id, kind=kind, enabled=True, params=dict(defaults[kind]))
 
 
 def dsp_block_param_issues(block: DspBlock) -> list[str]:

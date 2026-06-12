@@ -44,10 +44,10 @@ class AecReferenceAnalysis:
 def get_primary_processor(config: SystemConfig) -> Optional[Processor]:
     by_matrix = find_device(config, config.matrix.processor_id)
     if by_matrix is not None and is_processor(by_matrix):
-        return by_matrix  # type: ignore[return-value]
+        return by_matrix
     for d in config.devices:
         if is_processor(d):
-            return d  # type: ignore[return-value]
+            return d
     return None
 
 

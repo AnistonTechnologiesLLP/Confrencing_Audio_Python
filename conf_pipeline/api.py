@@ -69,7 +69,7 @@ def add_device(config: SystemConfig, device: Device) -> SystemConfig:
         raise ValueError(f"Duplicate device id: {device.id}")
     new = _clone(config, devices=[*config.devices, device])
     if is_processor(device) and new.matrix.processor_id == "":
-        new.matrix = device.matrix  # type: ignore[attr-defined]
+        new.matrix = device.matrix
         new.automixer = dsp.create_automixer(device.id)
     return new
 
@@ -151,7 +151,7 @@ def set_room_background_scale(config: SystemConfig, scale_m_per_px: float) -> Sy
     if config.room is None or config.room.background is None:
         raise ValueError("No floor-plan background to scale.")
     room = copy.copy(config.room)
-    bg = copy.copy(room.background)
+    bg = copy.copy(config.room.background)
     bg.scale_m_per_px = scale_m_per_px
     room.background = bg
     return _clone(config, room=room)
@@ -161,7 +161,7 @@ def set_room_background_opacity(config: SystemConfig, opacity: float) -> SystemC
     if config.room is None or config.room.background is None:
         raise ValueError("No floor-plan background.")
     room = copy.copy(config.room)
-    bg = copy.copy(room.background)
+    bg = copy.copy(config.room.background)
     bg.opacity = max(0.0, min(1.0, opacity))
     room.background = bg
     return _clone(config, room=room)
@@ -205,7 +205,7 @@ def set_zone_shape(config: SystemConfig, array_id: str, zone_id: str, shape: Zon
     def fn(d: Device) -> Device:
         if d.type != "microphoneArray":
             raise ValueError(f"Device {array_id} is not a microphone array.")
-        return cov.update_zone_shape(d, zone_id, shape)  # type: ignore[arg-type]
+        return cov.update_zone_shape(d, zone_id, shape)
     return _map_device(config, array_id, fn)
 
 
@@ -216,7 +216,7 @@ def set_coverage_mode(config: SystemConfig, array_id: str, mode: CoverageMode) -
     def fn(d: Device) -> Device:
         if d.type != "microphoneArray":
             raise ValueError(f"Device {array_id} is not a microphone array.")
-        return cov.set_coverage_mode(d, mode)  # type: ignore[arg-type]
+        return cov.set_coverage_mode(d, mode)
     return _map_device(config, array_id, fn)
 
 
@@ -224,7 +224,7 @@ def add_coverage_zone(config: SystemConfig, array_id: str, zone: CoverageZone) -
     def fn(d: Device) -> Device:
         if d.type != "microphoneArray":
             raise ValueError(f"Device {array_id} is not a microphone array.")
-        return cov.add_coverage_zone(d, zone)  # type: ignore[arg-type]
+        return cov.add_coverage_zone(d, zone)
     return _map_device(config, array_id, fn)
 
 
@@ -232,7 +232,7 @@ def remove_coverage_zone(config: SystemConfig, array_id: str, zone_id: str) -> S
     def fn(d: Device) -> Device:
         if d.type != "microphoneArray":
             raise ValueError(f"Device {array_id} is not a microphone array.")
-        return cov.remove_coverage_zone(d, zone_id)  # type: ignore[arg-type]
+        return cov.remove_coverage_zone(d, zone_id)
     return _map_device(config, array_id, fn)
 
 
@@ -289,7 +289,7 @@ class MatrixAccessor:
         proc = find_device(config, processor_id)
         if proc is None or not is_processor(proc):
             raise ValueError(f"Unknown processor: {processor_id}")
-        self._proc: Processor = proc  # type: ignore[assignment]
+        self._proc: Processor = proc
 
     def _apply(self, fn: Callable[[MatrixMixer], MatrixMixer]) -> SystemConfig:
         updated: dict[str, MatrixMixer] = {}
@@ -297,7 +297,7 @@ class MatrixAccessor:
         def map_fn(d: Device) -> Device:
             if not is_processor(d):
                 raise ValueError(f"Device {self._pid} is not a processor.")
-            m = fn(d.matrix)  # type: ignore[attr-defined]
+            m = fn(d.matrix)
             updated["m"] = m
             nd = _with(d, matrix=m, buses=[*m.input_buses, *m.output_buses])
             return nd
@@ -465,7 +465,7 @@ def talker_coverage(config: SystemConfig, talker_id: str) -> TalkerCoverage:
             continue
         in_pickup = False
         in_exclusion = False
-        for zone in device.zones:  # type: ignore[attr-defined]
+        for zone in device.zones:
             if not point_in_shape(talker.position, zone.shape):
                 continue
             if zone.type == "exclusion":
@@ -532,6 +532,7 @@ def auto_configure(config: SystemConfig) -> SystemConfig:
     am = dsp.create_automixer(processor.id)
     speaker_feeds = dsp.output_buses_feeding_loudspeakers(new, processor)
     proc_now = dsp.get_primary_processor(new)
+    assert proc_now is not None  # the primary processor never disappears mid-configure
     for mic in mics:
         for in_bus in dsp.processor_input_buses_for_device(new, proc_now, mic.id):
             is_reinforced = any(o in speaker_feeds for o in mx.outputs_for_input(proc_now.matrix, in_bus))
@@ -542,6 +543,7 @@ def auto_configure(config: SystemConfig) -> SystemConfig:
         for ch in am.channels:
             new = matrix_for(new, processor.id).route(ch.input_bus_id, automix_bus)
         proc_now = dsp.get_primary_processor(new)
+        assert proc_now is not None
         automix_port = next((p for p in proc_now.ports if p.id == automix_bus), None)
         if automix_port is not None:
             for codec in codecs:
@@ -592,6 +594,7 @@ def auto_route(config: SystemConfig) -> AutoRouteResult:
 
     new = auto_configure(config)
     proc = dsp.get_primary_processor(new)
+    assert proc is not None  # checked above; auto_configure never removes it
     pid = proc.id
     mics = [d for d in new.devices if is_mic_device(d)]
     codecs = [d for d in new.devices if d.type == "codec"]
@@ -623,7 +626,9 @@ def auto_route(config: SystemConfig) -> AutoRouteResult:
             in_port = next((p for p in spk.ports if p.kind == "input"), None)
             if in_port is None:
                 continue
-            bus = _pick_program_bus(dsp.get_primary_processor(new), in_port.transport, forbidden)
+            proc_latest = dsp.get_primary_processor(new)  # matrix changes as routes land
+            assert proc_latest is not None
+            bus = _pick_program_bus(proc_latest, in_port.transport, forbidden)
             if bus is None:
                 continue
             for fe in far_end_in:
@@ -747,7 +752,7 @@ def optimize_room(
 
     if assign_channels:
         for arr in [d for d in new.devices if d.type == "microphoneArray"]:
-            pickups = [z for z in arr.zones if z.type != "exclusion"]  # type: ignore[attr-defined]
+            pickups = [z for z in arr.zones if z.type != "exclusion"]
             unassigned = [z for z in pickups if z.output_channel is None]
             if unassigned:
                 new = auto_assign_zone_channels(new, arr.id)

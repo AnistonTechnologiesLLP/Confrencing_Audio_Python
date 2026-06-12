@@ -103,7 +103,7 @@ class AutoSteerController:
         self._lock = threading.Lock()
         self._detections: list = []          # last gated detections (for readout)
         self._last_looks: list = []           # held look azimuths
-        self._last_sig = None                 # quantized (looks, nulls) signature
+        self._last_sig: Optional[tuple[tuple, tuple]] = None  # quantized (looks, nulls) signature
         self._hold = 0
         self.error = ""
 

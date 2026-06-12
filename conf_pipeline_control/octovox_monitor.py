@@ -17,7 +17,7 @@ from __future__ import annotations
 import queue
 import threading
 from dataclasses import dataclass
-from typing import Optional
+from typing import Any, Optional
 
 from .octovox_bridge import OctovoxClient
 
@@ -151,22 +151,24 @@ class CleanMonitor:
         self._noise_floor = None
         self.gated = 0
 
-        self._sd = None
-        self._np = None
-        self._in_stream = None
-        self._out_stream = None
+        # Lazily bound in start() (numpy / sounddevice) — Any keeps the module
+        # importable + checkable without the [octovox] extra.
+        self._sd: Any = None
+        self._np: Any = None
+        self._in_stream: Any = None
+        self._out_stream: Any = None
         self._out_channels = 2
         self._fifo = _MonoFifo()
         self._clean_q: "queue.Queue" = queue.Queue(maxsize=4)
         self._worker: Optional[threading.Thread] = None
         self._stop = threading.Event()
-        self._acc = []
+        self._acc: list[Any] = []  # accumulating raw-input blocks (numpy arrays)
         self._acc_n = 0
         self._chunk_samples = int(self.chunk_seconds * self.samplerate)
         self._overlap_in = int(self.overlap_seconds * self.samplerate)   # input-rate overlap
         self._overlap_out = int(self.overlap_seconds * 48000)            # output-rate overlap
         self._emit_len = int(max(0.0, self.chunk_seconds - self.overlap_seconds) * 48000)  # silence len for gated chunks
-        self._prev_tail = None                                           # held for crossfade
+        self._prev_tail: Any = None                                      # held for crossfade (numpy)
         # counters (plain ints; GIL keeps reads coherent for a status display)
         self.chunks_sent = 0
         self.chunks_played = 0

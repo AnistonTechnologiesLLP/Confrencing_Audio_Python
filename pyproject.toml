@@ -12,7 +12,7 @@ license = { text = "MIT" }
 dependencies = ["PySide6>=6.6"]
 
 [project.optional-dependencies]
-dev = ["pytest>=7"]
+dev = ["pytest>=7", "pytest-cov>=4", "mypy>=1.8"]   # exact pins: requirements-dev.txt
 sim = ["numpy>=1.24"]                                        # far-field validation backend
 sim-rir = ["pyroomacoustics>=0.7", "numpy>=1.24", "scipy>=1.7"]  # image-source RIR backend
 control = ["numpy>=1.24", "sounddevice>=0.4"]               # live host-side beamforming of a real array
@@ -26,3 +26,18 @@ packages = ["conf_pipeline", "conf_pipeline.sim", "conf_pipeline_gui", "conf_pip
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.mypy]
+# Typed surface: the pure-stdlib engine + the host-side control package.
+# The Qt GUI is exercised by the headless smoke tests instead.
+files = ["conf_pipeline", "conf_pipeline_control"]
+python_version = "3.10"
+check_untyped_defs = true
+no_implicit_optional = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+
+[[tool.mypy.overrides]]
+# Optional-extra deps without type stubs (imported behind availability gates).
+module = ["sounddevice", "sounddevice.*", "pyroomacoustics", "pyroomacoustics.*", "scipy", "scipy.*"]
+ignore_missing_imports = true

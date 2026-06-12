@@ -11,7 +11,7 @@ TypeScript/browser version.
 from __future__ import annotations
 
 from dataclasses import dataclass, field, fields, is_dataclass
-from typing import Any, Literal, Optional, Union
+from typing import Any, Literal, Optional, TypeGuard, Union
 
 # --------------------------------------------------------------------------- #
 # Constants
@@ -400,11 +400,11 @@ MicDevice = Union[MicrophoneArray, WirelessMic, WiredMic]
 _MIC_TYPES = {"microphoneArray", "wirelessMic", "wiredMic"}
 
 
-def is_mic_device(d: Device) -> bool:
+def is_mic_device(d: Device) -> TypeGuard[MicDevice]:
     return d.type in _MIC_TYPES
 
 
-def is_processor(d: Device) -> bool:
+def is_processor(d: Device) -> TypeGuard[Processor]:
     return d.type == "processor"
 
 

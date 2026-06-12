@@ -159,7 +159,7 @@ def _validate_aec(config: SystemConfig, add: AddIssue) -> None:
     for device in config.devices:
         if not is_mic_device(device):
             continue
-        aec = device.aec  # type: ignore[attr-defined]
+        aec = device.aec
         if not aec.enabled:
             continue
         if aec.reference_bus_id is None:
@@ -256,7 +256,7 @@ def _validate_control(config: SystemConfig, add: AddIssue) -> None:
             arr = find_device(config, ref.array_id)
             if arr is None or arr.type != "microphoneArray":
                 add("error", "CONTROL_MUTE_GROUP_INVALID", f'Mute group "{group.id}" references missing array "{ref.array_id}".', [group.id, ref.array_id])
-            elif not any(z.id == ref.zone_id for z in arr.zones):  # type: ignore[attr-defined]
+            elif not any(z.id == ref.zone_id for z in arr.zones):
                 add("error", "CONTROL_MUTE_GROUP_INVALID", f'Mute group "{group.id}" references missing zone "{ref.zone_id}" on array "{ref.array_id}".', [group.id, ref.array_id, ref.zone_id])
 
 

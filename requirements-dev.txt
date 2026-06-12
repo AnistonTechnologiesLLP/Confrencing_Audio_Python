@@ -1,0 +1,24 @@
+# Pinned dev/test environment — keeps the suite reproducible (CI and offline).
+# Install with:
+#   python -m pip install -r requirements-dev.txt
+#   python -m pip install -e . --no-deps
+#
+# Top-level pins only; numpy/scipy split at 3.11 because their newest
+# releases dropped Python 3.10 (still in our support matrix).
+
+# Test runner, coverage, type checker
+pytest==9.0.3
+pytest-cov==7.1.0
+coverage==7.14.1
+mypy==2.1.0
+
+# GUI (headless smoke tests run under QT_QPA_PLATFORM=offscreen)
+PySide6==6.11.1
+
+# Optional-extra deps exercised by the suite ([control] / [sim] / [octovox])
+numpy==2.4.6; python_version >= "3.11"
+numpy==2.2.6; python_version < "3.11"
+scipy==1.17.1; python_version >= "3.11"
+scipy==1.15.3; python_version < "3.11"
+sounddevice==0.5.5
+requests==2.34.2
