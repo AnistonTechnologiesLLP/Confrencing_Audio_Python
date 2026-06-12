@@ -171,6 +171,14 @@ from .transport import (  # noqa: F401
     SimulatedTransport,
     TransportError,
 )
+# ---- project file management: recent files, autosave, crash recovery ----
+from .files import (  # noqa: F401
+    RECENT_MAX,
+    OpenResult,
+    ProjectFileManager,
+    RecoveryInfo,
+    default_state_dir,
+)
 from .naming import TYPE_LABEL, apply_naming_scheme, label_collisions, suggested_label  # noqa: F401
 from .routing import (  # noqa: F401
     Subscription,

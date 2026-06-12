@@ -34,6 +34,37 @@ schema is unchanged.
   content, and a numpy cross-check that the stdlib per-band weights equal the
   live runtime's per-FFT-bin weights (skipped without the `[control]` extra).
 
+**Project file manager (A4)** — recent files, autosave, crash recovery, and a
+user-visible migration notice on open.
+
+### Added
+- **`conf_pipeline/files.py`** (pure stdlib — deliberately the only engine
+  module that touches the filesystem): `ProjectFileManager` with
+  `open_config` / `save_config` (atomic writes), a most-recent-first
+  **recent-files list** (deduped, capped at 10, pruned of deleted files,
+  persisted), **autosave** of an opaque workspace payload, and **crash
+  recovery** — the autosave file doubles as the crash marker: it is cleared on
+  clean exit, so a leftover autosave at startup means the last session died.
+  `OpenResult.migrated_from` + `migration_notice()` report when an old-schema
+  file (e.g. v1) was upgraded on open. All state lives in one per-user
+  directory (`%APPDATA%/conf-pipeline` / `~/.local/state/conf-pipeline`),
+  overridable via `CONF_PIPELINE_STATE_DIR` or the constructor.
+- **GUI**: an **Open recent** submenu in the ☰ menu (populated on open, with
+  *Clear list*); import/export now go through the manager; opening an
+  old-schema file shows an explicit **"File upgraded"** dialog; a 30 s
+  **autosave timer** snapshots the whole multi-room workspace (as a project
+  JSON) whenever there are unsaved edits; on startup `main()` offers **"Recover
+  unsaved work?"** when a crash left an autosave behind, restoring every room;
+  closing the window cleanly clears the marker. `AppState.load_rooms` replaces
+  the workspace wholesale for recovery.
+- Tests: `tests/test_files.py` (11 — round trip + recent semantics, v1
+  migration notice, autosave/recovery lifecycle incl. missing-meta and
+  project-payload round trip, env-var state dir) and 4 GUI smoke tests
+  (autosave tick + clean-close lifecycle, multi-room crash recovery via a
+  monkeypatched dialog, migration notice on `_open_path`, recent-menu
+  populate/open). `tests/conftest.py` points the state dir at a temp directory
+  so the suite never touches real user state.
+
 **Device transport (A1)** — the device-facing seam of the commissioning
 workflow, simulated behind a clean interface (no real protocols).
 

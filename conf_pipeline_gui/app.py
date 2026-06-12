@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import sys
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QAction, QFont, QGuiApplication, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
@@ -45,12 +45,18 @@ from .viewbar import ViewBar
 TOOL_HOME_MODE = {"room": "design", "zone": "design", "talker": "design", "connect": "route"}
 
 
+AUTOSAVE_INTERVAL_MS = 30_000
+
+
 class MainWindow(QMainWindow):
-    def __init__(self):
+    def __init__(self, files: cp.ProjectFileManager | None = None):
         super().__init__()
         self.setWindowTitle("Conferencing Audio Pipeline — Configurator")
         self.resize(1320, 840)
         self.state = AppState()
+        # project file manager: recent files, autosave, crash recovery
+        self.files = files if files is not None else cp.ProjectFileManager()
+        self._dirty = False
 
         self.canvas = Canvas(self.state)
         self.canvas.coord_cb = lambda s: self.coord_label.setText(s)
@@ -108,7 +114,12 @@ class MainWindow(QMainWindow):
         self._build_statusbar()
         self._shortcuts()
         self.state.changed.connect(self._sync_chrome)
+        self.state.changed.connect(self._mark_dirty)
         self.state.modeChanged.connect(self._apply_mode)
+        self._autosave_timer = QTimer(self)
+        self._autosave_timer.setInterval(AUTOSAVE_INTERVAL_MS)
+        self._autosave_timer.timeout.connect(self._autosave_tick)
+        self._autosave_timer.start()
         self._sync_chrome()
 
     # ------------------------------------------------------------------ top bar
@@ -176,6 +187,8 @@ class MainWindow(QMainWindow):
         samples.addAction("Empty", lambda: self._load_scenario("empty"))
 
         m.addAction("Import config…", self._import)
+        self.recent_menu = m.addMenu("Open recent")
+        self.recent_menu.aboutToShow.connect(self._fill_recent_menu)
         m.addAction("Export config…", self._export)
         m.addAction("Export design report…", self._export_report)
         m.addSeparator()
@@ -315,6 +328,7 @@ class MainWindow(QMainWindow):
         live = self.panels.get("live")
         if live is not None and live._live_busy():
             live._live_disconnect()
+        self.files.clear_autosave()       # clean exit — the autosave is the crash marker
         super().closeEvent(e)
 
     # ------------------------------------------------------------------ actions
@@ -448,8 +462,7 @@ class MainWindow(QMainWindow):
     def _export(self):
         path, _ = QFileDialog.getSaveFileName(self, "Export config", "config.json", "JSON (*.json)")
         if path:
-            with open(path, "w", encoding="utf-8") as f:
-                f.write(cp.serialize(self.state.config, pretty=True))
+            self.files.save_config(self.state.config, path)
             self.toast("Exported")
 
     def _export_report(self):
@@ -464,14 +477,86 @@ class MainWindow(QMainWindow):
 
     def _import(self):
         path, _ = QFileDialog.getOpenFileName(self, "Import config", "", "JSON (*.json)")
-        if not path:
-            return
+        if path:
+            self._open_path(path)
+
+    def _open_path(self, path: str):
+        """Open a config file with the migration-notice contract."""
         try:
-            with open(path, "r", encoding="utf-8") as f:
-                self.state.set_config(cp.deserialize(f.read()))
-            self.toast("Imported")
+            res = self.files.open_config(path)
         except Exception as exc:
             QMessageBox.warning(self, "Import failed", str(exc))
+            return
+        self.state.set_config(res.config)
+        if res.migrated:
+            QMessageBox.information(self, "File upgraded", res.migration_notice())
+        else:
+            self.toast("Imported")
+
+    def _fill_recent_menu(self):
+        self.recent_menu.clear()
+        recent = self.files.recent_files()
+        if not recent:
+            a = self.recent_menu.addAction("(no recent files)")
+            a.setEnabled(False)
+            return
+        for p in recent:
+            self.recent_menu.addAction(p, lambda _c=False, path=p: self._open_path(path))
+        self.recent_menu.addSeparator()
+        self.recent_menu.addAction("Clear list", self.files.clear_recent)
+
+    # ---- autosave / crash recovery ----
+    def _mark_dirty(self):
+        self._dirty = True
+
+    def _workspace_payload(self) -> str:
+        """The whole multi-room workspace as a project JSON (all rooms survive)."""
+        self.state._snapshot()            # fold the live room back into the rooms list
+        rooms = [cp.ProjectRoom(id=r["id"], config=r["config"]) for r in self.state.rooms]
+        project = cp.Project(
+            version=cp.PROJECT_VERSION,
+            metadata={"name": self.state.config.metadata.get("name", "Untitled"), "createdAt": now_iso()},
+            rooms=rooms,
+            active_room_id=self.state.rooms[self.state.active_room]["id"],
+        )
+        return cp.serialize_project(project, pretty=True)
+
+    def _autosave_tick(self):
+        if not self._dirty:
+            return
+        self.files.autosave(self._workspace_payload(),
+                            origin=self.state.config.metadata.get("name", "Untitled"))
+        self._dirty = False
+
+    def _offer_recovery(self):
+        """Startup crash recovery: offer a leftover autosave back to the user.
+        Called from main() — never from __init__, so embedding/tests stay modal-free."""
+        info = self.files.pending_recovery()
+        if info is None:
+            return
+        when = f" (saved {info.saved_at})" if info.saved_at else ""
+        what = f' "{info.origin}"' if info.origin else ""
+        ans = QMessageBox.question(
+            self, "Recover unsaved work?",
+            f"The last session did not exit cleanly. Recover the autosaved workspace{what}{when}?",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes,
+        )
+        if ans == QMessageBox.Yes:
+            try:
+                self._restore_workspace(self.files.read_recovery())
+                self.toast("Workspace recovered")
+            except Exception as exc:
+                QMessageBox.warning(self, "Recovery failed", str(exc))
+        self.files.clear_autosave()       # offered once, either way
+
+    def _restore_workspace(self, payload: str):
+        project = cp.deserialize_project(payload)
+        rooms = [
+            {"id": r.id, "config": r.config, "history": [r.config], "idx": 0, "last_deployed": None}
+            for r in project.rooms
+        ]
+        active = next((i for i, r in enumerate(project.rooms) if r.id == project.active_room_id), 0)
+        self.state.load_rooms(rooms, active)
 
     def _auto_name(self):
         self.state.set_config(cp.apply_naming_scheme(self.state.config))
@@ -522,6 +607,7 @@ def main():
     QGuiApplication.setApplicationDisplayName("Conferencing Audio Pipeline")
     win = MainWindow()
     win.show()
+    win._offer_recovery()                 # crash recovery, after the window is up
     sys.exit(app.exec())
 
 

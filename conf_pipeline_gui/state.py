@@ -136,6 +136,14 @@ class AppState(QObject):
         new_active = self.active_room - 1 if i < self.active_room else self.active_room
         self._load(min(max(new_active, 0), len(self.rooms) - 1))
 
+    def load_rooms(self, rooms: list[dict], active: int = 0) -> None:
+        """Replace the whole workspace (e.g. crash recovery). Each room dict needs
+        ``id`` / ``config`` / ``history`` / ``idx`` / ``last_deployed`` keys."""
+        if not rooms:
+            return
+        self.rooms = rooms
+        self._load(min(max(active, 0), len(rooms) - 1))
+
     def rename_room(self, i: int, name: str) -> None:
         import copy
         r = self.rooms[i]

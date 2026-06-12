@@ -258,6 +258,85 @@ def test_live_connect_disconnect_simulated(win, monkeypatch):
     assert win.state.live_overlay is None
 
 
+def test_autosave_tick_and_clean_close_lifecycle(qapp, tmp_path):
+    from conf_pipeline_gui.app import MainWindow
+
+    files = cp.ProjectFileManager(state_dir=tmp_path / "state")
+    w = MainWindow(files=files)
+    try:
+        w._autosave_tick()                           # nothing dirty yet
+        assert files.pending_recovery() is None
+        c = cp.add_device(w.state.config, cp.create_processor("P1", "DSP"))
+        w.state.set_config(c)                        # an edit marks the work dirty
+        assert w._dirty
+        w._autosave_tick()
+        info = files.pending_recovery()
+        assert info is not None                      # crash marker present
+        restored = cp.deserialize_project(files.read_recovery())
+        assert any(d.id == "P1" for d in restored.rooms[0].config.devices)
+        assert not w._dirty                          # tick consumed the dirty flag
+    finally:
+        w.close()                                    # clean exit clears the marker
+    assert files.pending_recovery() is None
+
+
+def test_recovery_restores_multi_room_workspace(qapp, tmp_path, monkeypatch):
+    from PySide6.QtWidgets import QMessageBox
+
+    from conf_pipeline_gui.app import MainWindow
+
+    files = cp.ProjectFileManager(state_dir=tmp_path / "state")
+    crashed = MainWindow(files=files)
+    crashed.state.add_room()                         # two rooms in the workspace
+    crashed._autosave_tick()
+    del crashed                                      # simulated crash: no close()
+    assert files.pending_recovery() is not None
+
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.Yes)
+    w = MainWindow(files=files)
+    try:
+        assert len(w.state.rooms) == 1               # fresh window starts empty
+        w._offer_recovery()
+        assert len(w.state.rooms) == 2               # workspace came back
+        assert files.pending_recovery() is None      # offered once, then cleared
+    finally:
+        w.close()
+
+
+def test_open_path_shows_migration_notice(win, tmp_path, monkeypatch):
+    import json
+
+    from PySide6.QtWidgets import QMessageBox
+
+    doc = json.loads(cp.serialize(cp.create_config("Legacy", "x")))
+    doc["version"] = 1
+    p = tmp_path / "legacy.json"
+    p.write_text(json.dumps(doc), encoding="utf-8")
+
+    seen = {}
+    monkeypatch.setattr(QMessageBox, "information",
+                        lambda _parent, title, text: seen.update(title=title, text=text))
+    win._open_path(str(p))
+    assert seen["title"] == "File upgraded"
+    assert "version 1" in seen["text"]
+    assert win.state.config.metadata["name"] == "Legacy"
+    assert str(p.resolve()) in win.files.recent_files()
+
+
+def test_recent_menu_populates_and_opens(win, tmp_path):
+    win.files.clear_recent()
+    win._fill_recent_menu()
+    labels = [a.text() for a in win.recent_menu.actions()]
+    assert labels == ["(no recent files)"]
+    p = tmp_path / "cfg.json"
+    win.files.save_config(cp.create_config("FromRecent", "x"), p)
+    win._fill_recent_menu()
+    actions = win.recent_menu.actions()
+    assert actions[0].text() == str(p.resolve())
+    actions[0].trigger()                             # open via the menu entry
+    assert win.state.config.metadata["name"] == "FromRecent"
+
+
 def test_live_design_readout_shows_frequency_curve(win):
     from conf_pipeline.model import RectShape
 
