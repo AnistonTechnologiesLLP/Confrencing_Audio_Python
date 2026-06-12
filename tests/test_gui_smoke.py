@@ -256,3 +256,28 @@ def test_live_connect_disconnect_simulated(win, monkeypatch):
     assert not win.modebar._live_connected
     panel._tick_live_meter()
     assert win.state.live_overlay is None
+
+
+def test_live_design_readout_shows_frequency_curve(win):
+    from conf_pipeline.model import RectShape
+
+    c = cp.create_config("T", "2026-06-12T00:00:00Z")
+    c = cp.set_room(c, cp.rectangular_room(8, 6, 3))
+    c = cp.add_device(c, cp.create_microphone_array("A1", "Array"))
+    c = cp.set_device_position(c, "A1", Point2D(4, 3))
+    arr = cp.find_device(c, "A1")
+    arr.zones = [
+        cp.CoverageZone("p1", "dynamic", RectShape(Point2D(6.5, 2.5), 1, 1), False, "Presenter"),
+        cp.CoverageZone("x1", "exclusion", RectShape(Point2D(0.5, 2.5), 1, 1), False, "Hallway"),
+    ]
+    win.state.set_config(c)
+    win.state.set_mode("live")
+    panel = win.panels["live"]
+    panel.refresh()
+    panel._live_design_from_zones()
+    text = panel.live_design_view.toPlainText()
+    # B1 per-band line + B2 curve table both land in the readout
+    assert "bands 250–8000 Hz" in text
+    assert "DI / beamwidth vs frequency (Presenter):" in text
+    assert "8000 Hz" in text
+    win.state.set_mode("design")

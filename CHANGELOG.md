@@ -7,6 +7,63 @@ camelCase keys) is identical to the TS version, so configs interoperate.
 
 ## [Unreleased]
 
+**Wideband (subband) beam design** — the published beam design is now verified
+across the speech band (250 Hz–8 kHz) instead of asserted at a single 1 kHz
+design frequency. Python-only, `conf_pipeline_control` only; the JSON config
+schema is unchanged.
+
+### Added
+- **Per-band design verification** (`beamformer.py`): `design_zone_beams`,
+  `design_from_bearings`, and `design_multi_bearings` re-derive the weights at
+  each **octave-band center** (250 / 500 / 1k / 2k / 4k / 8k Hz —
+  `SPEECH_OCTAVE_CENTERS_HZ`) by default and attach a `BandMetrics` per band to
+  each `ZoneBeam` (`band_metrics`: weights, pickup gain, WNG, DI, excluded-area
+  attenuation, per-band degradation note). `BeamDesign.band_freqs` records the
+  grid; `summary()` gains a per-beam band line (DI/WNG ranges + the worst
+  excluded leak and the band it occurs at). A custom grid is a parameter away
+  (`bands=(…)`); `bands=()` opts out (used by the auto-steer control loop, since
+  the live runtime re-derives weights per FFT bin anyway).
+- `freq_hz` is now documented as the **reference frequency**: the legacy scalar
+  fields (`pickup_gain_db`, `di_db`, `wng_db`, `exclusion_atten_db`, lobes) are
+  reported at it, unchanged — the single-frequency design is the `bands=()`
+  special case, so existing callers and serialized expectations are unaffected.
+- Tests (`tests/test_wideband.py`, 14): pickup unity and deep exclusion nulls at
+  **every** band center (zone + bearing + delay-and-sum paths), per-band WNG
+  surfacing the low-frequency cost, single-frequency equivalence at each center,
+  custom/empty/invalid grids, dead-capsule zero weights per band, summary
+  content, and a numpy cross-check that the stdlib per-band weights equal the
+  live runtime's per-FFT-bin weights (skipped without the `[control]` extra).
+
+**Broadband verification curves** — directivity index and beamwidth as a
+*function of frequency*, turning the README's honest-fidelity note from an
+assertion into a measured result.
+
+### Added
+- **`frequency_curves(design)`** (`beamformer.py`) → one
+  `BeamFrequencyCurve` per beam: DI, −3 dB beamwidth, WNG, and lobe/grating
+  counts at each frequency of a grid (default: **third-octave centers**,
+  250 Hz–8 kHz — `SPEECH_THIRD_OCTAVE_CENTERS_HZ`), re-deriving the weights per
+  point with the same formula the live runtime applies per FFT bin. Pure stdlib.
+  `BeamFrequencyCurve.table()` renders an aligned text table with grating-lobe
+  warnings and per-point degradation notes.
+- **GUI**: the Live panel's *Design beam from zones* readout now appends the
+  DI/beamwidth-vs-frequency table for the first beam, under the azimuth
+  sparkline — the canvas readout shows where the beam narrows, where
+  superdirectivity pays off, and where grating lobes start.
+- Tests (+7): curve shape/grid, known-geometry physics on the 10 cm aperture
+  (DI rises ≥ 2 dB and beamwidth at 8 kHz < half its 250 Hz value for
+  delay-and-sum; superdirective beats delay-and-sum by > 2 dB DI at 250–630 Hz),
+  octave-grid consistency with `BandMetrics`, empty-design/bad-grid handling,
+  table content, and a GUI smoke test asserting the readout carries both the
+  per-band line and the curve table.
+
+### Notes
+- The live overlap-add path was **already broadband-correct** (it re-derives
+  weights per FFT bin from the design's directions); what was narrowband was the
+  *published verification*. This release closes that gap — the readout now
+  proves what the runtime actually does, honest about where physics degrades
+  (per-band WNG/DI make the low-band cost visible).
+
 **Repository hygiene** — no engine, schema, or GUI behaviour changes.
 
 ### Added

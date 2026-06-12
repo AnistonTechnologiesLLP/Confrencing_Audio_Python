@@ -25,9 +25,15 @@ from __future__ import annotations
 import cmath
 import math
 from dataclasses import dataclass
+from typing import Optional, Sequence
 
 from .geometry import SOUND_SPEED_MPS, ArrayGeometry
-from .model import DEFAULT_DESIGN_FREQ_HZ, RESPONSE_FLOOR_DB
+from .model import (
+    DEFAULT_DESIGN_FREQ_HZ,
+    RESPONSE_FLOOR_DB,
+    SPEECH_OCTAVE_CENTERS_HZ,
+    SPEECH_THIRD_OCTAVE_CENTERS_HZ,
+)
 from .steering import Direction
 
 Complex = complex
@@ -383,8 +389,30 @@ def talker_leakage_db(config, array_id, geom, weights, freq_hz) -> list:
 # Zone-driven design (the app-facing entry point)
 # --------------------------------------------------------------------------- #
 @dataclass(frozen=True)
+class BandMetrics:
+    """One frequency band's weights + verification numbers for a beam.
+
+    The wideband design recomputes the weights at each band center (the same
+    math the live runtime evaluates per FFT bin), so these numbers *prove* the
+    beam across the speech band instead of asserting it at one frequency.
+    ``note`` is set when the band had to drop its nulls (degraded design)."""
+
+    freq_hz: float
+    weights: tuple[Complex, ...]
+    pickup_gain_db: float            # response at the look direction (~0 dB)
+    wng_db: float                    # white-noise gain at this band
+    di_db: float                     # directivity index at this band
+    exclusion_atten_db: tuple[float, ...]  # gain at each excluded direction (≤ 0 = good)
+    note: str = ""
+
+
+@dataclass(frozen=True)
 class ZoneBeam:
-    """A beam designed for one pickup zone, with verification numbers."""
+    """A beam designed for one pickup zone, with verification numbers.
+
+    The scalar fields are reported at the design's **reference frequency**
+    (``BeamDesign.freq_hz``); ``band_metrics`` carries the same numbers per
+    band across the speech band (empty when the design opted out)."""
 
     zone_id: str
     label: str
@@ -400,6 +428,7 @@ class ZoneBeam:
     n_grating: int = 0               # grating lobes (near-full off-target pickup)
     n_nulls: int = 0                 # total nulls applied (exclusions + out-of-zone talkers)
     note: str = ""
+    band_metrics: tuple[BandMetrics, ...] = ()   # per-band verification (wideband design)
 
 
 # beamforming modes
@@ -407,10 +436,63 @@ MODE_DELAYSUM = "delaysum"
 MODE_SUPERDIRECTIVE = "superdirective"
 
 
+def _weights_for(
+    geom: ArrayGeometry, look: Direction, nulls: list[Direction], freq_hz: float, mode: str, loading: float
+) -> list[Complex]:
+    """Mode-dispatched weights at one frequency (the shared design formula)."""
+    if mode == MODE_SUPERDIRECTIVE:
+        return superdirective_weights(geom, look, nulls, freq_hz, loading=loading)
+    return lcmv_weights(geom, look, nulls, freq_hz) if nulls else delay_and_sum_weights(geom, look, freq_hz)
+
+
+def _coerce_bands(bands: Optional[Sequence[float]]) -> tuple[float, ...]:
+    """``None`` → the speech-band octave grid; ``()`` → no band verification."""
+    if bands is None:
+        return SPEECH_OCTAVE_CENTERS_HZ
+    out = tuple(float(b) for b in bands)
+    if any(b <= 0 for b in out):
+        raise ValueError("band centers must be positive frequencies (Hz)")
+    return out
+
+
+def _band_metrics_for_look(
+    geom: ArrayGeometry,
+    look_dir: Direction,
+    use_nulls: list[Direction],
+    bands: tuple[float, ...],
+    mode: str,
+    loading: float,
+    atten_dirs: list[Direction],
+) -> tuple[BandMetrics, ...]:
+    """Redesign + verify the beam at each band center. A band whose null set
+    turns singular falls back to no nulls for that band, with a note — degraded
+    bands are reported, never hidden."""
+    out = []
+    for f in bands:
+        note = ""
+        try:
+            w = _weights_for(geom, look_dir, use_nulls, f, mode, loading)
+        except ValueError as exc:
+            w = _weights_for(geom, look_dir, [], f, mode, loading)
+            note = f"no nulls at this band: {exc}"
+        out.append(
+            BandMetrics(
+                freq_hz=f,
+                weights=tuple(w),
+                pickup_gain_db=response_db(w, geom, look_dir.unit, f),
+                wng_db=white_noise_gain_db(w, geom, look_dir, f),
+                di_db=directivity_index_db(w, geom, look_dir, f),
+                exclusion_atten_db=tuple(response_db(w, geom, d.unit, f) for d in atten_dirs),
+                note=note,
+            )
+        )
+    return tuple(out)
+
+
 @dataclass(frozen=True)
 class BeamDesign:
     array_id: str
-    freq_hz: float
+    freq_hz: float                               # reference frequency for the scalar fields
     geometry: ArrayGeometry
     beams: tuple[ZoneBeam, ...]
     exclusion_labels: tuple[str, ...]
@@ -418,6 +500,7 @@ class BeamDesign:
     null_dirs: tuple[Direction, ...] = ()        # ALL nulls applied (exclusions + out-of-zone talkers)
     mode: str = MODE_SUPERDIRECTIVE
     loading: float = 0.05                        # diagonal loading (superdirective)
+    band_freqs: tuple[float, ...] = ()           # wideband verification grid (Hz; empty = opted out)
 
     def summary(self) -> str:
         mode_label = "superdirective" if self.mode == MODE_SUPERDIRECTIVE else "delay-and-sum"
@@ -445,6 +528,22 @@ class BeamDesign:
             if b.note:
                 line += f"  [{b.note}]"
             lines.append(line)
+            if b.band_metrics:
+                m = b.band_metrics
+                di = [x.di_db for x in m]
+                wng = [x.wng_db for x in m]
+                band_line = (
+                    f"    bands {m[0].freq_hz:.0f}–{m[-1].freq_hz:.0f} Hz ({len(m)}): "
+                    f"DI {min(di):+.1f}…{max(di):+.1f} dB, WNG {min(wng):+.1f}…{max(wng):+.1f} dB"
+                )
+                leaks = [(x.freq_hz, max(x.exclusion_atten_db)) for x in m if x.exclusion_atten_db]
+                if leaks:
+                    worst_f, worst_leak = max(leaks, key=lambda t: t[1])
+                    band_line += f", worst excluded leak {worst_leak:+.0f} dB @ {worst_f:.0f} Hz"
+                degraded = sum(1 for x in m if x.note)
+                if degraded:
+                    band_line += f"  ⚠ {degraded} band(s) degraded (nulls dropped)"
+                lines.append(band_line)
         return "\n".join(lines)
 
 
@@ -484,25 +583,16 @@ def _coerce_direction(d) -> Direction:
     return bearing_direction(float(az), float(off))
 
 
-def _beam_for_look(geom, look_dir, applied_nulls, freq_hz, mode, loading, *, label, base_note):
+def _beam_for_look(geom, look_dir, applied_nulls, freq_hz, mode, loading, *, label, base_note, bands=()):
     """Build one verified :class:`ZoneBeam` toward ``look_dir`` nulling
     ``applied_nulls`` (shared across a multi-look design)."""
-    def _weights(use_nulls):
-        if mode == MODE_SUPERDIRECTIVE:
-            return superdirective_weights(geom, look_dir, use_nulls, freq_hz, loading=loading)
-        return (
-            lcmv_weights(geom, look_dir, use_nulls, freq_hz)
-            if use_nulls
-            else delay_and_sum_weights(geom, look_dir, freq_hz)
-        )
-
     note = base_note
     use_nulls = applied_nulls
     try:
-        w = _weights(use_nulls)
+        w = _weights_for(geom, look_dir, use_nulls, freq_hz, mode, loading)
     except ValueError as exc:
         use_nulls = []
-        w = _weights([])
+        w = _weights_for(geom, look_dir, [], freq_hz, mode, loading)
         note = f"no nulls: {exc}"
 
     atten = tuple(response_db(w, geom, d.unit, freq_hz) for d in applied_nulls)
@@ -522,17 +612,21 @@ def _beam_for_look(geom, look_dir, applied_nulls, freq_hz, mode, loading, *, lab
         n_grating=len(lobes.grating_lobes),
         n_nulls=len(use_nulls),
         note=note,
+        band_metrics=_band_metrics_for_look(geom, look_dir, use_nulls, bands, mode, loading, applied_nulls),
     )
 
 
-def _design_from_directions(geom, look_dirs, null_dirs, *, freq_hz, mode, loading, array_id):
+def _design_from_directions(geom, look_dirs, null_dirs, *, freq_hz, mode, loading, array_id, bands=None):
     """Shared core: one shared null set, one beam per look direction."""
+    band_grid = _coerce_bands(bands)
     budget = max(0, geom.n_active - 1)
     applied = list(null_dirs)[:budget]
     dropped = len(null_dirs) - len(applied)
     base_note = f"null budget {budget}: {dropped} dropped" if dropped else ""
     beams = tuple(
-        _beam_for_look(geom, ld, applied, freq_hz, mode, loading, label="target", base_note=base_note)
+        _beam_for_look(
+            geom, ld, applied, freq_hz, mode, loading, label="target", base_note=base_note, bands=band_grid
+        )
         for ld in look_dirs
     )
     return BeamDesign(
@@ -545,6 +639,7 @@ def _design_from_directions(geom, look_dirs, null_dirs, *, freq_hz, mode, loadin
         null_dirs=tuple(applied),
         mode=mode,
         loading=loading,
+        band_freqs=band_grid,
     )
 
 
@@ -558,6 +653,7 @@ def design_from_bearings(
     loading: float = 0.05,
     array_id: str = "array",
     label: str = "target",
+    bands: Optional[Sequence[float]] = None,
 ) -> BeamDesign:
     """Design a single beam toward a **bearing** and null other bearings — the
     coverage-area feature without needing a room/zone :class:`SystemConfig`.
@@ -572,11 +668,20 @@ def design_from_bearings(
 
     Nulls beyond the array's budget (``n_active − 1``) are dropped with a note; a
     null coinciding with the look direction falls back to no nulls (you cannot
-    null an area you are also steering at)."""
+    null an area you are also steering at).
+
+    The design is **wideband by default**: it is re-derived and verified at each
+    band center in ``bands`` (``None`` → the speech-band octave grid, 250 Hz–8 kHz;
+    see :data:`~conf_pipeline_control.model.SPEECH_OCTAVE_CENTERS_HZ`) and the
+    per-band numbers land in ``ZoneBeam.band_metrics``. ``freq_hz`` is the
+    *reference* band the scalar fields are reported at. Pass ``bands=()`` to skip
+    band verification (e.g. in a control loop — the live runtime re-derives the
+    weights per FFT bin either way)."""
     look_dir = _coerce_direction(look)
     null_dirs = [_coerce_direction(n) for n in nulls]
     return _design_from_directions(
-        geom, [look_dir], null_dirs, freq_hz=freq_hz, mode=mode, loading=loading, array_id=array_id
+        geom, [look_dir], null_dirs, freq_hz=freq_hz, mode=mode, loading=loading, array_id=array_id,
+        bands=bands,
     )
 
 
@@ -589,6 +694,7 @@ def design_multi_bearings(
     mode: str = MODE_SUPERDIRECTIVE,
     loading: float = 0.05,
     array_id: str = "array",
+    bands: Optional[Sequence[float]] = None,
 ) -> BeamDesign:
     """Multi-look version of :func:`design_from_bearings`: steer one beam at
     **each** of ``looks`` while nulling **each** of ``nulls`` (one shared null
@@ -596,11 +702,14 @@ def design_multi_bearings(
     this captures several in-area talkers at once and rejects the out-of-area
     ones. Used by :mod:`conf_pipeline_control.autosteer` to turn the current DOA
     detections into a live beam. ``looks``/``nulls`` are :class:`Direction`\\ s or
-    ``(azimuth_deg, off_nadir_deg)`` tuples. Empty ``looks`` ⇒ an empty design."""
+    ``(azimuth_deg, off_nadir_deg)`` tuples. Empty ``looks`` ⇒ an empty design.
+    ``bands`` as in :func:`design_from_bearings` (octave grid by default;
+    ``()`` skips band verification for hot loops)."""
     look_dirs = [_coerce_direction(d) for d in looks]
     null_dirs = [_coerce_direction(d) for d in nulls]
     return _design_from_directions(
-        geom, look_dirs, null_dirs, freq_hz=freq_hz, mode=mode, loading=loading, array_id=array_id
+        geom, look_dirs, null_dirs, freq_hz=freq_hz, mode=mode, loading=loading, array_id=array_id,
+        bands=bands,
     )
 
 
@@ -614,6 +723,7 @@ def design_zone_beams(
     mode: str = MODE_SUPERDIRECTIVE,
     loading: float = 0.05,
     suppress_outside_talkers: bool = False,
+    bands: Optional[Sequence[float]] = None,
 ) -> BeamDesign:
     """Design one beam per pickup zone on ``array_id``, nulling exclusion zones.
 
@@ -624,15 +734,17 @@ def design_zone_beams(
     null too — so people outside the pickup area are actively subtracted (up to the
     array's null budget, ``n_active − 1``). Pure: returns a :class:`BeamDesign`;
     falls back to fewer nulls (with a note) when the budget is exceeded.
+
+    The design is **wideband by default**: re-derived and verified at each band
+    center in ``bands`` (``None`` → the speech-band octave grid, 250 Hz–8 kHz),
+    with per-band numbers in ``ZoneBeam.band_metrics`` — so pickup and excluded-
+    area attenuation are *proven* across the speech band, not just at ``freq_hz``
+    (the reference band for the scalar fields). ``bands=()`` opts out.
     """
     from conf_pipeline import is_pickup_zone, point_in_shape  # noqa
     from .steering import exclusion_directions, look_direction, pickup_directions
 
-    def _weights(look, use_nulls):
-        if mode == MODE_SUPERDIRECTIVE:
-            return superdirective_weights(geom, look, use_nulls, freq_hz, loading=loading)
-        return lcmv_weights(geom, look, use_nulls, freq_hz) if use_nulls else delay_and_sum_weights(geom, look, freq_hz)
-
+    band_grid = _coerce_bands(bands)
     pickups = pickup_directions(config, array_id)
     exclusions = exclusion_directions(config, array_id)
     excl_dirs = [d for _z, d in exclusions]
@@ -657,10 +769,10 @@ def design_zone_beams(
         note = f"null budget {budget}: {dropped} dropped" if dropped else ""
         use_nulls = applied_nulls
         try:
-            w = _weights(look, use_nulls)
+            w = _weights_for(geom, look, use_nulls, freq_hz, mode, loading)
         except ValueError as exc:
             use_nulls = []
-            w = _weights(look, [])
+            w = _weights_for(geom, look, [], freq_hz, mode, loading)
             note = f"no nulls: {exc}"
         atten = tuple(response_db(w, geom, d.unit, freq_hz) for d in excl_dirs)
         lobes = analyze_lobes(w, geom, freq_hz, off_nadir_deg=look.off_nadir_deg)
@@ -680,6 +792,7 @@ def design_zone_beams(
                 n_grating=len(lobes.grating_lobes),
                 n_nulls=len(use_nulls),
                 note=note,
+                band_metrics=_band_metrics_for_look(geom, look, use_nulls, band_grid, mode, loading, excl_dirs),
             )
         )
     return BeamDesign(
@@ -692,4 +805,100 @@ def design_zone_beams(
         null_dirs=tuple(applied_nulls),
         mode=mode,
         loading=loading,
+        band_freqs=band_grid,
     )
+
+
+# --------------------------------------------------------------------------- #
+# Broadband verification curves — DI / beamwidth as a function of frequency
+# --------------------------------------------------------------------------- #
+@dataclass(frozen=True)
+class BeamFrequencyCurve:
+    """DI / beamwidth / WNG / lobe structure vs frequency for one beam.
+
+    This is the README's "honest fidelity note" turned into a measurement: it
+    shows *where* the beam narrows, where superdirectivity buys directivity,
+    where white-noise gain pays for it, and where grating lobes appear. All
+    parallel tuples, one entry per frequency in ``freqs_hz``. ``notes[i]`` is
+    non-empty when that frequency's null set had to be dropped (degraded)."""
+
+    zone_id: str
+    label: str
+    freqs_hz: tuple[float, ...]
+    di_db: tuple[float, ...]
+    beamwidth_3db_deg: tuple[float, ...]
+    wng_db: tuple[float, ...]
+    n_lobes: tuple[int, ...]
+    n_grating: tuple[int, ...]
+    notes: tuple[str, ...]
+
+    def table(self) -> str:
+        """Aligned text table for the design readout."""
+        name = self.label or self.zone_id
+        lines = [
+            f"DI / beamwidth vs frequency ({name}):",
+            "   freq      DI   beamwidth     WNG",
+        ]
+        for i, f in enumerate(self.freqs_hz):
+            line = (
+                f"  {f:5.0f} Hz {self.di_db[i]:+5.1f} dB  {self.beamwidth_3db_deg[i]:5.1f}°"
+                f"  {self.wng_db[i]:+5.1f} dB"
+            )
+            if self.n_grating[i]:
+                line += f"  ⚠ {self.n_grating[i]} grating"
+            if self.notes[i]:
+                line += f"  [{self.notes[i]}]"
+            lines.append(line)
+        return "\n".join(lines)
+
+
+def frequency_curves(
+    design: BeamDesign,
+    *,
+    freqs: Optional[Sequence[float]] = None,
+    steps: int = 360,
+) -> tuple[BeamFrequencyCurve, ...]:
+    """DI and beamwidth as a function of frequency for each beam of ``design``.
+
+    Re-derives the beam's weights at every frequency in ``freqs`` (``None`` →
+    the third-octave grid, 250 Hz–8 kHz) — the same formula the live runtime
+    applies per FFT bin — and measures directivity index, −3 dB beamwidth,
+    white-noise gain, and lobe/grating counts at each. ``steps`` is the azimuth
+    resolution of the beamwidth/lobe sweep (360 → 1°). Pure stdlib; cost is one
+    small solve + one pattern sweep per frequency per beam."""
+    grid = tuple(float(f) for f in (freqs if freqs is not None else SPEECH_THIRD_OCTAVE_CENTERS_HZ))
+    if any(f <= 0 for f in grid):
+        raise ValueError("curve frequencies must be positive (Hz)")
+    geom = design.geometry
+    out = []
+    for beam in design.beams:
+        nulls_eff = list(design.null_dirs) if beam.nulled else []
+        di, bw, wng, n_lobes, n_grating, notes = [], [], [], [], [], []
+        for f in grid:
+            note = ""
+            try:
+                w = _weights_for(geom, beam.look, nulls_eff, f, design.mode, design.loading)
+            except ValueError as exc:
+                w = _weights_for(geom, beam.look, [], f, design.mode, design.loading)
+                note = f"no nulls at this band: {exc}"
+            lobes = analyze_lobes(w, geom, f, off_nadir_deg=beam.look.off_nadir_deg, steps=steps)
+            di.append(directivity_index_db(w, geom, beam.look, f))
+            bw.append(lobes.beamwidth_3db_deg)
+            wng.append(white_noise_gain_db(w, geom, beam.look, f))
+            n_lobes.append(lobes.n_lobes)
+            n_grating.append(len(lobes.grating_lobes))
+            notes.append(note)
+        out.append(
+            BeamFrequencyCurve(
+                zone_id=beam.zone_id,
+                label=beam.label,
+                freqs_hz=grid,
+                di_db=tuple(di),
+                beamwidth_3db_deg=tuple(bw),
+                wng_db=tuple(wng),
+                n_lobes=tuple(n_lobes),
+                n_grating=tuple(n_grating),
+                notes=tuple(notes),
+            )
+        )
+    return tuple(out)

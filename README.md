@@ -291,8 +291,11 @@ import conf_pipeline_control as cc
 
 c = ...                                  # a config with an array + pickup/exclusion zones
 geom = cc.sensibel_8(radius_m=0.05)      # set radius to your array's actual value
-design = cc.design_zone_beams(c, "A", geom, freq_hz=1000)
+design = cc.design_zone_beams(c, "A", geom)
 print(design.summary())                  # pickup gain, white-noise gain, excluded-area leak per zone
+for m in design.beams[0].band_metrics:   # …and the same numbers per octave band
+    print(f"{m.freq_hz:6.0f} Hz: pickup {m.pickup_gain_db:+.1f} dB, "
+          f"DI {m.di_db:+.1f} dB, excluded leak {max(m.exclusion_atten_db):+.0f} dB")
 ```
 
 `design_zone_beams` steers a beam toward each **Records / dedicated** zone and
@@ -301,6 +304,22 @@ places spatial **nulls** toward each **No-pickup (exclusion)** zone (pure stdlib
 directivity directly (`cc.beam_pattern_azimuth`, `cc.response_db`,
 `cc.directivity_index_db`) to *prove* a pickup area is on-axis and an excluded
 area is attenuated.
+
+**Wideband by default** — speech spans ~250 Hz–8 kHz, so the design is re-derived
+and verified at each **octave-band center** (250…8000 Hz), not just at one
+frequency: each beam carries per-band pickup / DI / WNG / excluded-leak numbers
+(`ZoneBeam.band_metrics`), and `freq_hz` is just the *reference* band for the
+headline scalars. This matches what the live runtime actually does (it applies
+the design **per FFT bin**); pass `bands=()` to skip the per-band verification
+in a hot loop, or your own list of centers for a finer grid.
+
+**Measured, not asserted** — `cc.frequency_curves(design)` returns DI, −3 dB
+beamwidth, WNG, and lobe/grating counts **as a function of frequency**
+(third-octave grid by default) for each beam, with a `table()` text rendering;
+the Live panel's design readout shows it under the azimuth sparkline. On the
+8-capsule / 10 cm aperture this is the fidelity note as numbers: the beam
+narrows from ~130° at 250 Hz to ~20–30° at 8 kHz while grating lobes start
+appearing in the top octave.
 
 **Superdirective by default** — a small array is barely directional with plain
 delay-and-sum at speech frequencies, so it picks up diffuse background almost as
