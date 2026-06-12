@@ -21,8 +21,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-import conf_pipeline as cp
-
+from . import workflow
 from .state import AppState
 
 
@@ -112,24 +111,21 @@ class GuidePanel(QFrame):
         state.changed.connect(self.refresh)
         self.refresh()
 
-    # ---- predicates over the live config ----
+    # ---- predicates over the live config (shared with the ModeBar dots) ----
     def _has_room(self, c) -> bool:
-        return c.room is not None and len(c.room.vertices) >= 3
+        return workflow.has_room(c)
 
     def _has_array(self, c) -> bool:
-        return any(d.type == "microphoneArray" for d in c.devices)
+        return workflow.has_array(c)
 
     def _has_zone(self, c) -> bool:
-        return any(d.type == "microphoneArray" and d.zones for d in c.devices)
+        return workflow.has_zone(c)
 
     def _has_talker(self, c) -> bool:
-        return len(c.talkers) > 0
+        return workflow.has_talker(c)
 
     def _is_optimized(self, c) -> bool:
-        # "optimized" ≈ arrays placed AND at least one route exists (auto-route ran)
-        arrays = [d for d in c.devices if d.type == "microphoneArray"]
-        placed = bool(arrays) and all(d.position is not None for d in arrays)
-        return placed and len(c.routes) > 0
+        return workflow.is_optimized(c)
 
     def refresh(self):
         c = self.state.config

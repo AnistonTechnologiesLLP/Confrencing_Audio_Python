@@ -17,6 +17,8 @@ class AppState(QObject):
     """Holds the current SystemConfig plus editor state. Emits ``changed`` on edits."""
 
     changed = Signal()
+    modeChanged = Signal(str)
+    liveOverlayChanged = Signal()
 
     def __init__(self) -> None:
         super().__init__()
@@ -26,6 +28,7 @@ class AppState(QObject):
         self.rooms = [{"id": "room-1", "config": self.config, "history": [self.config], "idx": 0, "last_deployed": None}]
         self.active_room = 0
         self.theme = "dark"
+        self.mode = "design"          # design | simulate | route | deploy | live
         self.tool = "select"          # select | connect | room | zone | talker
         self.view = "2d"              # 2d | 3d
         self.snap = 0.25
@@ -42,6 +45,24 @@ class AppState(QObject):
         self.sim_show_heatmap = False
         self.show_coverage = False                    # draw array coverage circles on the canvas
         self.calibrating = False                      # floor-plan scale calibration drag in progress
+        # ---- live-session overlay (transient view state; never in history) ----
+        # dict published by the Live panel while a session runs:
+        # {"array_id", "sector": (center, half_width, front_offset) | None,
+        #  "detections": [(azimuth_deg, salience_db, in_sector)], "level": 0..1,
+        #  "connected": bool}  — or None when idle.
+        self.live_overlay = None
+
+    # ---- mode ----
+    def set_mode(self, mode: str) -> None:
+        if mode == self.mode:
+            return
+        self.mode = mode
+        self.modeChanged.emit(mode)
+        self.changed.emit()
+
+    def set_live_overlay(self, data) -> None:
+        self.live_overlay = data
+        self.liveOverlayChanged.emit()
 
     # ---- history ----
     def set_config(self, new, record: bool = True) -> None:
