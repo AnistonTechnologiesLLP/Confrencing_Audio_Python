@@ -18,7 +18,16 @@ _key, _label, builder = SCENARIOS[0]
 win.state.set_config(builder())
 mode = sys.argv[3] if len(sys.argv) > 3 else "design"
 win.state.set_mode(mode)
-win.inspector.refresh() if hasattr(win, "inspector") else None
+if mode == "live":
+    win.panels["live"]._live_timer.stop()  # keep the injected overlay alive for the grab
+    aid = next((d.id for d in win.state.config.devices if d.type == "microphoneArray" and d.position), None)
+    win.state.set_live_overlay({
+        "array_id": aid,
+        "sector": (0.0, 60.0, 0.0),
+        "detections": [(15.0, 14.0, True), (-40.0, 9.0, True), (160.0, 7.0, False)],
+        "level": 0.65,
+        "connected": True,
+    })
 win.show()
 app.processEvents()
 out = sys.argv[1] if len(sys.argv) > 1 else "shot.png"

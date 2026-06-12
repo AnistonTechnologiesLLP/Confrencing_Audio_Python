@@ -150,6 +150,62 @@ def test_canvas_hover_cursor_all_tools(win):
         cv._update_hover_cursor(Point2D(3, 3), cv.view2d())  # must not raise
 
 
-def test_empty_canvas_paints(win):
+def test_empty_canvas_paints_in_all_modes(win):
     win.state.set_config(cp.create_config("Empty", "2026-06-11T00:00:00Z"))
-    win.canvas.repaint()  # empty-state hint path must not raise
+    for mode in ("design", "simulate", "route", "deploy", "live"):
+        win.state.set_mode(mode)
+        win.canvas.repaint()  # mode-aware empty-state path must not raise
+    win.state.set_mode("design")
+
+
+def test_live_overlay_paints_without_hardware(win):
+    c = cp.create_config("T", "2026-06-11T00:00:00Z")
+    c = cp.set_room(c, cp.rectangular_room(8, 6, 3))
+    c = cp.add_device(c, cp.create_microphone_array("A1", "Array"))
+    c = cp.set_device_position(c, "A1", Point2D(4, 3))
+    win.state.set_config(c)
+    win.state.set_mode("live")
+    win.state.set_live_overlay({
+        "array_id": "A1",
+        "sector": (0.0, 60.0, 37.0),
+        "detections": [(20.0, 12.0, True), (200.0, 6.0, False)],
+        "level": 0.7,
+        "connected": True,
+    })
+    win.canvas.repaint()  # wedge + rays + halo must not raise
+    win.state.set_live_overlay(None)
+    win.canvas.repaint()
+    win.state.set_mode("design")
+
+
+def test_deploy_badges_paint(win):
+    c = cp.create_config("T", "2026-06-11T00:00:00Z")
+    c = cp.set_room(c, cp.rectangular_room(8, 6, 3))
+    c = cp.add_device(c, cp.create_microphone_array("A1", "Array"))
+    c = cp.set_device_position(c, "A1", Point2D(4, 3))
+    win.state.set_config(c)
+    win.state.deploy()
+    c2 = cp.add_device(win.state.config, cp.create_processor("P1", "DSP"))
+    c2 = cp.set_device_position(c2, "P1", Point2D(6, 3))
+    win.state.set_config(c2)
+    win.state.set_mode("deploy")
+    win.canvas.repaint()  # added-device badge path must not raise
+    win.state.set_mode("design")
+
+
+def test_live_connect_disconnect_simulated(win, monkeypatch):
+    import conf_pipeline_gui.panels.live as live_mod
+
+    monkeypatch.setattr(live_mod.cc, "controls_available", lambda: False)
+    panel = win.panels["live"]
+    panel.refresh()
+    panel._live_toggle_connect()
+    assert panel._live_busy()
+    assert win.modebar._live_connected  # the LIVE dot went red
+    panel._tick_live_meter()            # simulated level + overlay publish
+    assert win.state.live_overlay is not None and win.state.live_overlay["connected"]
+    panel._live_toggle_connect()
+    assert not panel._live_busy()
+    assert not win.modebar._live_connected
+    panel._tick_live_meter()
+    assert win.state.live_overlay is None

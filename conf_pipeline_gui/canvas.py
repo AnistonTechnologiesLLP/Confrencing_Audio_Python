@@ -43,6 +43,17 @@ def _zone_style(ztype: str):
 
 REC_COLOR = "#3ddc97"  # placement-recommendation accent (green)
 
+# What each workflow mode may edit / emphasises on the canvas. Selection works
+# everywhere (cross-mode synergy); geometry editing is a DESIGN job, talkers
+# stay draggable in SIMULATE for what-if exploration.
+MODE_PROFILE = {
+    "design":   dict(edit=True,  drag_devices=True,  drag_talkers=True,  dim_zones=False, bold_routes=False),
+    "simulate": dict(edit=False, drag_devices=False, drag_talkers=True,  dim_zones=False, bold_routes=False),
+    "route":    dict(edit=False, drag_devices=False, drag_talkers=False, dim_zones=True,  bold_routes=True),
+    "deploy":   dict(edit=False, drag_devices=False, drag_talkers=False, dim_zones=True,  bold_routes=False),
+    "live":     dict(edit=False, drag_devices=False, drag_talkers=False, dim_zones=False, bold_routes=False),
+}
+
 
 def _lerp(a, b, t):
     return a + (b - a) * t
@@ -76,7 +87,17 @@ class Canvas(QWidget):
         self.coord_cb = None      # optional callback(str) for coordinate readout
         self._bg_pixmap = None    # cached floor-plan QPixmap
         self._bg_pixmap_key = None
+        self._diff_cache = None       # cached deployment diff for DEPLOY badges
+        self._diff_cache_key = None
         state.changed.connect(self.update)
+        state.liveOverlayChanged.connect(self._on_live_overlay)
+
+    def _profile(self) -> dict:
+        return MODE_PROFILE.get(getattr(self.state, "mode", "design"), MODE_PROFILE["design"])
+
+    def _on_live_overlay(self):
+        if getattr(self.state, "mode", "design") == "live":
+            self.update()
 
     # ----------------------------------------------------------------- helpers
     @property
@@ -491,6 +512,7 @@ class Canvas(QWidget):
     # ---- 2D ----
     def _paint2d(self, p):
         v = self.view2d()
+        prof = self._profile()
         minx, miny, maxx, maxy = v[3], v[4], v[5], v[6]
         self._paint_background(p, v)
         for x in range(math.ceil(minx), math.floor(maxx) + 1):
@@ -507,19 +529,25 @@ class Canvas(QWidget):
             p.setBrush(_qc("#6d8bff", 13))
             p.setPen(QPen(QColor("#46568f"), 2))
             p.drawPolygon(poly)
-            if self.state.tool == "select":
+            if self.state.tool == "select" and prof["edit"]:
                 p.setBrush(QColor("#9db4ff"))
                 p.setPen(Qt.NoPen)
                 for p2 in verts:
                     s = self.w2s(p2, v)
                     p.drawEllipse(s, 4, 4)
         self._paint_room_dims(p, v)
-        # zones
+        # zones (dimmed in modes that emphasise something else)
+        dim = prof["dim_zones"]
         for d in self.cfg.devices:
             if d.type != "microphoneArray":
                 continue
             for z in d.zones:
                 fill, stroke, dash, glyph = _zone_style(z.type)
+                if dim:
+                    fill = QColor(fill)
+                    fill.setAlpha(12)
+                    stroke = QColor(stroke)
+                    stroke.setAlpha(80)
                 corners = [self.w2s(c, v) for c in self.shape_corners(self._zone_shape_live(d.id, z))]
                 p.setBrush(fill)
                 pen = QPen(stroke, 1.5)
@@ -528,10 +556,10 @@ class Canvas(QWidget):
                 p.setPen(pen)
                 p.drawPolygon(QPolygonF(corners))
                 c0 = corners[0]
-                p.setPen(QColor("#cdd6f4"))
+                p.setPen(_qc("#cdd6f4", 110 if dim else 255))
                 p.setFont(QFont("Segoe UI", 8))
                 p.drawText(QPointF(c0.x() + 4, c0.y() + 13), f"{glyph} {z.label}")
-                if self.state.tool == "select":
+                if self.state.tool == "select" and prof["edit"]:
                     br = corners[2]
                     p.setBrush(QColor("#ffffff"))
                     p.setPen(QPen(stroke, 1))
@@ -583,6 +611,10 @@ class Canvas(QWidget):
             p.drawEllipse(QPointF(s.x() + 8, s.y() - 9), 3.2, 3.2)
             self._label(p, s.x() + 12, s.y() + 4, t.label, "#ffd6ea")
         self._paint_recommendation(p, v=v)
+        if getattr(self.state, "mode", "design") == "deploy":
+            self._paint_deploy_badges(p, v)
+        if getattr(self.state, "mode", "design") == "live":
+            self._paint_live_overlay(p, v)
         # connect pending
         if self.state.tool == "connect" and self.connect_from and isinstance(self.hover, QPointF):
             d = next((x for x in self.cfg.devices if x.id == self.connect_from), None)
@@ -620,6 +652,7 @@ class Canvas(QWidget):
 
     def _draw_routes_2d(self, p, v):
         err, _ = self._error_refs()
+        bold = self._profile()["bold_routes"]
         for r in self.cfg.routes:
             fp = cp.find_port(self.cfg, r.from_port_id)
             tp = cp.find_port(self.cfg, r.to_port_id)
@@ -632,9 +665,99 @@ class Canvas(QWidget):
             A = self.w2s(self.device_pos(a), v)
             B = self.w2s(self.device_pos(b), v)
             color = QColor("#ff6b81") if r.id in err else (QColor("#5fb6ff") if fp.transport == "dante" else QColor("#ffc06a"))
-            p.setPen(QPen(color, 2))
+            p.setPen(QPen(color, 3.2 if bold else 2))
             p.drawLine(A, B)
             self._arrowhead(p, A, B, color)
+            if bold:
+                mid = QPointF((A.x() + B.x()) / 2, (A.y() + B.y()) / 2)
+                self._label(p, mid.x() + 5, mid.y() - 4, fp.transport)
+
+    def _paint_deploy_badges(self, p, v):
+        """DEPLOY mode: mark devices added (+) or changed (~) since the last deploy."""
+        room = self.state.rooms[self.state.active_room]
+        base = room.get("last_deployed")
+        if base is None:
+            return
+        key = (id(base), id(self.cfg))
+        if self._diff_cache_key != key:
+            try:
+                self._diff_cache = cp.deployment_diff(base, self.cfg)
+            except Exception:
+                self._diff_cache = None
+            self._diff_cache_key = key
+        diff = self._diff_cache
+        if diff is None or diff.identical:
+            return
+        marks = {**{d: ("+", "#3ddc97") for d in diff.devices_added},
+                 **{d: ("~", "#f7c948") for d in diff.devices_changed}}
+        for d in self.cfg.devices:
+            if d.id in marks and d.position:
+                glyph, color = marks[d.id]
+                s = self.w2s(d.position, v)
+                p.setBrush(_qc(color, 230))
+                p.setPen(QPen(QColor("#070a12"), 1.4))
+                p.drawEllipse(QPointF(s.x() - 13, s.y() - 13), 7.5, 7.5)
+                p.setPen(QColor("#070a12"))
+                p.setFont(QFont("Segoe UI", 9, QFont.Bold))
+                p.drawText(QRectF(s.x() - 20.5, s.y() - 21, 15, 16), Qt.AlignCenter, glyph)
+
+    # ---- LIVE operations overlay (sector wedge + DOA rays + level halo) ----
+    def _live_array_pos(self, ov):
+        aid = ov.get("array_id")
+        d = next((x for x in self.cfg.devices if x.id == aid and x.position), None)
+        if d is None:
+            d = next((x for x in self.cfg.devices if x.type == "microphoneArray" and x.position), None)
+        return d.position if d else None
+
+    @staticmethod
+    def _bearing_dir(bearing_deg):
+        """Compass bearing (0° = +Y, clockwise) → world-space unit vector."""
+        rad = math.radians(bearing_deg)
+        return math.sin(rad), math.cos(rad)
+
+    def _paint_live_overlay(self, p, v):
+        ov = getattr(self.state, "live_overlay", None)
+        if not ov or not ov.get("connected"):
+            return
+        pos = self._live_array_pos(ov)
+        if pos is None:
+            return
+        c = self.w2s(pos, v)
+        # level halo: breathes with the output meter
+        lvl = max(0.0, min(1.0, float(ov.get("level") or 0.0)))
+        p.setPen(Qt.NoPen)
+        p.setBrush(_qc("#ff6b81", 26 + int(lvl * 60)))
+        p.drawEllipse(c, 16 + lvl * 26, 16 + lvl * 26)
+        # steering sector (auto-steer): drawn relative to the room's +Y "front" —
+        # detections are shown front-relative (bearing − front_offset), matching
+        # the sector-gate convention in conf_pipeline_control.doa
+        sector = ov.get("sector")
+        front = sector[2] if sector else 0.0
+        if sector:
+            center_deg, half_deg, _off = sector
+            radius_m = 2.5
+            path = QPainterPath(c)
+            steps = 24
+            for i in range(steps + 1):
+                b = center_deg - half_deg + (2 * half_deg) * i / steps
+                dx, dy = self._bearing_dir(b)
+                path.lineTo(self.w2s(Point2D(pos.x + dx * radius_m, pos.y + dy * radius_m), v))
+            path.closeSubpath()
+            p.setBrush(_qc("#6d8bff", 34))
+            pen = QPen(_qc("#85a0ff", 170), 1.4)
+            pen.setDashPattern([4, 3])
+            p.setPen(pen)
+            p.drawPath(path)
+        # DOA rays: green = in-sector (followed), red = outside (nulled)
+        for az, sal, in_sector in ov.get("detections") or []:
+            dx, dy = self._bearing_dir(az - front)
+            ray_m = 3.5
+            tip = self.w2s(Point2D(pos.x + dx * ray_m, pos.y + dy * ray_m), v)
+            color = "#3ddc97" if in_sector else "#ff6b81"
+            alpha = int(max(90, min(255, 130 + sal * 8)))
+            p.setPen(QPen(_qc(color, alpha), 2.4))
+            p.drawLine(c, tip)
+            self._label(p, tip.x() + 4, tip.y(), f"{az:.0f}° · {sal:.0f} dB", color)
 
     def _arrowhead(self, p, A, B, color):
         ang = math.atan2(B.y() - A.y(), B.x() - A.x())
@@ -815,9 +938,9 @@ class Canvas(QWidget):
         self.state.cam["dist"] = max(3.0, min(70.0, self.state.cam["dist"] * math.exp(e.angleDelta().y() * 0.0012 * -1)))
         self.update()
 
-    # ---- right-click context menu (2D) ----
+    # ---- right-click context menu (2D; geometry editing is a DESIGN job) ----
     def contextMenuEvent(self, e):
-        if self.state.view != "2d":
+        if self.state.view != "2d" or getattr(self.state, "mode", "design") != "design":
             return
         from PySide6.QtWidgets import QMenu
         v = "2d"
@@ -935,7 +1058,13 @@ class Canvas(QWidget):
         try:
             if tool == "select":
                 hit = self._hit_test(w, v)
-                self.drag = hit if hit and hit["kind"] != "route" else None
+                prof = self._profile()
+                drag_ok = hit is not None and (
+                    (hit["kind"] == "device" and prof["drag_devices"])
+                    or (hit["kind"] == "talker" and prof["drag_talkers"])
+                    or (hit["kind"] in ("zone-move", "zone-resize", "vertex") and prof["edit"])
+                )
+                self.drag = hit if drag_ok and hit["kind"] != "route" else None
                 if hit and hit["kind"] == "device":
                     self.state.select({"kind": "device", "id": hit["id"]})
                 elif hit and hit["kind"] == "talker":

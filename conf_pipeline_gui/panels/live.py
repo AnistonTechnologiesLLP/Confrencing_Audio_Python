@@ -834,12 +834,36 @@ class LivePanel(PanelBase):
         if hasattr(w, "_live_session_changed"):
             w._live_session_changed(self._live_busy())
 
+    def _publish_overlay(self):
+        """Feed the canvas LIVE operations view (sector wedge, DOA rays, halo)."""
+        if not self._live_busy():
+            if self.state.live_overlay is not None:
+                self.state.set_live_overlay(None)
+            return
+        sector = None
+        detections = []
+        if self._autosteer is not None:
+            s = self._autosteer.sector
+            sector = (s.center_deg, s.half_width_deg, s.front_offset_deg)
+            try:
+                detections = [(d.azimuth_deg, d.salience_db, d.in_sector) for d in self._autosteer.detections()]
+            except Exception:
+                detections = []
+        self.state.set_live_overlay({
+            "array_id": self._live_array_id(),
+            "sector": sector,
+            "detections": detections,
+            "level": self.live_meter.value() / 100.0,
+            "connected": True,
+        })
+
     def _tick_live_meter(self):
         """Update the level meter on a dB scale (−60 dB → 0 %, 0 dB → 100 %), so
         normal speech picked up by a ceiling array is clearly visible rather than
         a sliver on a linear scale."""
         if self._autosteer is not None:
             self._tick_autosteer()
+            self._publish_overlay()
             return
         if self._clean_monitor is not None:
             st = self._clean_monitor.state()
@@ -855,6 +879,7 @@ class LivePanel(PanelBase):
             if st.error:
                 msg += f" · ERROR: {st.error[:50]}"
             self.live_octovox_status.setText(msg)
+            self._publish_overlay()
             return
         if self._live_ctl is not None and self._live_ctl.connected:
             lvl = self._live_ctl.read_level()  # linear 0..1, post gain + mute
@@ -866,6 +891,7 @@ class LivePanel(PanelBase):
             self.live_meter.setValue(pct)
         elif self.live_meter.value() != 0:
             self.live_meter.setValue(0)
+        self._publish_overlay()
 
     # --------------------------------------------------------------- refresh
     def refresh(self):
