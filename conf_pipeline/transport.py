@@ -254,6 +254,120 @@ class OnlineDeviceState:
         return self.online and not (self.changed_since_deploy or self.new_since_deploy)
 
 
+# --------------------------------------------------------------------------- #
+# Push + reconcile — "Deploy to online devices" (A3)
+# --------------------------------------------------------------------------- #
+def _device_differences(designed: Device, reported: Device) -> list[str]:
+    """Which config components differ between the design and what the device
+    reports. Mirrors :func:`~conf_pipeline.deployment._fingerprint`'s
+    granularity (label | profile | ports | DSP blocks), so the reconcile diff
+    and ``changed_since_deploy`` agree on what counts as a change."""
+    def _blocks(d: Device) -> list[str]:
+        return sorted(f"{b.id}:{b.kind}:{b.enabled}" for b in (getattr(d, "dsp_blocks", []) or []))
+
+    diffs = []
+    if designed.label != reported.label:
+        diffs.append("label")
+    if (getattr(designed, "profile_id", None) or "") != (getattr(reported, "profile_id", None) or ""):
+        diffs.append("profile")
+    if sorted(p.id for p in designed.ports) != sorted(p.id for p in reported.ports):
+        diffs.append("ports")
+    if _blocks(designed) != _blocks(reported):
+        diffs.append("processing blocks")
+    return diffs
+
+
+@dataclass(frozen=True)
+class ReconcileEntry:
+    """One device's device-reported vs designed comparison."""
+
+    device_id: str
+    label: str
+    matches: bool
+    differences: tuple[str, ...] = ()   # component names that differ (empty when matches)
+
+
+@dataclass(frozen=True)
+class PushReport:
+    """Outcome of pushing the design to the online room."""
+
+    pushed: tuple[str, ...]                   # device ids pushed + read back
+    skipped_offline: tuple[str, ...]          # designed devices not reachable
+    failed: tuple[tuple[str, str], ...]       # (device id, error)
+    reconcile: tuple[ReconcileEntry, ...]     # read-back comparison per pushed device
+
+    @property
+    def complete(self) -> bool:
+        """Every designed device made it (nothing skipped, nothing failed)."""
+        return not self.skipped_offline and not self.failed
+
+    @property
+    def clean(self) -> bool:
+        """Every read-back matches the design."""
+        return all(e.matches for e in self.reconcile)
+
+    def summary(self) -> str:
+        lines = [f"Pushed {len(self.pushed)} device(s)."]
+        if self.skipped_offline:
+            lines.append(f"Skipped (offline): {', '.join(self.skipped_offline)}")
+        for device_id, err in self.failed:
+            lines.append(f"Failed: {device_id} — {err}")
+        for e in self.reconcile:
+            if e.matches:
+                lines.append(f"✓ {e.device_id} — device matches the design")
+            else:
+                lines.append(f"✗ {e.device_id} — differs: {', '.join(e.differences)}")
+        if self.complete and self.clean:
+            lines.append("Room is in sync with the design.")
+        return "\n".join(lines)
+
+
+def reconcile_online(config: SystemConfig, transport: DeviceTransport) -> list[ReconcileEntry]:
+    """Read-only check: what does each *online* designed device report, and does
+    it match the design? Connects (idempotently) as needed; offline devices are
+    simply absent from the result."""
+    out = []
+    for d in sorted(config.devices, key=lambda dev: dev.id):
+        if not transport.read_status(d.id).online:
+            continue
+        transport.connect(d.id)
+        reported = transport.read_config(d.id)
+        diffs = _device_differences(d, reported)
+        out.append(ReconcileEntry(device_id=d.id, label=d.label, matches=not diffs, differences=tuple(diffs)))
+    return out
+
+
+def push_to_online(config: SystemConfig, transport: DeviceTransport) -> PushReport:
+    """Push every online designed device's config through the transport, read
+    each back, and reconcile (device-reported vs designed). Offline devices are
+    skipped and reported; per-device transport errors are collected, never
+    raised — one dead link must not abort the room."""
+    pushed: list[str] = []
+    skipped: list[str] = []
+    failed: list[tuple[str, str]] = []
+    entries: list[ReconcileEntry] = []
+    for d in sorted(config.devices, key=lambda dev: dev.id):
+        if not transport.read_status(d.id).online:
+            skipped.append(d.id)
+            continue
+        try:
+            transport.connect(d.id)
+            transport.push_config(d)
+            reported = transport.read_config(d.id)
+        except TransportError as exc:
+            failed.append((d.id, str(exc)))
+            continue
+        diffs = _device_differences(d, reported)
+        entries.append(ReconcileEntry(device_id=d.id, label=d.label, matches=not diffs, differences=tuple(diffs)))
+        pushed.append(d.id)
+    return PushReport(
+        pushed=tuple(pushed),
+        skipped_offline=tuple(skipped),
+        failed=tuple(failed),
+        reconcile=tuple(entries),
+    )
+
+
 def online_room_status(
     config: SystemConfig,
     last_deployed: Optional[SystemConfig],

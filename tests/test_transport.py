@@ -191,3 +191,76 @@ def test_online_status_reflects_connection_and_offline():
     assert rows["P1"].connected and rows["P1"].online
     assert not rows["A1"].online and not rows["A1"].connected
     assert not rows["A1"].in_sync                                   # offline ⇒ not in sync
+
+
+# --- push + reconcile (A3): device-reported vs designed ---
+def test_reconcile_detects_device_side_drift():
+    c = _design()
+    drifted = cp.rename_device(c, "A1", "Old label on the device")
+    t = cp.SimulatedTransport(drifted.devices)                      # room reports old config
+    entries = {e.device_id: e for e in cp.reconcile_online(c, t)}
+    assert not entries["A1"].matches and entries["A1"].differences == ("label",)
+    assert entries["P1"].matches and entries["P1"].differences == ()
+
+
+def test_reconcile_skips_offline_devices():
+    c = _design()
+    t = cp.SimulatedTransport(c.devices)
+    t.set_offline("A1")
+    assert [e.device_id for e in cp.reconcile_online(c, t)] == ["P1"]
+
+
+def test_reconcile_reports_ports_and_blocks_granularity():
+    c = _design()
+    room = cp.add_dsp_block(c, "P1", cp.create_dsp_block("gain", "P1-gain-1"))   # device-side extra block
+    t = cp.SimulatedTransport(room.devices)
+    entries = {e.device_id: e for e in cp.reconcile_online(c, t)}
+    assert entries["P1"].differences == ("processing blocks",)
+    small = cp.create_processor("P1", "DSP", dante_inputs=2)        # device-side fewer ports
+    t2 = cp.SimulatedTransport([small, *[d for d in c.devices if d.id != "P1"]])
+    entries = {e.device_id: e for e in cp.reconcile_online(c, t2)}
+    assert "ports" in entries["P1"].differences
+
+
+def test_push_to_online_reconciles_a_drifted_room():
+    c = _design()
+    drifted = cp.rename_device(c, "A1", "Old label")
+    t = cp.SimulatedTransport(drifted.devices)
+    before = cp.reconcile_online(c, t)
+    assert any(not e.matches for e in before)                       # drift visible first
+    report = cp.push_to_online(c, t)
+    assert report.pushed == ("A1", "P1")
+    assert report.complete and report.clean
+    assert all(e.matches for e in report.reconcile)
+    assert "in sync" in report.summary()
+    assert all(e.matches for e in cp.reconcile_online(c, t))        # room really updated
+
+
+def test_push_skips_offline_and_uninstalled_devices():
+    c = _design()
+    c2 = cp.add_device(c, cp.create_loudspeaker("L1", "Speaker", "analog"))  # designed, never installed
+    t = cp.SimulatedTransport(c.devices)
+    t.set_offline("A1")
+    report = cp.push_to_online(c2, t)
+    assert report.pushed == ("P1",)
+    assert report.skipped_offline == ("A1", "L1")
+    assert not report.complete and report.clean
+    assert "Skipped (offline): A1, L1" in report.summary()
+
+
+def test_push_collects_per_device_failures(monkeypatch):
+    c = _design()
+    t = cp.SimulatedTransport(c.devices)
+    original = t._push_config
+
+    def flaky_push(device):
+        if device.id == "A1":
+            raise cp.TransportError("link failure")
+        original(device)
+
+    monkeypatch.setattr(t, "_push_config", flaky_push)
+    report = cp.push_to_online(c, t)
+    assert report.pushed == ("P1",)
+    assert report.failed == (("A1", "link failure"),)
+    assert not report.complete
+    assert "Failed: A1 — link failure" in report.summary()

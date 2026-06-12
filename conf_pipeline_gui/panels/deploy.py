@@ -80,6 +80,16 @@ class DeployPanel(PanelBase):
         self.device_rows = QVBoxLayout()
         self.device_rows.setSpacing(2)
         ol.addLayout(self.device_rows)
+        self.push_btn = QPushButton("⇪ Deploy to online devices")
+        self.push_btn.setProperty("accent", "true")
+        self.push_btn.setToolTip(
+            "Push the design to every online device, read each back, and show the\n"
+            "reconcile diff (device-reported vs designed). The deploy snapshot only\n"
+            "updates when everything pushed and matches."
+        )
+        self.push_btn.clicked.connect(self._push_online)
+        self.push_btn.setEnabled(False)
+        ol.addWidget(self.push_btn)
         lay.addWidget(online)
 
         deploy_btn = QPushButton("⇪ Deploy — snapshot this design")
@@ -157,6 +167,17 @@ class DeployPanel(PanelBase):
             rl.addWidget(sim)
             self.device_rows.addWidget(roww)
 
+    def _push_online(self):
+        report = self.state.push_online()
+        if report is None:
+            self.deploy_info.setText("Go online first — there is no room to push to.")
+            return
+        self.deploy_info.setText(report.summary())
+        if report.complete and report.clean:
+            self._toast("Pushed — room is in sync with the design")
+        else:
+            self._toast("Pushed with issues — see the report")
+
     def _deploy(self):
         diff = self.state.deploy()
         if diff.identical:
@@ -215,6 +236,7 @@ class DeployPanel(PanelBase):
                 self.deploy_info.setText("Previously deployed — Deploy again to snapshot the latest changes.")
             # online-room status
             self.online_btn.setText("Go offline" if self.state.online else "Go online")
+            self.push_btn.setEnabled(self.state.online)
             rows = self.state.device_status()
             if not self.state.online:
                 self.online_summary.setText("Offline — device status appears here while online.")

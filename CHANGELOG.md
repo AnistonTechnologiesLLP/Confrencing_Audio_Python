@@ -34,6 +34,34 @@ schema is unchanged.
   content, and a numpy cross-check that the stdlib per-band weights equal the
   live runtime's per-FFT-bin weights (skipped without the `[control]` extra).
 
+**Push + reconcile (A3)** — "Deploy to online devices": push the design through
+the transport, read back, and reconcile device-reported vs designed.
+
+### Added
+- **`push_to_online(config, transport)`** (`transport.py`) → `PushReport`:
+  pushes every *online* designed device (connecting as needed), reads each
+  back, and attaches a `ReconcileEntry` per device (matches / which components
+  differ — label, profile, ports, processing blocks — the same granularity as
+  `deployment_diff`'s fingerprint, so the two views of "changed" always
+  agree). Offline devices are skipped and reported; per-device transport
+  errors are collected, never raised. `report.complete` / `.clean` /
+  `.summary()`. **`reconcile_online(config, transport)`** is the read-only
+  check (no push).
+- **`AppState.push_online()`**: runs the push and updates the last-deployed
+  snapshot **only on a clean, complete push** — a partial push (offline
+  devices, failures, mismatched read-back) leaves the snapshot alone so the
+  DEPLOY dot and the changed-since-deploy badges keep pointing at exactly the
+  devices that didn't make it.
+- **Deploy panel**: a **⇪ Deploy to online devices** button in the Online-room
+  group (enabled while online) rendering the push report — pushed/skipped/
+  failed plus the per-device ✓/✗ reconcile lines — inline in the panel.
+- Tests: 6 engine tests (drift detection + component granularity, offline
+  skipping, drifted-room push round-trip, skipped/uninstalled devices,
+  per-device failure collection via a flaky simulated push) and 3 GUI smoke
+  tests (clean push → snapshot refreshed → dot DONE; partial push with the
+  drifted device unplugged → snapshot untouched → still nagging; the panel
+  button lifecycle).
+
 **Online-room state (A2)** — per-device connected / offline / changed-since-
 deploy, surfaced through the existing workflow status-dot infrastructure.
 

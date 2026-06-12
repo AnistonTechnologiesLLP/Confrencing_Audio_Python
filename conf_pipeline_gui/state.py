@@ -224,6 +224,25 @@ class AppState(QObject):
             return                         # designed but not installed — nothing to unplug
         self.changed.emit()
 
+    def push_online(self):
+        """Deploy to online devices: push the design through the transport, read
+        back, reconcile. The last-deployed snapshot updates **only** when every
+        device was pushed and reads back matching — a partial push leaves the
+        changed-since-deploy badges nagging about exactly what didn't make it.
+        Returns the ``cp.PushReport`` (None while offline)."""
+        room = self.rooms[self.active_room]
+        t = room.get("transport")
+        if not room.get("online") or t is None:
+            return None
+        report = cp.push_to_online(self.config, t)
+        if report.complete and report.clean:
+            self.config = cp.mark_deployed(self.config, now_iso())
+            room["last_deployed"] = self.config
+            self.set_config(self.config)
+        else:
+            self.changed.emit()            # statuses moved even without a snapshot
+        return report
+
     # ---- selection ----
     def select(self, sel: Optional[dict]) -> None:
         self.selection = sel

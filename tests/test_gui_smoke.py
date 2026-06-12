@@ -405,6 +405,74 @@ def test_deploy_panel_online_group(win):
     win.state.set_mode("design")
 
 
+def test_push_online_clean_marks_deployed_and_dot_done(win):
+    from conf_pipeline_gui import workflow
+
+    c = cp.create_config("T", "2026-06-12T00:00:00Z")
+    c = cp.set_room(c, cp.rectangular_room(8, 6, 3))
+    c = cp.add_device(c, cp.create_microphone_array("A1", "Array"))
+    c = cp.set_device_position(c, "A1", Point2D(4, 3))
+    win.state.set_config(c)
+    win.state.deploy()
+    win.state.go_online()
+    c2 = cp.rename_device(win.state.config, "A1", "Array (renamed)")
+    win.state.set_config(c2)                             # design drifts from room + snapshot
+    assert workflow.stage_status(win.state)["deploy"] == workflow.PARTIAL
+
+    report = win.state.push_online()
+    assert report is not None and report.complete and report.clean
+    assert report.pushed == ("A1",)
+    # clean+complete push refreshed the snapshot: dot is DONE, room in sync
+    assert workflow.stage_status(win.state)["deploy"] == workflow.DONE
+    rows = win.state.device_status()
+    assert rows[0].in_sync
+    win.state.go_offline()
+    win.state.set_mode("design")
+
+
+def test_push_online_partial_keeps_pending_state(win):
+    from conf_pipeline_gui import workflow
+
+    c = cp.create_config("T", "2026-06-12T00:00:00Z")
+    c = cp.add_device(c, cp.create_processor("P1", "DSP"))
+    c = cp.add_device(c, cp.create_microphone_array("A1", "Array"))
+    win.state.set_config(c)
+    win.state.deploy()
+    win.state.go_online()
+    c2 = cp.rename_device(win.state.config, "A1", "Array (renamed)")
+    win.state.set_config(c2)
+    win.state.simulate_device_offline("A1")              # the drifted one is unplugged
+
+    report = win.state.push_online()
+    assert report is not None
+    assert report.skipped_offline == ("A1",) and not report.complete
+    # snapshot NOT updated: the changed device still nags
+    rows = {r.device_id: r for r in win.state.device_status()}
+    assert rows["A1"].changed_since_deploy
+    assert workflow.stage_status(win.state)["deploy"] == workflow.PARTIAL
+    win.state.simulate_device_offline("A1", False)
+    win.state.go_offline()
+    win.state.set_mode("design")
+
+
+def test_deploy_panel_push_button(win):
+    c = cp.create_config("T", "2026-06-12T00:00:00Z")
+    c = cp.add_device(c, cp.create_microphone_array("A1", "Array"))
+    win.state.set_config(c)
+    win.state.set_mode("deploy")
+    panel = win.panels["deploy"]
+    panel.refresh()
+    assert not panel.push_btn.isEnabled()                # offline: nothing to push to
+    win.state.go_online()
+    panel.refresh()
+    assert panel.push_btn.isEnabled()
+    panel._push_online()
+    assert "Pushed 1 device(s)." in panel.deploy_info.text()
+    assert "in sync" in panel.deploy_info.text()
+    win.state.go_offline()
+    win.state.set_mode("design")
+
+
 def test_live_design_readout_shows_frequency_curve(win):
     from conf_pipeline.model import RectShape
 

@@ -169,9 +169,13 @@ from .transport import (  # noqa: F401
     DeviceTransport,
     DiscoveredDevice,
     OnlineDeviceState,
+    PushReport,
+    ReconcileEntry,
     SimulatedTransport,
     TransportError,
     online_room_status,
+    push_to_online,
+    reconcile_online,
 )
 # ---- project file management: recent files, autosave, crash recovery ----
 from .files import (  # noqa: F401
