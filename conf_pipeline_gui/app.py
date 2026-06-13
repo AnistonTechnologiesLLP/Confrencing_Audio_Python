@@ -89,8 +89,7 @@ class MainWindow(QMainWindow):
         self.simbar.fovToggled.connect(self._toggle_fov)
         self.simbar.dispersionToggled.connect(self._toggle_dispersion)
         self.simbar.occlusionToggled.connect(self._toggle_occlusion)
-        self.canvas.on_resize = self._position_simbar
-        self.canvas.show()
+        self.canvas.on_resize = self._position_simbar  # re-anchor top-right on canvas resize
         self._position_simbar()
 
         self.toolrail = ToolRail(self.state.theme)
