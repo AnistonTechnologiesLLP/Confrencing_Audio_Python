@@ -30,6 +30,7 @@ DEVICE_TYPES = [
     ("Wireless mic", "wirelessMic"),
     ("Wired mic", "wiredMic"),
     ("Loudspeaker", "loudspeaker"),
+    ("Camera", "camera"),
     ("Codec (far-end)", "codec"),
 ]
 

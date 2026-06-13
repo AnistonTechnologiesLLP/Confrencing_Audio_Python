@@ -23,8 +23,16 @@ DEVICE_STYLE = {
     "wiredMic": ("#2dd4bf", "circle"),
     "loudspeaker": ("#f7c948", "triangle"),
     "codec": ("#94a3b8", "diamond"),
+    "camera": ("#ff9e5e", "camera"),
 }
 TALKER_COLOR = "#ff7ab6"
+# coverage-overlay colours (also mirrored as theme palette roles)
+PICKUP_COLOR = "#6d8bff"
+FOV_COLOR = "#ff9e5e"
+DISPERSION_COLOR = "#f7c948"
+OCCLUSION_COLOR = "#ff6b81"
+FURNITURE_COLOR = "#8b95bd"
+FURNITURE_SEAT_COLOR = "#3ddc97"
 DEFAULT_TALKER_ELEV = 1.2
 
 
@@ -90,8 +98,14 @@ class Canvas(QWidget):
         self._bg_pixmap_key = None
         self._diff_cache = None       # cached deployment diff for DEPLOY badges
         self._diff_cache_key = None
+        self.on_resize = None         # optional callback() to re-anchor floating overlays
         state.changed.connect(self.update)
         state.liveOverlayChanged.connect(self._on_live_overlay)
+
+    def resizeEvent(self, e):  # noqa: N802 (Qt override)
+        super().resizeEvent(e)
+        if self.on_resize:
+            self.on_resize()
 
     def _profile(self) -> dict:
         return MODE_PROFILE.get(getattr(self.state, "mode", "design"), MODE_PROFILE["design"])
@@ -145,6 +159,8 @@ class Canvas(QWidget):
         pts = []
         if self.cfg.room:
             pts += self.cfg.room.vertices
+            for o in self.cfg.room.objects:
+                pts += cp.furniture_corners(o)
         for d in self.cfg.devices:
             if d.position:
                 pts.append(d.position)
@@ -340,6 +356,11 @@ class Canvas(QWidget):
         elif shape == "triangle":
             poly = QPolygonF([QPointF(x, y - r * 1.15), QPointF(x + r, y + r * 0.85), QPointF(x - r, y + r * 0.85)])
             p.drawPolygon(poly)
+        elif shape == "camera":
+            p.drawRoundedRect(QRectF(x - r, y - r * 0.7, r * 1.5, r * 1.4), 2, 2)
+            horn = QPolygonF([QPointF(x + r * 0.5, y - r * 0.2), QPointF(x + r * 1.15, y - r * 0.7),
+                              QPointF(x + r * 1.15, y + r * 0.7), QPointF(x + r * 0.5, y + r * 0.2)])
+            p.drawPolygon(horn)
         else:
             poly = QPolygonF([QPointF(x, y - r * 1.15), QPointF(x + r, y), QPointF(x, y + r * 1.15), QPointF(x - r, y)])
             p.drawPolygon(poly)
@@ -520,6 +541,215 @@ class Canvas(QWidget):
             p.setPen(pen)
             p.drawEllipse(c_s, r_s, r_s)
 
+    # ---- furniture + coverage-simulation overlays (v4) ----
+    def furniture_live(self, obj):
+        """A room object with the in-progress drag preview applied (pos/rotation/size)."""
+        import copy
+        d = self.drag
+        if d and d.get("id") == obj.id and isinstance(d.get("kind"), str) and d["kind"].startswith("furniture"):
+            o = copy.copy(obj)
+            if d.get("pos") is not None:
+                o.position = d["pos"]
+            if d.get("rotation_deg") is not None:
+                o.rotation_deg = d["rotation_deg"]
+            if d.get("width") is not None:
+                o.width = d["width"]
+            if d.get("depth") is not None:
+                o.depth = d["depth"]
+            return o
+        return obj
+
+    def _find_obj(self, oid):
+        room = self.cfg.room
+        return next((o for o in room.objects if o.id == oid), None) if room else None
+
+    def _furniture_rotate_handle(self, o):
+        """World point of the rotate handle (along the object's local +Y axis)."""
+        _w, d, _h = cp.resolved_dimensions(o)
+        rot = math.radians(o.rotation_deg or 0.0)
+        ly = d / 2.0 + 0.5
+        return Point2D(o.position.x + ly * math.sin(rot), o.position.y + ly * math.cos(rot))
+
+    def _paint_furniture(self, p, v):
+        room = self.cfg.room
+        if not room or not room.objects:
+            return
+        sel = self.state.selection
+        editable = self._profile()["edit"]
+        for obj in room.objects:
+            o = self.furniture_live(obj)
+            corners = cp.furniture_corners(o)
+            poly = QPolygonF([self.w2s(c, v) for c in corners])
+            is_sel = bool(sel and sel.get("kind") == "furniture" and sel.get("id") == obj.id)
+            p.setBrush(_qc(FURNITURE_COLOR, 46))
+            p.setPen(QPen(_qc("#ffffff" if is_sel else FURNITURE_COLOR, 230), 2.0 if is_sel else 1.4))
+            p.drawPolygon(poly)
+            cs = self.w2s(o.position, v)
+            ft = cp.furniture_type(o.kind)
+            self._label(p, cs.x() - 10, cs.y() + 3, ft.label if ft else o.kind, "#cdd6f4")
+            for seat in (o.seats or []):
+                ss = self.w2s(seat.position, v)
+                p.setBrush(_qc(FURNITURE_SEAT_COLOR, 150))
+                p.setPen(Qt.NoPen)
+                p.drawEllipse(ss, 3.2, 3.2)
+            if is_sel and editable:
+                br = self.w2s(corners[2], v)
+                p.setBrush(QColor("#ffffff"))
+                p.setPen(QPen(_qc(FURNITURE_COLOR, 255), 1))
+                p.drawRect(QRectF(br.x() - 4, br.y() - 4, 8, 8))
+                rs = self.w2s(self._furniture_rotate_handle(o), v)
+                p.setPen(QPen(_qc(FURNITURE_COLOR, 160), 1))
+                p.drawLine(cs, rs)
+                p.setBrush(QColor("#ffffff"))
+                p.drawEllipse(rs, 4, 4)
+
+    def _wedge_path(self, apex, center_deg, half_deg, radius_m, v):
+        """A 2D sector QPainterPath: apex + a stepped arc of half-width ``half_deg``."""
+        path = QPainterPath(self.w2s(apex, v))
+        steps = 28
+        for i in range(steps + 1):
+            b = center_deg - half_deg + (2 * half_deg) * i / steps
+            dx, dy = self._bearing_dir(b)
+            path.lineTo(self.w2s(Point2D(apex.x + dx * radius_m, apex.y + dy * radius_m), v))
+        path.closeSubpath()
+        return path
+
+    def _draw_wedge_2d(self, p, v, wedge, fill_hex, line_hex):
+        # a near-straight-down or omni wedge reads as a floor circle, not a sector
+        if wedge.h_half_deg >= 179.0 or wedge.tilt_deg >= 80.0:
+            c = self.w2s(wedge.apex, v)
+            r = max(wedge.range_m, 0.05) * v[0]
+            p.setBrush(_qc(fill_hex, 28))
+            pen = QPen(_qc(line_hex, 150), 1.3)
+            pen.setDashPattern([5, 4])
+            p.setPen(pen)
+            p.drawEllipse(c, r, r)
+            return
+        p.setBrush(_qc(fill_hex, 34))
+        pen = QPen(_qc(line_hex, 170), 1.4)
+        pen.setDashPattern([4, 3])
+        p.setPen(pen)
+        p.drawPath(self._wedge_path(wedge.apex, wedge.azimuth_deg, wedge.h_half_deg, wedge.range_m, v))
+
+    def _paint_coverage_overlays(self, p, v):
+        st = self.state
+        if not (st.sim_show_pickup or st.sim_show_fov or st.sim_show_dispersion or st.sim_show_occlusion):
+            return
+        rc = st.room_coverage()
+        if st.sim_show_pickup:
+            for mc in rc.mics:
+                for w in mc.wedges:
+                    self._draw_wedge_2d(p, v, w, PICKUP_COLOR, PICKUP_COLOR)
+        if st.sim_show_dispersion:
+            for sc in rc.speakers:
+                self._draw_wedge_2d(p, v, sc.wedge, DISPERSION_COLOR, DISPERSION_COLOR)
+        if st.sim_show_fov:
+            for cc in rc.cameras:
+                self._draw_wedge_2d(p, v, cc.wedge, FOV_COLOR, FOV_COLOR)
+                for h in cc.targets:
+                    if not h.in_coverage:
+                        continue
+                    s = self.w2s(h.position, v)
+                    p.setBrush(_qc(OCCLUSION_COLOR if h.blocked else FOV_COLOR, 230))
+                    p.setPen(Qt.NoPen)
+                    p.drawEllipse(s, 3.4, 3.4)
+        if st.sim_show_occlusion:
+            for oc in rc.occluders:
+                if not oc.blocks_camera:
+                    continue
+                poly = QPolygonF([self.w2s(c, v) for c in oc.corners])
+                p.setBrush(_qc(OCCLUSION_COLOR, 30))
+                p.setPen(QPen(_qc(OCCLUSION_COLOR, 120), 1.0))
+                p.drawPolygon(poly)
+            for cc in rc.cameras:
+                apex = self.w2s(cc.wedge.apex, v)
+                pen = QPen(_qc(OCCLUSION_COLOR, 160), 1.4)
+                pen.setDashPattern([3, 3])
+                for h in cc.targets:
+                    if h.in_coverage and h.blocked:
+                        p.setPen(pen)
+                        p.drawLine(apex, self.w2s(h.position, v))
+
+    # ---- 3D furniture + coverage ----
+    def _paint_furniture_3d(self, p, cam):
+        room = self.cfg.room
+        if not room or not room.objects:
+            return
+        for obj in room.objects:
+            o = self.furniture_live(obj)
+            corners = cp.furniture_corners(o)
+            _w, _d, h = cp.resolved_dimensions(o)
+            fs = [self.project(Point3D(c.x, 0.0, c.y), cam) for c in corners]
+            ts = [self.project(Point3D(c.x, h, c.y), cam) for c in corners]
+            if not all(fs) or not all(ts):
+                continue
+            p.setBrush(_qc(FURNITURE_COLOR, 40))
+            p.setPen(QPen(_qc(FURNITURE_COLOR, 170), 1.3))
+            p.drawPolygon(QPolygonF([QPointF(s[0], s[1]) for s in fs]))
+            p.drawPolygon(QPolygonF([QPointF(s[0], s[1]) for s in ts]))
+            for i in range(4):
+                p.drawLine(QPointF(fs[i][0], fs[i][1]), QPointF(ts[i][0], ts[i][1]))
+            for seat in (o.seats or []):
+                ps = self.project(Point3D(seat.position.x, 0.45, seat.position.y), cam)
+                if ps:
+                    p.setBrush(_qc(FURNITURE_SEAT_COLOR, 160))
+                    p.setPen(Qt.NoPen)
+                    p.drawEllipse(QPointF(ps[0], ps[1]), 3, 3)
+
+    def _draw_cone_3d(self, p, cam, wedge, fill_hex, line_hex):
+        apex3 = Point3D(wedge.apex.x, wedge.apex_elev_m, wedge.apex.y)
+        a = self.project(apex3, cam)
+        if not a:
+            return
+        steps = 20
+        # straight-down/omni: a cone to a floor circle under the apex
+        if wedge.h_half_deg >= 179.0 or wedge.tilt_deg >= 80.0:
+            base = [Point3D(wedge.apex.x + math.cos(2 * math.pi * i / steps) * wedge.range_m, 0.0,
+                            wedge.apex.y + math.sin(2 * math.pi * i / steps) * wedge.range_m) for i in range(steps + 1)]
+        else:
+            az = math.radians(wedge.azimuth_deg)
+            tilt = math.radians(wedge.tilt_deg)
+            axis = Point3D(math.cos(tilt) * math.sin(az), -math.sin(tilt), math.cos(tilt) * math.cos(az))
+            right = Point3D(math.cos(az), 0.0, -math.sin(az))
+            up = Point3D(axis.y * right.z - axis.z * right.y, axis.z * right.x - axis.x * right.z, axis.x * right.y - axis.y * right.x)
+            fc = Point3D(apex3.x + axis.x * wedge.range_m, apex3.y + axis.y * wedge.range_m, apex3.z + axis.z * wedge.range_m)
+            rh = wedge.range_m * math.tan(math.radians(min(wedge.h_half_deg, 80.0)))
+            rv = wedge.range_m * math.tan(math.radians(min(wedge.v_half_deg, 80.0)))
+            base = []
+            for i in range(steps + 1):
+                th = 2 * math.pi * i / steps
+                cx = math.cos(th) * rh
+                cy = math.sin(th) * rv
+                base.append(Point3D(fc.x + right.x * cx + up.x * cy, fc.y + right.y * cx + up.y * cy, fc.z + right.z * cx + up.z * cy))
+        bs = [self.project(pt, cam) for pt in base]
+        if not all(bs):
+            return
+        p.setBrush(_qc(fill_hex, 30))
+        pen = QPen(_qc(line_hex, 150), 1.2)
+        pen.setDashPattern([4, 3])
+        p.setPen(pen)
+        p.drawPolygon(QPolygonF([QPointF(s[0], s[1]) for s in bs]))
+        # a few rays from the apex to suggest the cone volume
+        p.setPen(QPen(_qc(line_hex, 110), 1.0))
+        for i in range(0, steps + 1, 5):
+            p.drawLine(QPointF(a[0], a[1]), QPointF(bs[i][0], bs[i][1]))
+
+    def _paint_coverage_overlays_3d(self, p, cam):
+        st = self.state
+        if not (st.sim_show_pickup or st.sim_show_fov or st.sim_show_dispersion):
+            return
+        rc = st.room_coverage()
+        if st.sim_show_pickup:
+            for mc in rc.mics:
+                for w in mc.wedges:
+                    self._draw_cone_3d(p, cam, w, PICKUP_COLOR, PICKUP_COLOR)
+        if st.sim_show_dispersion:
+            for sc in rc.speakers:
+                self._draw_cone_3d(p, cam, sc.wedge, DISPERSION_COLOR, DISPERSION_COLOR)
+        if st.sim_show_fov:
+            for cc in rc.cameras:
+                self._draw_cone_3d(p, cam, cc.wedge, FOV_COLOR, FOV_COLOR)
+
     # ---- 2D ----
     def _paint2d(self, p):
         v = self.view2d()
@@ -576,6 +806,8 @@ class Canvas(QWidget):
                     p.setPen(QPen(stroke, 1))
                     p.drawRect(QRectF(br.x() - 4, br.y() - 4, 8, 8))
         self._paint_coverage(p, v)
+        self._paint_furniture(p, v)
+        self._paint_coverage_overlays(p, v)
         self._draw_routes_2d(p, v)
         self._angle_rays(p, v=v)
         # in-progress zone
@@ -832,6 +1064,8 @@ class Canvas(QWidget):
                     pen.setDashPattern(dash)
                 p.setPen(pen)
                 p.drawPolygon(QPolygonF([QPointF(s[0], s[1]) for s in corners]))
+        self._paint_furniture_3d(p, cam)
+        self._paint_coverage_overlays_3d(p, cam)
         self._draw_routes_3d(p, cam)
         self._angle_rays(p, project=self.project, cam=cam)
         err, warn = self._error_refs()
@@ -1067,6 +1301,14 @@ class Canvas(QWidget):
                 if o.x <= world.x <= o.x + w_ and o.y <= world.y <= o.y + h_:
                     return {"kind": "zone-move", "array_id": d.id, "zone_id": z.id, "shape": z.shape, "grab": (world.x - o.x, world.y - o.y)}
         if self.cfg.room:
+            for o in self.cfg.room.objects:
+                if near(self._furniture_rotate_handle(o), world, 11):
+                    return {"kind": "furniture-rotate", "id": o.id}
+                corners = cp.furniture_corners(o)
+                if near(corners[2], world, 11):
+                    return {"kind": "furniture-resize", "id": o.id}
+                if cp.point_in_polygon(world, corners):
+                    return {"kind": "furniture-move", "id": o.id, "grab": (world.x - o.position.x, world.y - o.position.y)}
             for i, vert in enumerate(self.cfg.room.vertices):
                 if near(vert, world, 9):
                     return {"kind": "vertex", "index": i, "pos": vert}
@@ -1090,6 +1332,8 @@ class Canvas(QWidget):
                     self.state.select({"kind": "talker", "id": hit["id"]})
                 elif hit and hit["kind"] in ("zone-move", "zone-resize"):
                     self.state.select({"kind": "zone", "array_id": hit["array_id"], "zone_id": hit["zone_id"]})
+                elif hit and hit["kind"] in ("furniture-move", "furniture-resize", "furniture-rotate"):
+                    self.state.select({"kind": "furniture", "id": hit["id"]})
                 elif not hit:
                     self.state.select(None)
                 self.update()
@@ -1117,6 +1361,12 @@ class Canvas(QWidget):
                 else:
                     self.drag = {"kind": "zone-new", "array_id": aid, "start": psnap, "cur": psnap, "ztype": kind}
                     self.update()
+            elif tool == "furniture":
+                if self.cfg.room is None:
+                    return self._toast("Draw a room first (R), then place furniture")
+                fid = self.state.next_furniture_id()
+                self.state.set_config(cp.add_furniture(self.cfg, fid, self.state.furniture_kind, psnap))
+                self.state.select({"kind": "furniture", "id": fid})
         except Exception as exc:  # surface engine errors without crashing
             self._toast(str(exc))
 
@@ -1129,7 +1379,8 @@ class Canvas(QWidget):
         return (
             (hit["kind"] == "device" and prof["drag_devices"])
             or (hit["kind"] == "talker" and prof["drag_talkers"])
-            or (hit["kind"] in ("zone-move", "zone-resize", "vertex") and prof["edit"])
+            or (hit["kind"] in ("zone-move", "zone-resize", "vertex",
+                                "furniture-move", "furniture-resize", "furniture-rotate") and prof["edit"])
         )
 
     def _update_hover_cursor(self, world, v):
@@ -1179,6 +1430,23 @@ class Canvas(QWidget):
             self.drag["shape"] = RectShape(origin=o.origin, width=max(0.3, self.snap(psnap.x - o.origin.x)), height=max(0.3, self.snap(psnap.y - o.origin.y)))
         elif k == "zone-new":
             self.drag["cur"] = psnap
+        elif k == "furniture-move":
+            gx, gy = self.drag.get("grab", (0.0, 0.0))
+            self.drag["pos"] = Point2D(self.snap(w.x - gx), self.snap(w.y - gy))
+        elif k == "furniture-resize":
+            o = self._find_obj(self.drag["id"])
+            if o is not None:
+                rot = math.radians(o.rotation_deg or 0.0)
+                dx, dy = w.x - o.position.x, w.y - o.position.y
+                lx = dx * math.cos(rot) - dy * math.sin(rot)
+                ly = dx * math.sin(rot) + dy * math.cos(rot)
+                self.drag["width"] = max(0.2, self.snap(2 * abs(lx)))
+                self.drag["depth"] = max(0.2, self.snap(2 * abs(ly)))
+        elif k == "furniture-rotate":
+            o = self._find_obj(self.drag["id"])
+            if o is not None:
+                ang = math.degrees(math.atan2(w.x - o.position.x, w.y - o.position.y)) % 360.0
+                self.drag["rotation_deg"] = round(ang / 5.0) * 5.0
         self.update()
 
     def _up2d(self):
@@ -1200,6 +1468,15 @@ class Canvas(QWidget):
                 self.state.set_config(cp.set_room(self.cfg, RoomLayout(vertices=verts, height=self.cfg.room.height, units="meters", objects=list(self.cfg.room.objects))))
             elif k in ("zone-move", "zone-resize"):
                 self.state.set_config(cp.set_zone_shape(self.cfg, d["array_id"], d["zone_id"], d["shape"]))
+            elif k == "furniture-move":
+                if d.get("pos") is not None:
+                    self.state.set_config(cp.set_furniture_position(self.cfg, d["id"], d["pos"]))
+            elif k == "furniture-resize":
+                if d.get("width") is not None:
+                    self.state.set_config(cp.set_furniture_dimensions(self.cfg, d["id"], width=d["width"], depth=d["depth"]))
+            elif k == "furniture-rotate":
+                if d.get("rotation_deg") is not None:
+                    self.state.set_config(cp.set_furniture_rotation(self.cfg, d["id"], d["rotation_deg"]))
             elif k == "zone-new":
                 o = Point2D(min(d["start"].x, d["cur"].x), min(d["start"].y, d["cur"].y))
                 w_, h_ = abs(d["cur"].x - d["start"].x), abs(d["cur"].y - d["start"].y)

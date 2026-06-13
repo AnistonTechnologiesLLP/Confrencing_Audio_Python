@@ -36,13 +36,14 @@ from .issues import IssuesDrawer
 from .modebar import ModeBar
 from .panels import DesignPanel, DeployPanel, LivePanel, RoutePanel, SimulatePanel
 from .scenarios import SCENARIOS
+from .simbar import SimBar
 from .state import AppState, now_iso
 from .theme import DARK_QSS, LIGHT_QSS, build_qss, palette  # noqa: F401 (re-exported)
 from .toolrail import MODE_TOOLS, ToolRail
 from .viewbar import ViewBar
 
 # Pressing a tool key outside its home mode hops there first (Fusion-style).
-TOOL_HOME_MODE = {"room": "design", "zone": "design", "talker": "design", "connect": "route"}
+TOOL_HOME_MODE = {"room": "design", "zone": "design", "talker": "design", "furniture": "design", "connect": "route"}
 
 
 AUTOSAVE_INTERVAL_MS = 30_000
@@ -57,6 +58,7 @@ class MainWindow(QMainWindow):
         # project file manager: recent files, autosave, crash recovery
         self.files = files if files is not None else cp.ProjectFileManager()
         self._dirty = False
+        self._sim_overlays_seeded = False   # seed pickup+FOV once on entering Simulate/Live
 
         self.canvas = Canvas(self.state)
         self.canvas.coord_cb = lambda s: self.coord_label.setText(s)
@@ -81,9 +83,20 @@ class MainWindow(QMainWindow):
         self.viewbar.coverageToggled.connect(self._toggle_coverage)
         self.viewbar.heatmapToggled.connect(self._toggle_heatmap)
 
+        # floating simulation bar over the canvas's top-right corner
+        self.simbar = SimBar(self.canvas)
+        self.simbar.pickupToggled.connect(self._toggle_pickup)
+        self.simbar.fovToggled.connect(self._toggle_fov)
+        self.simbar.dispersionToggled.connect(self._toggle_dispersion)
+        self.simbar.occlusionToggled.connect(self._toggle_occlusion)
+        self.canvas.on_resize = self._position_simbar
+        self.canvas.show()
+        self._position_simbar()
+
         self.toolrail = ToolRail(self.state.theme)
         self.toolrail.toolSelected.connect(self._set_tool)
         self.toolrail.zoneKindSelected.connect(self._zone_kind_selected)
+        self.toolrail.furnitureKindSelected.connect(self._furniture_kind_selected)
         self.toolrail.set_mode(self.state.mode)
 
         split = QSplitter()
@@ -250,7 +263,7 @@ class MainWindow(QMainWindow):
         QShortcut(QKeySequence.Redo, self, self.state.redo)
         QShortcut(QKeySequence("Delete"), self, self._delete_selection)
         QShortcut(QKeySequence("Backspace"), self, self._delete_selection)
-        for k, tool in [("V", "select"), ("C", "connect"), ("R", "room"), ("Z", "zone"), ("T", "talker")]:
+        for k, tool in [("V", "select"), ("C", "connect"), ("R", "room"), ("Z", "zone"), ("T", "talker"), ("F", "furniture")]:
             QShortcut(QKeySequence(k), self, lambda t=tool: self._shortcut_tool(t))
         QShortcut(QKeySequence("2"), self, lambda: self._set_view("2d"))
         QShortcut(QKeySequence("3"), self, lambda: self._set_view("3d"))
@@ -292,8 +305,14 @@ class MainWindow(QMainWindow):
         self.viewbar.set_view(self.state.view)
         self.viewbar.set_coverage(self.state.show_coverage)
         self.viewbar.set_heatmap(self.state.sim_show_heatmap)
+        self.simbar.set_pickup(self.state.sim_show_pickup)
+        self.simbar.set_fov(self.state.sim_show_fov)
+        self.simbar.set_dispersion(self.state.sim_show_dispersion)
+        self.simbar.set_occlusion(self.state.sim_show_occlusion)
+        self._refresh_sim_summary()
         self.toolrail.set_tool(self.state.tool)
         self.toolrail.set_zone_kind(self.state.zone_kind)
+        self.toolrail.set_furniture_kind(self.state.furniture_kind)
 
     # ------------------------------------------------------------------- modes
     def _apply_mode(self, mode: str):
@@ -306,6 +325,15 @@ class MainWindow(QMainWindow):
         # per-mode overlay defaults (user-overridable afterwards)
         if mode in ("simulate", "live") and not self.state.show_coverage:
             self.state.show_coverage = True
+        # entering SIMULATE/LIVE turns on the coverage view once, so the angles are
+        # visible without hunting for the SimBar; the user can toggle them off after
+        if mode in ("simulate", "live") and not self._sim_overlays_seeded:
+            self.state.sim_show_pickup = True
+            self.state.sim_show_fov = True
+            self._sim_overlays_seeded = True
+            self.simbar.set_pickup(True)
+            self.simbar.set_fov(True)
+            self._refresh_sim_summary()
         if mode != "live" and self.panels["live"]._live_busy():
             self.toast("Live session running — the LIVE dot stays red until you disconnect")
         self.canvas.update()
@@ -404,6 +432,56 @@ class MainWindow(QMainWindow):
         # Bridge to the Simulate panel's checkbox so its compute logic runs.
         self.panels["simulate"].set_heatmap(bool(on))
 
+    # ---- coverage-simulation overlays (SimBar) ----
+    def _position_simbar(self):
+        self.simbar.adjustSize()
+        x = max(12, self.canvas.width() - self.simbar.width() - 12)
+        self.simbar.move(x, 12)
+
+    def _toggle_pickup(self, on):
+        self.state.sim_show_pickup = bool(on)
+        self._refresh_sim_summary()
+        self.canvas.update()
+
+    def _toggle_fov(self, on):
+        self.state.sim_show_fov = bool(on)
+        self._refresh_sim_summary()
+        self.canvas.update()
+
+    def _toggle_dispersion(self, on):
+        self.state.sim_show_dispersion = bool(on)
+        self._refresh_sim_summary()
+        self.canvas.update()
+
+    def _toggle_occlusion(self, on):
+        self.state.sim_show_occlusion = bool(on)
+        self._refresh_sim_summary()
+        self.canvas.update()
+
+    def _furniture_kind_selected(self, kind):
+        self.state.furniture_kind = kind
+        if self.state.mode == "design":
+            self._set_tool("furniture")
+
+    def _refresh_sim_summary(self):
+        st = self.state
+        any_on = st.sim_show_pickup or st.sim_show_fov or st.sim_show_dispersion or st.sim_show_occlusion
+        if not any_on:
+            self.simbar.set_summary("")
+            return
+        s = st.room_coverage().summary
+        n = s.get("target_count", 0)
+        if n == 0:
+            self.simbar.set_summary("No talkers/seats to cover")
+            return
+        gaps = len(s.get("mic_gaps", []))
+        parts = [f"Pickup {s.get('mic_coverage_pct', 0):.0f}%"]
+        if gaps:
+            parts.append(f"{gaps} gap{'s' if gaps != 1 else ''}")
+        if s.get("has_camera"):
+            parts.append(f"Framed {s.get('camera_framed_pct', 0):.0f}%")
+        self.simbar.set_summary(" · ".join(parts))
+
     def _import_floor_plan(self):
         path, _ = QFileDialog.getOpenFileName(self, "Floor plan image", "", "Images (*.png *.jpg *.jpeg *.bmp *.gif)")
         if not path:
@@ -444,6 +522,8 @@ class MainWindow(QMainWindow):
                 self.state.set_config(cp.remove_talker(cfg, sel["id"]))
             elif sel["kind"] == "zone":
                 self.state.set_config(cp.remove_coverage_zone(cfg, sel["array_id"], sel["zone_id"]))
+            elif sel["kind"] == "furniture":
+                self.state.set_config(cp.remove_furniture(cfg, sel["id"]))
             self.state.selection = None
         except Exception as exc:
             self.toast(str(exc))

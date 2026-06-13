@@ -125,6 +125,10 @@ QToolButton[pill="true"][level="error"] {{ border-color: {err}; color: {err}; }}
 QFrame[viewbar="true"] {{ background: {elev}; border: 1px solid {border_strong}; border-radius: 9px; }}
 QFrame[viewbar="true"] QToolButton {{ padding: 3px 9px; font-weight: 600; }}
 
+QFrame[simbar="true"] {{ background: {elev}; border: 1px solid {border_strong}; border-radius: 9px; }}
+QFrame[simbar="true"] QToolButton {{ padding: 3px 9px; font-weight: 600; }}
+QLabel[simSummary="true"] {{ color: {muted}; font-weight: 600; padding: 0 5px; }}
+
 QLabel[hintChip="true"] {{ background: {sel}; color: {accent_bright}; border: 1px solid {accent}; border-radius: 9px; padding: 3px 10px; font-size: 8pt; font-weight: 600; }}
 QLabel[panelTitle="true"] {{ color: {text}; font-size: 12pt; font-weight: 800; }}
 QLabel[sectionLabel="true"] {{ color: {faint}; font-size: 9px; font-weight: 800; letter-spacing: 1px; }}

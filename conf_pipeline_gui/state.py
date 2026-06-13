@@ -45,6 +45,14 @@ class AppState(QObject):
         self.sim_show_heatmap = False
         self.show_coverage = False                    # draw array coverage circles on the canvas
         self.calibrating = False                      # floor-plan scale calibration drag in progress
+        # ---- coverage simulation overlays (v4; transient view state) ----
+        self.sim_show_pickup = False                  # mic voice-pickup sectors
+        self.sim_show_fov = False                     # camera field-of-view wedges
+        self.sim_show_dispersion = False              # loudspeaker dispersion cones
+        self.sim_show_occlusion = False               # furniture line-of-sight blocking
+        self.furniture_kind = "table"                 # active kind for the furniture tool
+        self.sim_device_id: Optional[str] = None      # focused device for coverage (None = all)
+        self._room_coverage = None                    # cached cp.RoomCoverage for self.config
         # ---- live-session overlay (transient view state; never in history) ----
         # dict published by the Live panel while a session runs:
         # {"array_id", "sector": (center, half_width, front_offset) | None,
@@ -68,9 +76,21 @@ class AppState(QObject):
         self.live_overlay = data
         self.liveOverlayChanged.emit()
 
+    # ---- coverage simulation (recomputed on config change, cached for paint) ----
+    def room_coverage(self):
+        """Cached cp.RoomCoverage for the current config — recomputed lazily after
+        any config change (set_config/undo/redo/room switch invalidate it)."""
+        if self._room_coverage is None:
+            self._room_coverage = cp.simulate_room_coverage(self.config)
+        return self._room_coverage
+
+    def _invalidate_coverage(self) -> None:
+        self._room_coverage = None
+
     # ---- history ----
     def set_config(self, new, record: bool = True) -> None:
         self.config = new
+        self._invalidate_coverage()
         if record:
             self._history = self._history[: self._idx + 1]
             self._history.append(new)
@@ -84,6 +104,7 @@ class AppState(QObject):
         if self._idx > 0:
             self._idx -= 1
             self.config = self._history[self._idx]
+            self._invalidate_coverage()
             self._prune_selection()
             self.changed.emit()
 
@@ -91,6 +112,7 @@ class AppState(QObject):
         if self._idx < len(self._history) - 1:
             self._idx += 1
             self.config = self._history[self._idx]
+            self._invalidate_coverage()
             self._prune_selection()
             self.changed.emit()
 
@@ -110,6 +132,8 @@ class AppState(QObject):
         r = self.rooms[i]
         self.config, self._history, self._idx = r["config"], r["history"], r["idx"]
         self.selection = None
+        self.sim_device_id = None
+        self._invalidate_coverage()
         self.changed.emit()
 
     def add_room(self) -> None:
@@ -256,6 +280,10 @@ class AppState(QObject):
             self.selection = None
         elif s["kind"] == "talker" and not any(t.id == s["id"] for t in self.config.talkers):
             self.selection = None
+        elif s["kind"] == "furniture":
+            objs = self.config.room.objects if self.config.room else []
+            if not any(o.id == s["id"] for o in objs):
+                self.selection = None
 
     # ---- id helpers ----
     def next_zone_id(self, array_id: str) -> str:
@@ -272,9 +300,19 @@ class AppState(QObject):
 
     def next_device_id(self, dtype: str) -> str:
         prefix = {"processor": "P", "microphoneArray": "A", "wirelessMic": "WM",
-                  "wiredMic": "WD", "loudspeaker": "L", "codec": "C"}.get(dtype, "D")
+                  "wiredMic": "WD", "loudspeaker": "L", "codec": "C", "camera": "CAM"}.get(dtype, "D")
         n = 1
         existing = {d.id for d in self.config.devices}
         while f"{prefix}{n}" in existing:
             n += 1
         return f"{prefix}{n}"
+
+    def next_furniture_id(self) -> str:
+        """Per-room furniture id (deduped against the ACTIVE room's objects, so two
+        rooms never collide — multi-room is live, unlike a single global counter)."""
+        objs = self.config.room.objects if self.config.room else []
+        existing = {o.id for o in objs}
+        n = 1
+        while f"F{n}" in existing:
+            n += 1
+        return f"F{n}"

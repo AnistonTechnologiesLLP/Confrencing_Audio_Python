@@ -226,6 +226,23 @@ def _mic(p, c):
     p.drawLine(QPointF(10, 13.8), QPointF(10, 16.5))
 
 
+def _furniture(p, c):
+    p.setPen(_pen(c, 1.4))
+    p.drawRect(QRectF(4, 7, 12, 3.2))          # table top
+    p.drawLine(QPointF(5.6, 10.2), QPointF(5.6, 15.5))
+    p.drawLine(QPointF(14.4, 10.2), QPointF(14.4, 15.5))
+
+
+def _camera(p, c):
+    p.setPen(_pen(c, 1.4))
+    p.drawRoundedRect(QRectF(3.5, 6.5, 9, 7), 1.5, 1.5)   # body
+    path = QPainterPath(QPointF(12.5, 8.5))               # lens horn
+    path.lineTo(QPointF(16.5, 6.5))
+    path.lineTo(QPointF(16.5, 13.5))
+    path.lineTo(QPointF(12.5, 11.5))
+    p.drawPath(path)
+
+
 def _help(p, c):
     p.setPen(_pen(c, 1.5))
     path = QPainterPath(QPointF(7, 7.2))
@@ -243,6 +260,7 @@ _DRAW = {
     "undo": _undo, "redo": _redo, "optimize": _optimize, "route": _route,
     "deploy": _deploy, "import": _import_, "export": _deploy, "report": _report,
     "theme": _theme, "menu": _menu, "rooms": _rooms, "gear": _gear, "mic": _mic, "help": _help,
+    "furniture": _furniture, "camera": _camera,
 }
 
 
