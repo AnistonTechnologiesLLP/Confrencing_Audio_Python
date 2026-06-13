@@ -8,9 +8,10 @@ the mode, and a validation pill in the top bar is visible from everywhere.
 from __future__ import annotations
 
 import sys
+from pathlib import Path
 
 from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QAction, QFont, QGuiApplication, QKeySequence, QShortcut
+from PySide6.QtGui import QAction, QFont, QGuiApplication, QIcon, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
     QFileDialog,
@@ -45,6 +46,22 @@ from .viewbar import ViewBar
 # Pressing a tool key outside its home mode hops there first (Fusion-style).
 TOOL_HOME_MODE = {"room": "design", "zone": "design", "talker": "design", "furniture": "design", "connect": "route"}
 
+_ASSETS = Path(__file__).resolve().parent / "assets"
+
+
+def app_icon() -> QIcon:
+    """The Aniston wren mark as the window/taskbar icon.
+
+    Prefers the multi-resolution .ico (crisp 16-256 px on Windows); falls back to
+    the high-res mark PNG. Both are loaded by Qt's built-in image readers, so no
+    extra image-format plugin (or Pillow) is needed at runtime.
+    """
+    for name in ("aniston.ico", "aniston_mark.png"):
+        p = _ASSETS / name
+        if p.exists():
+            return QIcon(str(p))
+    return QIcon()
+
 
 AUTOSAVE_INTERVAL_MS = 30_000
 
@@ -52,7 +69,8 @@ AUTOSAVE_INTERVAL_MS = 30_000
 class MainWindow(QMainWindow):
     def __init__(self, files: cp.ProjectFileManager | None = None):
         super().__init__()
-        self.setWindowTitle("Conferencing Audio Pipeline — Configurator")
+        self.setWindowTitle("Aniston Room Designer")
+        self.setWindowIcon(app_icon())
         self.resize(1320, 840)
         self.state = AppState()
         # project file manager: recent files, autosave, crash recovery
@@ -677,13 +695,28 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(msg, 3000)
 
 
+def _set_windows_app_id(app_id: str = "Aniston.RoomDesigner") -> None:
+    """Tell Windows this is its own app so the taskbar shows our icon, not
+    python.exe's. No-op off Windows or if the shell call is unavailable."""
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(app_id)
+    except Exception:
+        pass
+
+
 def main():
+    _set_windows_app_id()
     app = QApplication.instance() or QApplication(sys.argv)
     f = QFont("Segoe UI")
     f.setPointSize(9)
     app.setFont(f)
     app.setStyleSheet(DARK_QSS)
-    QGuiApplication.setApplicationDisplayName("Conferencing Audio Pipeline")
+    QGuiApplication.setApplicationDisplayName("Aniston Room Designer")
+    app.setWindowIcon(app_icon())
     win = MainWindow()
     win.show()
     win._offer_recovery()                 # crash recovery, after the window is up

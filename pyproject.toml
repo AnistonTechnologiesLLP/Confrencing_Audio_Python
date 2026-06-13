@@ -24,6 +24,9 @@ conf-pipeline-gui = "conf_pipeline_gui.app:main"
 [tool.setuptools]
 packages = ["conf_pipeline", "conf_pipeline.sim", "conf_pipeline_gui", "conf_pipeline_gui.panels", "conf_pipeline_control"]
 
+[tool.setuptools.package-data]
+conf_pipeline_gui = ["assets/*.png", "assets/*.ico"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 
