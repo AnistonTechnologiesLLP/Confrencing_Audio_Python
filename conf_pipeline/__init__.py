@@ -167,6 +167,28 @@ from .coverage_check import (  # noqa: F401
     zone_coverage_report,
 )
 
+# ---- room/device coverage simulation (cameras, mics, speakers, occlusion) ----
+from .coverage_sim import (  # noqa: F401
+    CameraCoverage,
+    CoverageWedge,
+    MicCoverage,
+    Occluder,
+    RoomCoverage,
+    SpeakerCoverage,
+    Target,
+    TargetHit,
+    camera_coverage,
+    camera_sees,
+    camera_wedge,
+    mic_coverage,
+    room_occluders,
+    room_targets,
+    segment_intersects_obb,
+    simulate_room_coverage,
+    speaker_coverage,
+    speaker_wedge,
+)
+
 # ---- design report export ----
 from .report import design_report  # noqa: F401
 

@@ -39,7 +39,7 @@ FURNITURE_CATALOG: dict[str, FurnitureType] = {
     "seat":    FurnitureType("seat", "Seat", 0.55, 0.55, 0.50, 0.35, blocks_camera=False, blocks_audio=False, seat_capacity=1),
     "sofa":    FurnitureType("sofa", "Sofa", 2.0, 0.9, 0.85, 0.45, blocks_camera=True, blocks_audio=False, seat_capacity=3),
     "cabinet": FurnitureType("cabinet", "Cabinet", 1.2, 0.5, 1.60, 0.15, blocks_camera=True, blocks_audio=True),
-    "screen":  FurnitureType("screen", "Display / screen", 1.8, 0.10, 1.10, 0.12, blocks_camera=True, blocks_audio=True),
+    "screen":  FurnitureType("screen", "Display / screen", 1.8, 0.10, 1.40, 0.12, blocks_camera=True, blocks_audio=True),
     "door":    FurnitureType("door", "Door", 0.9, 0.10, 2.10, 0.06, blocks_camera=False, blocks_audio=False),
     "window":  FurnitureType("window", "Window", 1.4, 0.10, 1.40, 0.05, blocks_camera=False, blocks_audio=False),
     "plant":   FurnitureType("plant", "Plant", 0.6, 0.60, 1.50, 0.20, blocks_camera=False, blocks_audio=False),
