@@ -28,8 +28,8 @@ def deserialize(text: str) -> SystemConfig:
         raise DeserializeError("Config must be a JSON object.")
     if not isinstance(parsed.get("version"), int):
         raise DeserializeError('Missing numeric "version".')
-    if parsed["version"] not in (1, 2, CONFIG_VERSION):
-        raise DeserializeError(f'Unsupported config version {parsed["version"]}; expected 1, 2 or {CONFIG_VERSION}.')
+    if parsed["version"] not in (1, 2, 3, CONFIG_VERSION):
+        raise DeserializeError(f'Unsupported config version {parsed["version"]}; expected 1, 2, 3 or {CONFIG_VERSION}.')
     for fld in ("devices", "routes", "matrix", "automixer", "muteLinks", "metadata"):
         if fld not in parsed:
             raise DeserializeError(f'Missing required field "{fld}".')
@@ -43,6 +43,8 @@ def deserialize(text: str) -> SystemConfig:
         _migrate_v1_to_v2(parsed)
     if parsed["version"] == 2:
         _migrate_v2_to_v3(parsed)
+    if parsed["version"] == 3:
+        _migrate_v3_to_v4(parsed)
     return config_from_dict(parsed)
 
 
@@ -63,4 +65,12 @@ def _migrate_v2_to_v3(obj: dict) -> None:
     control = obj.get("control")
     if isinstance(control, dict) and not isinstance(control.get("scenes"), list):
         control["scenes"] = []
+    obj["version"] = 3
+
+
+def _migrate_v3_to_v4(obj: dict) -> None:
+    """v4 adds conferencing cameras, loudspeaker aim, and furniture geometry on
+    ``room.objects`` — all optional, additive fields. A v3 file gains nothing it
+    didn't have (every new field is omit-when-absent), so this is a pure version
+    bump; existing devices/objects reconstruct identically."""
     obj["version"] = CONFIG_VERSION

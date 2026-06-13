@@ -31,7 +31,7 @@ def _scheduled(time="09:00", days=("tue",), enabled=True, scene="lecture"):
 def test_schedule_round_trips_and_is_additive():
     c = _scheduled()
     d = json.loads(cp.serialize(c))
-    assert d["version"] == 3                                       # no bump
+    assert d["version"] == cp.CONFIG_VERSION                       # schedules are additive
     assert d["control"]["schedules"] == [
         {"id": "t1", "sceneId": "lecture", "time": "09:00", "days": ["tue"], "enabled": True}
     ]

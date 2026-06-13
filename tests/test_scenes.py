@@ -27,7 +27,7 @@ def test_scene_round_trips_with_camelcase_schema():
     c = _scene_config()
     text = cp.serialize(c)
     d = json.loads(text)
-    assert d["version"] == 3
+    assert d["version"] == cp.CONFIG_VERSION
     s = d["control"]["scenes"][0]
     assert s["muteStates"] == {"mg1": True}
     assert s["zoneStates"][0] == {"arrayId": "A", "zoneId": "z1", "gainDb": -3.0, "active": True}
@@ -65,13 +65,13 @@ def test_v2_file_upgrades_losslessly():
     assert restored.control.scenes == []                         # additive default
     # round-trip of the upgraded config differs from v2 only by version + scenes
     up = json.loads(cp.serialize(restored))
-    assert up["version"] == 3 and up["control"]["scenes"] == []
+    assert up["version"] == cp.CONFIG_VERSION and up["control"]["scenes"] == []
     up["version"] = 2
     del up["control"]["scenes"]
     assert up == json.loads(v2_text)
 
 
-def test_v1_chain_migrates_to_v3():
+def test_v1_chain_migrates_to_current():
     c = cp.create_config("m", "x")
     c = cp.add_device(c, cp.create_processor("P", "DSP"))
     doc = json.loads(cp.serialize(c))
@@ -80,7 +80,7 @@ def test_v1_chain_migrates_to_v3():
         d.pop("profileId", None)
         d.pop("dspBlocks", None)
     restored = cp.deserialize(json.dumps(doc))
-    assert restored.version == 3
+    assert restored.version == cp.CONFIG_VERSION
     assert cp.find_device(restored, "P").profile_id is not None  # v1→v2 step still ran
 
 
