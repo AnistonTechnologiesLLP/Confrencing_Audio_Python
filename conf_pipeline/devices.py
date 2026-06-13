@@ -7,6 +7,7 @@ from . import matrix as mx
 from .model import (
     AecConfig,
     Codec,
+    ConferencingCamera,
     Loudspeaker,
     Port,
     PortKind,
@@ -57,3 +58,9 @@ def create_loudspeaker(id: str, label: str, transport: Transport = "analog") -> 
 
 def create_codec(id: str, label: str, transport: Transport = "dante") -> Codec:
     return Codec(id=id, label=label, ports=[_make_port(id, "output", transport, 1), _make_port(id, "input", transport, 1)], profile_id=default_profile_id("codec"))
+
+
+def create_camera(id: str, label: str, profile_id: str = "generic-ptz-camera") -> ConferencingCamera:
+    """A conferencing camera (coverage-only). No audio ports — routing is deferred,
+    so it never participates in auto-route (which filters by device type)."""
+    return ConferencingCamera(id=id, label=label, ports=[], profile_id=profile_id)

@@ -21,6 +21,7 @@ from .model import (
     Crosspoint,
     Device,
     MatrixMixer,
+    ConferencingCamera,
     MuteGroup,
     MuteTrigger,
     Point2D,
@@ -28,10 +29,12 @@ from .model import (
     Route,
     RoomBackground,
     RoomLayout,
+    RoomObject,
     Scene,
     SceneSchedule,
     SceneSteer,
     SceneZoneState,
+    SeatAnchor,
     SystemConfig,
     Talker,
     WEEKDAYS,
@@ -45,6 +48,8 @@ from .model import (
     point_in_shape,
     to_jsonable,
 )
+from .devices import create_camera
+from .furniture import furniture_type
 
 # --------------------------------------------------------------------------- #
 # Config lifecycle
@@ -440,6 +445,115 @@ def rename_talker(config: SystemConfig, talker_id: str, label: str) -> SystemCon
 
 def talker_elevation(talker: Talker) -> float:
     return talker.elevation if talker.elevation is not None else DEFAULT_TALKER_ELEVATION_M
+
+
+# --------------------------------------------------------------------------- #
+# Cameras & device aim (v4)
+# --------------------------------------------------------------------------- #
+def add_camera(config: SystemConfig, camera: ConferencingCamera) -> SystemConfig:
+    """Add a conferencing camera (coverage-only). Thin wrapper over add_device so
+    duplicate-id checks and cloning stay in one place."""
+    return add_device(config, camera)
+
+
+def _aimed(d: Device, device_id: str, **changes) -> Device:
+    if d.type not in ("camera", "loudspeaker"):
+        raise ValueError(f"Device {device_id} is not a camera or loudspeaker (no aim).")
+    return _with(d, **changes)
+
+
+def set_camera_bearing(config: SystemConfig, device_id: str, bearing_deg: float) -> SystemConfig:
+    return _map_device(config, device_id, lambda d: _aimed(d, device_id, bearing_deg=bearing_deg % 360.0))
+
+
+def set_camera_tilt(config: SystemConfig, device_id: str, tilt_deg: float) -> SystemConfig:
+    return _map_device(config, device_id, lambda d: _aimed(d, device_id, tilt_deg=tilt_deg))
+
+
+def set_speaker_bearing(config: SystemConfig, device_id: str, bearing_deg: float) -> SystemConfig:
+    return _map_device(config, device_id, lambda d: _aimed(d, device_id, bearing_deg=bearing_deg % 360.0))
+
+
+def set_speaker_tilt(config: SystemConfig, device_id: str, tilt_deg: float) -> SystemConfig:
+    return _map_device(config, device_id, lambda d: _aimed(d, device_id, tilt_deg=tilt_deg))
+
+
+# --------------------------------------------------------------------------- #
+# Furniture / room objects (v4)
+# --------------------------------------------------------------------------- #
+def _map_room_objects(config: SystemConfig, fn: Callable[[list[RoomObject]], list[RoomObject]]) -> SystemConfig:
+    if config.room is None:
+        raise ValueError("No room to place furniture in — set a room first.")
+    room = copy.copy(config.room)
+    room.objects = fn(list(config.room.objects))
+    return _clone(config, room=room)
+
+
+def _map_room_object(config: SystemConfig, object_id: str, fn: Callable[[RoomObject], RoomObject]) -> SystemConfig:
+    def apply(objs: list[RoomObject]) -> list[RoomObject]:
+        found = False
+        out = []
+        for o in objs:
+            if o.id == object_id:
+                found = True
+                out.append(fn(o))
+            else:
+                out.append(o)
+        if not found:
+            raise ValueError(f"Unknown room object: {object_id}")
+        return out
+    return _map_room_objects(config, apply)
+
+
+def add_furniture(
+    config: SystemConfig, object_id: str, kind: str, position: Point2D, *,
+    rotation_deg: Optional[float] = None, width: Optional[float] = None,
+    depth: Optional[float] = None, height: Optional[float] = None,
+    seats: Optional[list[SeatAnchor]] = None,
+) -> SystemConfig:
+    """Place a piece of furniture, defaulting its size from the catalog for ``kind``.
+    Occlusion/absorption stay catalog-resolved (left unset) so catalog tuning
+    improves existing designs; geometry the user can edit is persisted explicitly."""
+    ft = furniture_type(kind)
+    obj = RoomObject(
+        id=object_id, kind=kind, position=position,
+        width=width if width is not None else (ft.width if ft else None),
+        depth=depth if depth is not None else (ft.depth if ft else None),
+        height=height if height is not None else (ft.height if ft else None),
+        rotation_deg=rotation_deg,
+        seat_capacity=(ft.seat_capacity if ft and ft.seat_capacity else None),
+        seats=list(seats) if seats else None,
+    )
+
+    def add(objs: list[RoomObject]) -> list[RoomObject]:
+        if any(o.id == object_id for o in objs):
+            raise ValueError(f"Duplicate room-object id: {object_id}")
+        return [*objs, obj]
+    return _map_room_objects(config, add)
+
+
+def remove_furniture(config: SystemConfig, object_id: str) -> SystemConfig:
+    return _map_room_objects(config, lambda objs: [o for o in objs if o.id != object_id])
+
+
+def set_furniture_position(config: SystemConfig, object_id: str, position: Point2D) -> SystemConfig:
+    return _map_room_object(config, object_id, lambda o: _with(o, position=position))
+
+
+def set_furniture_rotation(config: SystemConfig, object_id: str, rotation_deg: float) -> SystemConfig:
+    return _map_room_object(config, object_id, lambda o: _with(o, rotation_deg=rotation_deg % 360.0))
+
+
+def set_furniture_dimensions(
+    config: SystemConfig, object_id: str, *,
+    width: Optional[float] = None, depth: Optional[float] = None, height: Optional[float] = None,
+) -> SystemConfig:
+    changes = {k: v for k, v in (("width", width), ("depth", depth), ("height", height)) if v is not None}
+    return _map_room_object(config, object_id, lambda o: _with(o, **changes))
+
+
+def set_seat_anchors(config: SystemConfig, object_id: str, seats: Optional[list[SeatAnchor]]) -> SystemConfig:
+    return _map_room_object(config, object_id, lambda o: _with(o, seats=list(seats) if seats else None))
 
 
 def array_to_talker_angles(config: SystemConfig, array_id: str, talker_id: str) -> Optional[SteeringAngles]:
