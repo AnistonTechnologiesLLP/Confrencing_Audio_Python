@@ -13,9 +13,9 @@ and steering angles are planning abstractions; the optional **placement simulato
 placement, with an opt-in physics-validation backend — still no real-time DSP.
 
 The engine is a faithful port of the TypeScript version and writes the **same
-JSON schema** (camelCase keys; currently `version` 3 — older v1/v2 files load
-and migrate losslessly). The TS sibling tracks v2, so it needs a matching v3
-update to read configs exported with scenes.
+JSON schema** (camelCase keys; currently `version` 4 — older v1/v2/v3 files load
+and migrate losslessly), at matching v4 parity with the TS sibling. The PySide6
+desktop app is presented as **Aniston Room Designer**.
 
 ## Layout
 
@@ -36,6 +36,8 @@ conf_pipeline/        the engine (pure dataclasses + functions, no Qt)
   files.py            project file manager: recent files, autosave, crash recovery, migration notice
   control_api.py      local HTTP control API (scene recall / mute / status; stdlib http.server)
   scheduler.py        scene scheduler (weekly "HH:MM" recalls; injectable clock)
+  furniture.py        furniture catalog (kind → size / seat-capacity / absorption) + resolvers
+  coverage_sim.py     geometric room coverage: mic sectors + camera FOV + occlusion → RoomCoverage
   sim/                placement simulation (scoring, search, pluggable validation)
 conf_pipeline_gui/    the PySide6 app — "Stagebar" workflow-modes shell
   state.py            AppState (undo/redo, selection, tool, mode, camera, live overlay)
@@ -46,6 +48,7 @@ conf_pipeline_gui/    the PySide6 app — "Stagebar" workflow-modes shell
   modebar.py          DESIGN→SIMULATE→ROUTE→DEPLOY→LIVE switcher with status dots
   toolrail.py         per-mode canvas tools (zone-kind flyout on the Zone tool)
   viewbar.py          floating 2D/3D + overlays popover on the canvas
+  simbar.py           floating coverage-sim toggles (pickup / FOV / dispersion / occlusion)
   issues.py           global validation drawer (slides over the panel in any mode)
   panels/             one purpose-built right panel per mode
                       (design · simulate · route · deploy · live + shared common)
@@ -62,7 +65,11 @@ conf_pipeline_control/ host-side array-microphone control (optional [control] ex
   octovox_bridge.py   zones → azimuths + HTTP client to the OCTOVOX clean server
   octovox_monitor.py  near-live cleaned monitor (rolling chunk → clean → playback)
   ab_test.py          A/B harness: record → beamform N ways → WAVs + dB report
-tests/                pytest suite (357 tests; incl. headless GUI smoke)
+  polaris_beamformer.py  real-time SRP-PHAT DOA + delay-and-sum steered beam (POLARIS 8-mic)
+  virtual_mic_grid.py    Nureva-style fixed near-field virtual-mic grid, loudest selected
+  beam_engine.py      A/B engine: steered + grid back-ends on one shared input stream
+  tracking.py         swappable smoothers (EMA + constant-velocity/Kalman-family hook)
+tests/                pytest suite (469 tests; incl. headless GUI smoke)
 run_gui.py            launcher
 ```
 
@@ -497,6 +504,62 @@ holder = cp.ConfigHolder(c)
 with cp.SceneScheduler(holder.get, holder.apply) as sched:
     ...  # fires at 08:30 on weekdays; sched.next_fire() tells you when
 ```
+
+## Cameras, furniture & coverage simulation (1.16.0)
+
+Schema **v4** adds three things the room model was missing: **conferencing cameras**
+(a placed device with `bearingDeg` / `tiltDeg` aim and an FOV/range spec),
+**loudspeaker aim**, and **furniture** (`RoomObject` with size / rotation / seat
+anchors, resolved against a small catalog). On top of them, a **geometric coverage
+simulator** answers "who is actually covered?":
+
+```python
+import conf_pipeline as cp
+
+cov = cp.simulate_room_coverage(config)              # RoomCoverage (mics / cameras / speakers)
+print(cov.summary["mic_coverage_pct"], cov.summary["mic_gaps"])   # who's picked up, and the gaps
+                                                     # height-aware furniture occlusion applied
+```
+
+Coverage is computed as view-independent wedges (mic pickup, camera FOV, speaker
+dispersion) so the desktop app renders the same contract in **both 2D and 3D**. The
+app gains a floating **SimBar** to toggle the overlays and a **Furniture tool** to
+place / move / resize / rotate items. Lossless from v1/v2/v3; a config that uses none
+of the v4 fields round-trips byte-for-byte.
+
+## Real-time array beamforming (1.16.0)
+
+The `[control]` extra gains a real-time beamforming suite for the physical **sensiBel
+POLARIS 8-mic** array (numpy + sounddevice), separate from the offline design layer
+above:
+
+- **Steered** — `cc.PolarisBeamformer` runs **SRP-PHAT** direction-finding and steers
+  a delay-and-sum beam at the dominant talker (active-speaker isolation), with
+  talker-hold smoothing and opt-in wait-for-device / auto-reconnect.
+- **Selection** — `cc.VirtualMicGrid` is a Nureva-"Microphone-Mist"-style grid of
+  fixed near-field virtual mics, all run per block, the loudest selected (no steering).
+  It **holds the last seat through silence** (a peak/median VAD) instead of chasing
+  noise.
+- **A/B** — `cc.BeamEngine` runs both behind **one shared input stream** with runtime
+  `set_mode("steered"|"grid")`, a normalized `Location` report, and an equal-power
+  crossfade — so you can compare strategies live on one board.
+
+```python
+import conf_pipeline_control as cc
+
+eng = cc.BeamEngine(device=7)         # one POLARIS USB device, 8 ch @ 44100 Hz
+eng.start()
+eng.set_mode("grid")                  # glitch-free crossfade to grid selection
+print(eng.current_location)           # Location(mode, angle_deg, xy, confidence)
+```
+
+The beam output is band-limited at the array's ~5.6 kHz spatial-aliasing cutoff by
+default (`beam_bandlimit_hz`), selection/steering smoothing is swappable behind a
+`Tracker` interface (`tracking.py`, with a constant-velocity Kalman-family hook), and
+`polaris-beam-demo` / `polaris-vmic-demo` / `polaris-beam-engine-demo` are console
+entry points. **Caveat:** the ~cm aperture means coarse-zone selection, not
+MXA920/Nureva-scale pinpoint — these isolate a zone or A/B two strategies, they don't
+separate two people at one table.
 
 ## Designer-inspired workflow (1.8.0)
 

@@ -3,8 +3,84 @@
 Python port of the Conferencing Audio Pipeline. Format based on
 [Keep a Changelog](https://keepachangelog.com/); versions originally tracked
 the TypeScript project they were ported from. The JSON **config schema** is
-camelCase, currently `CONFIG_VERSION` = 3 (v1/v2 files migrate losslessly);
-the TS sibling tracks v2 and needs a matching update to read v3 exports.
+camelCase, currently `CONFIG_VERSION` = 4 (v1/v2/v3 files migrate losslessly);
+the TS sibling is at matching v4 parity. The desktop app is presented as
+**Aniston Room Designer**.
+
+## [1.16.0] - 2026-06-15
+
+**Room v4 + real-time array beamforming** — the room model gains cameras,
+loudspeaker aim, and furniture, with a geometric coverage simulator that renders in
+2D and 3D; and the optional `[control]` layer gains a real-time beamforming suite for
+the physical sensiBel POLARIS 8-mic array (SRP-PHAT steering, a Nureva-style
+virtual-mic grid, and an A/B engine over both). Schema **v3 → v4** (cameras /
+loudspeaker aim / furniture — lossless from v1/v2/v3). The desktop app is rebranded
+**Aniston Room Designer**.
+
+### Added — room model & coverage simulation (schema v4)
+- **Conferencing cameras** (`model.py`, `api.py`): a `ConferencingCamera` device with
+  pose (`bearing_deg` / `tilt_deg`) and a `CameraSpec` profile (FOV / range);
+  `create_camera` / `add_camera`; generic-ptz / wide / soundbar-camera profiles.
+- **Loudspeaker aim** (`SpeakerSpec`) and **furniture geometry** — `RoomObject`
+  enriched with size / rotation / `SeatAnchor`s, resolved against a
+  `conf_pipeline/furniture.py` catalog (table / desk / chair / sofa / screen / …).
+- **Geometric coverage simulation** (`conf_pipeline/coverage_sim.py`):
+  `simulate_room_coverage` → `RoomCoverage` — mic pickup sectors + camera FOV with
+  **height-aware furniture occlusion** + speaker dispersion, per-target hits and
+  coverage % / gaps. A view-independent `CoverageWedge` so 2D and 3D share one
+  contract; a `mic_coverage_fn` injection seam reserved for a beamformer-driven tier.
+- **Validation** (5 codes): `CAMERA_UNPLACED` / `CAMERA_NO_SUBJECT`,
+  `FURNITURE_OUTSIDE_ROOM` / `FURNITURE_GEOMETRY_INVALID`, `DEVICE_INSIDE_FURNITURE`.
+- **GUI**: a floating **SimBar** (`simbar.py`) toggling Pickup / FOV / Dispersion /
+  Occlusion with a coverage readout; a **Furniture tool** (catalog flyout,
+  place / move / resize / rotate, one undo per gesture); coverage overlays + furniture
+  rendered in **both 2D and 3D**; camera in the Design device picker with bearing /
+  tilt aim.
+
+### Added — real-time POLARIS array beamforming (`[control]` extra)
+- **`PolarisBeamformer`** (`polaris_beamformer.py`): real-time **SRP-PHAT DOA +
+  time-domain delay-and-sum** for the 8-mic array — estimates the dominant talker's
+  azimuth and emits one steered mono beam (active-speaker isolation). Talker-hold
+  smoothing; `start` / `stop` manage the stream + a ~10 Hz DOA worker; opt-in
+  **wait-for-device + auto-reconnect** with structural fail-fast (`DeviceConfigError`).
+  Defaults to all 8 capsules active (dead capsule opt-in). `polaris-beam-demo`.
+- **`VirtualMicGrid`** (`virtual_mic_grid.py`): a Nureva-"Microphone-Mist"-style
+  **selection** beamformer — a dense grid of fixed near-field virtual mics, all run per
+  block, the loudest selected (no steering / DOA). Self-contained / removable.
+  `polaris-vmic-demo`.
+- **`BeamEngine`** (`beam_engine.py`): unifies both back-ends behind **one shared input
+  stream** with runtime `set_mode("steered"|"grid")`, a normalized
+  `Location{mode, angle_deg, xy, confidence}` report, and an equal-power crossfade on
+  switch — a glitch-free A/B of the two strategies on one board.
+  `polaris-beam-engine-demo`.
+- **Beam-output band-limiting** — a pure-numpy Hann-windowed-sinc low-pass
+  (`beam_bandlimit_hz`), **on by default** at the array's ~5.6 kHz spatial-aliasing
+  cutoff (`None` / `0` disables); a unified `BeamEngine` toggle drives both back-ends.
+- **Swappable tracking** (`conf_pipeline_control/tracking.py`): a `Tracker` /
+  `ValueSmoother` interface with an `ExponentialTracker` (the grid's selection smoother)
+  and an `AlphaBetaTracker` (constant-velocity / steady-state-Kalman hook); the steered
+  talker-hold machine is unified under the same lifecycle.
+- **Grid voice-activity gating** — the grid now **holds the last seat through silence**
+  (`vad_floor_db` peak/median gate) instead of chasing noise, and exposes
+  `speech_active` / `noise_only` for a future adaptive (MVDR) stage.
+
+### Changed
+- The desktop app's window title / display name / icon are **Aniston Room Designer**
+  (wren mark; a white icon for the dark theme). The package name is unchanged.
+
+### Tests
+- **469 tests** (was 357): camera / furniture / coverage-sim / coverage-design API and
+  GUI overlays; hardware-free beamformer suites (DOA recovery, near-field grid
+  selection, BeamEngine seam round-trip + crossfade, band-limit FIR, tracking filters,
+  grid VAD hold). `conf_pipeline` + `conf_pipeline_control` stay mypy-clean.
+
+### Fixed
+- A reset/realtime race in the grid back-end's selection-hold + smoother state (a mode
+  switch could null the hold-state mid-block): selection state is now guarded by the
+  back-end lock with a None-guard fallback, and `PolarisBeamformer.reset_transient`
+  rebinds its tracker atomically rather than mutating it while the DOA thread reads it.
+- The v2 → v3 migration hard-coded `CONFIG_VERSION`; the v3 → v4 step restored an
+  additive, version-correct migration so v3 files round-trip losslessly into v4.
 
 ## [1.15.0] - 2026-06-12
 
