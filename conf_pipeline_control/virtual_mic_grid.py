@@ -11,10 +11,10 @@ output. Nothing is steered or scanned — the focus points never move, the syste
 hold-time problem entirely.
 
 This module is **self-contained and optional**: it reuses only the shared core modules
-(geometry / MicController / doa band helper / audio device discovery) and duplicates the few
-small device-IO helpers inline, so it imports from and modifies the steered sibling not at
-all. Delete this file (+ its test, the one ``__init__`` export line, the optional console
-entry) to remove the feature cleanly.
+(geometry / MicController / doa band helper / audio device discovery / tracking) and
+duplicates the few small device-IO helpers inline, so it imports from and modifies the steered
+sibling not at all. Delete this file (+ its test, the one ``__init__`` export line, the
+optional console entry) to remove the feature cleanly.
 
 numpy + sounddevice are the ``[control]`` extra, imported lazily inside :meth:`_open`.
 
@@ -49,6 +49,7 @@ from typing import Any, Callable, List, Optional, Sequence, Tuple
 from .audio import controls_available, list_input_devices, missing_dependencies
 from .control import MicController
 from .geometry import SOUND_SPEED_MPS, ArrayGeometry, sensibel_8, with_active_channels
+from .tracking import ExponentialTracker, ValueSmoother
 from . import doa
 
 # --- POLARIS hardware constants (physical facts — do not "tune") ---
@@ -235,6 +236,7 @@ class VirtualMicGrid(MicController):
         nfft: int = DEFAULT_NFFT,
         top_k: int = 1,
         selection_smoothing: float = 0.5,
+        tracker: Optional[ValueSmoother] = None,   # swap the selection smoother (default: EMA)
         beam_bandlimit_hz: Optional[float] = DEFAULT_BEAM_BANDLIMIT_HZ,   # None/0 disables
         output_callback: Optional[Callable[[Any], None]] = None,
         output_queue_size: int = 8,
@@ -264,6 +266,10 @@ class VirtualMicGrid(MicController):
         self.score_band = (float(score_band[0]), float(score_band[1]))
         self.top_k = int(top_k)
         self.selection_smoothing = float(selection_smoothing)
+        # Selection smoother behind the unified ValueSmoother interface — swap in any
+        # ValueSmoother (e.g. tracking.AlphaBetaTracker) via tracker=; default is the EMA used
+        # inline before.
+        self._selection_tracker: ValueSmoother = tracker or ExponentialTracker(self.selection_smoothing)
         self.beam_bandlimit_hz = beam_bandlimit_hz
         self.output_device = output_device
         self.monitor = monitor
@@ -283,7 +289,6 @@ class VirtualMicGrid(MicController):
         self._state_lock = threading.Lock()
         self._selected: Optional[int] = None
         self._scores: Any = None                # latest smoothed per-vmic energies (N,)
-        self._score_ema: Any = None
         self.error = ""
 
         # lazily bound in _open() (numpy / sounddevice) — Any so the module imports + type-checks
@@ -349,23 +354,18 @@ class VirtualMicGrid(MicController):
 
     # ---- selection (pure-ish; testable without a stream) ----
     def _update_selection(self, score: Any):
-        """Fold a raw per-vmic score into the smoothed selection. EMA only (light, no long
-        hold): ``ema = a·score + (1−a)·ema``; select ``argmax(ema)``. Returns ``(selected, order,
-        ema)``."""
+        """Fold a raw per-vmic score into the smoothed selection: push it through the
+        selection :class:`~conf_pipeline_control.tracking.Tracker` (default a one-pole EMA),
+        then select ``argmax``. Returns ``(selected, order, smoothed)``."""
         import numpy as np
 
-        a = self.selection_smoothing
-        if self._score_ema is None:
-            ema = np.asarray(score, dtype=float).copy()
-        else:
-            ema = a * score + (1.0 - a) * self._score_ema
-        order = np.argsort(ema)[::-1]
+        smoothed = self._selection_tracker.update(score)
+        order = np.argsort(smoothed)[::-1]
         selected = int(order[0])
         with self._state_lock:
-            self._score_ema = ema
-            self._scores = ema
+            self._scores = smoothed
             self._selected = selected
-        return selected, order, ema
+        return selected, order, smoothed
 
     def _mix_output(self, monos: Any, order: Any, ema: Any) -> Any:
         """Top-1 (default) or score-weighted top-k blend of the selected virtual mics."""
@@ -397,7 +397,7 @@ class VirtualMicGrid(MicController):
         self._win = np.hanning(self.nfft).astype(float)
         freqs_full = np.fft.rfftfreq(self.nfft, d=1.0 / self.sample_rate)
         self._score_band_idx = doa.band_indices(freqs_full, self.score_band[0], self.score_band[1])
-        self._score_ema = None
+        self._selection_tracker.reset()
         if self.beam_bandlimit_hz:
             # Same anti-alias FIR as the steered sibling, applied to the *selected* output.
             self._lp_kernel = _lowpass_kernel(float(self.beam_bandlimit_hz), self.sample_rate)
@@ -451,9 +451,9 @@ class VirtualMicGrid(MicController):
 
     def reset_transient(self) -> None:
         """Wipe per-mode transient state so a re-activated grid doesn't carry a stale
-        selection/EMA (called on the newly-activated back-end by BeamEngine on switch)."""
+        selection (called on the newly-activated back-end by BeamEngine on switch)."""
+        self._selection_tracker.reset()
         with self._state_lock:
-            self._score_ema = None
             self._selected = None
             self._scores = None
         if self._hist is not None:

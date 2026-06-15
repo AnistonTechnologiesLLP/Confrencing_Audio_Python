@@ -133,6 +133,25 @@ def test_selection_smoothing_reduces_flicker():
     assert raw._update_selection(s_b)[0] == 1            # no smoothing → flips immediately
 
 
+def test_grid_accepts_custom_tracker():
+    from conf_pipeline_control.tracking import ValueSmoother
+
+    seen = []
+
+    class _Rec(ValueSmoother):
+        def update(self, value, t=None):
+            seen.append(1)
+            return value                                # identity → argmax of raw score
+        def reset(self):
+            seen.append("reset")
+
+    vmg = VirtualMicGrid(device=None, grid_cols=3, grid_rows=1, tracker=_Rec())
+    sel, _order, _ema = vmg._update_selection(np.array([1.0, 9.0, 2.0]))
+    assert sel == 1 and seen == [1]                     # the injected tracker was used
+    vmg.reset_transient()
+    assert "reset" in seen                              # reset_transient drives Tracker.reset()
+
+
 def test_topk_blend_and_selected_xy():
     vmg = VirtualMicGrid(device=None, grid_cols=3, grid_rows=1, top_k=2)
     monos = np.array([[1.0, 1.0, 1.0], [2.0, 2.0, 2.0], [0.0, 0.0, 0.0]])

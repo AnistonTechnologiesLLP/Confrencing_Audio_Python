@@ -101,6 +101,7 @@ from .doa import (  # noqa: F401
     in_sector,
     sector_gate,
 )
+from .tracking import AlphaBetaTracker, ExponentialTracker, Tracker, ValueSmoother  # noqa: F401
 from .autosteer import AutoSteerController, SectorConfig  # noqa: F401
 from .polaris_beamformer import DeviceConfigError, DoaReading, PolarisBeamformer  # noqa: F401
 from .virtual_mic_grid import VirtualMicGrid  # noqa: F401  (optional module — safe to delete)
@@ -129,6 +130,7 @@ __all__ = [
     "detect", "detect_offline", "sector_gate", "in_sector", "Detection", "DoaResult",
     "DEFAULT_F_LO_HZ", "DEFAULT_F_HI_HZ",
     "AutoSteerController", "SectorConfig",
+    "Tracker", "ValueSmoother", "ExponentialTracker", "AlphaBetaTracker",
     "PolarisBeamformer", "DoaReading", "DeviceConfigError",
     "VirtualMicGrid",
     "BeamEngine", "Location",

@@ -53,6 +53,7 @@ from .audio import controls_available, list_input_devices, missing_dependencies
 from .beamformer import _unit_from_az_offnadir
 from .control import MicController
 from .geometry import SOUND_SPEED_MPS, ArrayGeometry, sensibel_8, with_active_channels
+from .tracking import Tracker
 from . import doa
 
 # --- POLARIS hardware constants (physical facts — do not "tune") ---
@@ -107,11 +108,19 @@ class DoaReading:
 # --------------------------------------------------------------------------- #
 # Pure talker-hold smoothing — no threads, no numpy, no audio (unit-testable).
 # --------------------------------------------------------------------------- #
-class _TalkerTracker:
+class _TalkerTracker(Tracker):
     """Dominant-talker hold/switch machine. Decouples the *steered* angle from the
     raw per-cycle DOA so the beam doesn't jitter: it holds the committed talker
     through brief silences and only switches when a new direction is more than
     ``switch_margin_deg`` away.
+
+    This is the steered path's **domain tracker** (cf.
+    :mod:`conf_pipeline_control.tracking`): it shares the :class:`~conf_pipeline_control.tracking.Tracker`
+    lifecycle (``reset()``) but keeps its own richer ``update(observed_az, salience_db, t)``
+    contract — arbitrating *which* discrete talker to follow, which a plain EMA on a wrapping
+    azimuth can't do (it would smear across switches). For continuous *trajectory* smoothing of
+    the committed angle, an :class:`~conf_pipeline_control.tracking.AlphaBetaTracker` (the
+    constant-velocity Kalman hook) is the documented swap-in.
 
     Time is supplied by the caller (monotonic seconds) so it is deterministic and
     testable without a clock or hardware.
@@ -148,6 +157,12 @@ class _TalkerTracker:
         self._sal = float(salience_db)
         self._last_seen_t = t
         return DoaReading(self._az, self._sal, held=False, active=True)
+
+    def reset(self) -> None:
+        """Drop the committed talker (Tracker lifecycle — wiped on a BeamEngine mode switch)."""
+        self._az = None
+        self._sal = 0.0
+        self._last_seen_t = None
 
     def current(self) -> Optional[float]:
         return self._az
@@ -690,10 +705,7 @@ class PolarisBeamformer(MicController):
     def reset_transient(self) -> None:
         """Wipe per-mode transient state so a re-activated beam doesn't replay stale
         audio/DOA (called on the newly-activated back-end by BeamEngine on switch)."""
-        self._tracker = _TalkerTracker(
-            hold_seconds=self._tracker.hold_seconds,
-            switch_margin_deg=self._tracker.switch_margin_deg,
-        )
+        self._tracker.reset()                   # Tracker lifecycle (keeps its hold/margin config)
         with self._cov_lock:
             if self._cov is not None:
                 self._cov[...] = 0.0

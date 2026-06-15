@@ -124,6 +124,18 @@ def test_switch_margin_is_wrap_aware():
     assert tk.update(5.0, 8.0, t=0.1).azimuth_deg == 350.0
 
 
+def test_talker_tracker_reset_lifecycle():
+    from conf_pipeline_control.tracking import Tracker
+
+    tk = _TalkerTracker(hold_seconds=0.4, switch_margin_deg=20.0)
+    assert isinstance(tk, Tracker)                       # shares the unified Tracker lifecycle
+    tk.update(90.0, 8.0, t=0.0)
+    assert tk.current() == 90.0
+    tk.reset()                                           # wiped; config (hold/margin) preserved
+    assert tk.current() is None and tk.hold_seconds == 0.4
+    assert tk.update(200.0, 7.0, t=1.0).azimuth_deg == 200.0   # re-acquires fresh, no hold of 90
+
+
 # --------------------------------------------------------------------------- #
 # Delay-and-sum beam selectivity
 # --------------------------------------------------------------------------- #
