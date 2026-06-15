@@ -58,6 +58,8 @@ class LivePanel(PanelBase):
         self._calib_workers = set()      # strong refs to front-calibration runnables
         self._clean_monitor = None       # CleanMonitor while OCTOVOX cleaning is live
         self._autosteer = None           # AutoSteerController while auto-following talkers
+        self._beam_engine = None         # BeamEngine while running the steered/grid A/B
+        self._beameng_loc = None         # last BeamEngine current_location (for the overlay tick)
         self._session_array_id = None    # the array the running session was started with
 
         root = QVBoxLayout(self)
@@ -277,6 +279,39 @@ class LivePanel(PanelBase):
             _sp.valueChanged.connect(lambda *_a: None if self._refreshing else self._on_autosteer_param_changed())
         self.live_autosteer_gate.toggled.connect(lambda *_a: None if self._refreshing else self._on_autosteer_param_changed())
 
+        # --- POLARIS A/B engine: steered vs grid on one shared stream ---
+        eng = Card("POLARIS A/B beamformer — steered ↔ grid", collapsed=True)
+        eng.setToolTip(
+            "Drive the 8-channel POLARIS board through the unified BeamEngine and switch "
+            "live between two strategies on ONE shared input stream: 'steered' (SRP-PHAT DOA "
+            "+ a delay-and-sum beam at the dominant talker) and 'grid' (a fixed near-field "
+            "virtual-mic grid, loudest selected). A strategy A/B, not a quality ranking — both "
+            "share the 40 mm array's ~5–6 kHz limit. The tracked direction is drawn on the "
+            "room map; no live monitoring yet."
+        )
+        ef = QFormLayout()
+        ef.setRowWrapPolicy(QFormLayout.WrapLongRows)
+        ef.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+        self.live_beameng = QCheckBox("Use the A/B engine (one POLARIS board)")
+        self.live_beameng.setToolTip(
+            "On Connect, run BeamEngine instead of the zone-design / auto-steer / OCTOVOX paths."
+        )
+        self.live_beameng.toggled.connect(lambda *_a: None if self._refreshing else self._on_beameng_toggled())
+        ef.addRow("A/B engine", self.live_beameng)
+        self.live_beameng_mode = QComboBox()
+        self.live_beameng_mode.addItem("Steered (DOA + beam)", "steered")
+        self.live_beameng_mode.addItem("Grid (select loudest)", "grid")
+        self.live_beameng_mode.setEnabled(False)        # enabled when the engine is ticked
+        self.live_beameng_mode.currentIndexChanged.connect(
+            lambda *_a: None if self._refreshing else self._on_beameng_mode_changed())
+        ef.addRow("Strategy", self.live_beameng_mode)
+        self.live_beameng_view = QLabel("Connect with the A/B engine to compare steered vs grid live.")
+        self.live_beameng_view.setWordWrap(True)
+        self.live_beameng_view.setFont(QFont("Consolas", 9))
+        ef.addRow(self.live_beameng_view)
+        eng.body_lay.addLayout(ef)
+        lay.addWidget(eng)
+
         # --- OCTOVOX: near-live cleaned monitor ---
         ov = Card("Clean via OCTOVOX (near-live)", collapsed=True)
         ov.setToolTip(
@@ -289,6 +324,8 @@ class LivePanel(PanelBase):
         ovf.setRowWrapPolicy(QFormLayout.WrapLongRows)
         ovf.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
         self.live_octovox = QCheckBox("Enable (use headphones)")
+        self.live_octovox.toggled.connect(
+            lambda on: None if self._refreshing else (on and self.live_beameng.setChecked(False)))
         ovf.addRow("OCTOVOX", self.live_octovox)
         self.live_octovox_url = QLineEdit(cc.OCTOVOX_DEFAULT_URL)
         ovf.addRow("Server", self.live_octovox_url)
@@ -322,7 +359,8 @@ class LivePanel(PanelBase):
         # Stop combos from demanding their full content width (long OS device
         # names) — let them fill the column and elide instead of forcing the
         # whole panel wider.
-        for combo in (self.live_array, self.live_device, self.live_rate, self.live_out_device, self.live_mode):
+        for combo in (self.live_array, self.live_device, self.live_rate, self.live_out_device,
+                      self.live_mode, self.live_beameng_mode):
             combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
             combo.setMinimumContentsLength(6)
             combo.setMinimumWidth(80)
@@ -373,8 +411,9 @@ class LivePanel(PanelBase):
         return self.live_array.currentData()
 
     def _live_busy(self):
-        """True if any live session (beamformer, OCTOVOX, or auto-steer) is active."""
-        return self._live_ctl is not None or self._clean_monitor is not None or self._autosteer is not None
+        """True if any live session (beamformer, OCTOVOX, auto-steer, or A/B engine) is active."""
+        return (self._live_ctl is not None or self._clean_monitor is not None
+                or self._autosteer is not None or self._beam_engine is not None)
 
     def _active_ctl(self):
         """The underlying MicController in use (auto-steer wraps one), or None."""
@@ -387,6 +426,31 @@ class LivePanel(PanelBase):
         on = self.live_autosteer.isChecked()
         for w in self._autosteer_widgets:
             w.setEnabled(on)
+        if on:                               # session modes are mutually exclusive
+            self.live_beameng.setChecked(False)
+
+    # ---- POLARIS A/B engine (BeamEngine: steered ↔ grid on one stream) ----
+    def _beameng_mode(self):
+        return self.live_beameng_mode.currentData() or "steered"
+
+    def _on_beameng_toggled(self):
+        """Enable the strategy picker when the engine is selected, and keep the
+        session modes mutually exclusive."""
+        on = self.live_beameng.isChecked()
+        self.live_beameng_mode.setEnabled(on)
+        if on:
+            self.live_autosteer.setChecked(False)
+            self.live_octovox.setChecked(False)
+
+    def _on_beameng_mode_changed(self):
+        """Switch a running engine's strategy live (glitch-free crossfade); otherwise
+        the picker just sets the mode the next Connect starts in."""
+        e = self._beam_engine
+        if e is not None:
+            try:
+                e.set_mode(self._beameng_mode())
+            except Exception as exc:
+                self.live_status.setText(f"A/B switch failed: {exc}")
 
     def _autosteer_sector(self):
         return cc.SectorConfig(
@@ -650,6 +714,9 @@ class LivePanel(PanelBase):
         if self._live_busy():
             self._live_disconnect()
             return
+        if self.live_beameng.isChecked():
+            self._beameng_connect()
+            return
         if self.live_autosteer.isChecked():
             self._autosteer_connect()
             return
@@ -783,6 +850,57 @@ class LivePanel(PanelBase):
         )
         self._notify_session_changed()
 
+    def _beameng_connect(self):
+        """Start the BeamEngine A/B: steered + grid back-ends on one shared POLARIS stream."""
+        if not cc.controls_available():
+            self.live_status.setText("The A/B engine needs the [control] extra (numpy + sounddevice).")
+            return
+        rate = self.live_rate.currentData() or 44100
+        mask = self._live_active_mask()
+        cfg = {"radius_m": float(self.live_radius.value())}
+        if any(mask) and not all(mask):
+            cfg["active_mask"] = list(mask)          # exclude the dead capsule on both back-ends
+        try:
+            eng = cc.BeamEngine(
+                device=self.live_device.currentData(),
+                fs=float(rate),
+                mode=self._beameng_mode(),
+                steered_cfg=dict(cfg),
+                grid_cfg=dict(cfg),
+                assumed_range_m=2.0,                 # gives steered mode an (x, y) too, for parity
+            )
+            eng.start()
+        except Exception as exc:                     # hardware/open failure → report, stay disconnected
+            self.live_status.setText(f"A/B engine connect failed: {exc}")
+            return
+        self._beam_engine = eng
+        self._beameng_loc = None
+        self._session_array_id = self._live_array_id()
+        self.live_connect.setText("Disconnect")
+        self.live_mute.setEnabled(False)             # no monitoring path on the engine yet, so
+        self.live_gain.setEnabled(False)             # mute/gain are inert — disable to avoid confusion
+        self.live_status.setText(
+            f"A/B engine live · {self._beameng_mode()} · switch strategy from the picker (no monitor)."
+        )
+        self._notify_session_changed()
+
+    def _tick_beameng(self):
+        """Update the meter + the location readout while the A/B engine runs."""
+        e = self._beam_engine
+        lvl = e.read_level()
+        pct = 0 if lvl <= 1e-6 else int(max(0.0, min(100.0, (20.0 * math.log10(lvl) + 60.0) / 60.0 * 100.0)))
+        self.live_meter.setValue(pct)
+        loc = e.current_location
+        self._beameng_loc = loc                      # cached for _publish_overlay
+        if loc.angle_deg is None and loc.xy is None:
+            self.live_beameng_view.setText(f"[{loc.mode}] · listening — no source localized ·")
+        else:
+            ang = "  -- " if loc.angle_deg is None else f"{loc.angle_deg:5.0f}°"
+            xy = "" if loc.xy is None else f"  ({loc.xy[0]:+.2f}, {loc.xy[1]:+.2f}) m"
+            self.live_beameng_view.setText(f"[{loc.mode}] {ang}{xy}  ·  conf {loc.confidence:.0%}")
+        if e.error:
+            self.live_status.setText(f"A/B engine: {e.error[:60]}")
+
     def _tick_autosteer(self):
         """Update the meter + the detected-talker readout while auto-steering."""
         a = self._autosteer
@@ -800,6 +918,15 @@ class LivePanel(PanelBase):
             self.live_status.setText(f"Auto-steer: {a.error[:60]}")
 
     def _live_disconnect(self):
+        if self._beam_engine is not None:
+            try:
+                self._beam_engine.stop()
+            finally:
+                self._beam_engine = None
+                self._beameng_loc = None
+            self.live_mute.setEnabled(True)
+            self.live_gain.setEnabled(True)
+            self.live_beameng_view.setText("Connect with the A/B engine to compare steered vs grid live.")
         if self._autosteer is not None:
             try:
                 self._autosteer.stop()
@@ -859,6 +986,11 @@ class LivePanel(PanelBase):
                 detections = [(d.azimuth_deg, d.salience_db, d.in_sector) for d in self._autosteer.detections()]
             except Exception:
                 detections = []
+        elif self._beam_engine is not None and self._beameng_loc is not None:
+            # one ray at the tracked bearing — steered DOA, or the grid's atan2(x, y) selection
+            loc = self._beameng_loc
+            if loc.angle_deg is not None:
+                detections = [(loc.angle_deg, max(0.0, loc.confidence) * 12.0, True)]
         self.state.set_live_overlay({
             # pinned at connect — the combo may show another room's arrays
             "array_id": self._session_array_id,
@@ -872,6 +1004,10 @@ class LivePanel(PanelBase):
         """Update the level meter on a dB scale (−60 dB → 0 %, 0 dB → 100 %), so
         normal speech picked up by a ceiling array is clearly visible rather than
         a sliver on a linear scale."""
+        if self._beam_engine is not None:
+            self._tick_beameng()
+            self._publish_overlay()
+            return
         if self._autosteer is not None:
             self._tick_autosteer()
             self._publish_overlay()

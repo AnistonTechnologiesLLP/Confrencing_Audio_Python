@@ -101,7 +101,11 @@ from .doa import (  # noqa: F401
     in_sector,
     sector_gate,
 )
+from .tracking import AlphaBetaTracker, ExponentialTracker, Tracker, ValueSmoother  # noqa: F401
 from .autosteer import AutoSteerController, SectorConfig  # noqa: F401
+from .polaris_beamformer import DeviceConfigError, DoaReading, PolarisBeamformer  # noqa: F401
+from .virtual_mic_grid import VirtualMicGrid  # noqa: F401  (optional module — safe to delete)
+from .beam_engine import BeamEngine, Location  # noqa: F401  (optional A/B wrapper — safe to delete)
 
 
 def controls_available() -> bool:
@@ -126,6 +130,10 @@ __all__ = [
     "detect", "detect_offline", "sector_gate", "in_sector", "Detection", "DoaResult",
     "DEFAULT_F_LO_HZ", "DEFAULT_F_HI_HZ",
     "AutoSteerController", "SectorConfig",
+    "Tracker", "ValueSmoother", "ExponentialTracker", "AlphaBetaTracker",
+    "PolarisBeamformer", "DoaReading", "DeviceConfigError",
+    "VirtualMicGrid",
+    "BeamEngine", "Location",
     "MicController", "MicState", "SimulatedMicController",
     "DEFAULT_DESIGN_FREQ_HZ", "DEFAULT_TARGET_ELEVATION_M", "RESPONSE_FLOOR_DB",
     "SPEECH_BAND_LO_HZ", "SPEECH_BAND_HI_HZ", "SPEECH_OCTAVE_CENTERS_HZ",

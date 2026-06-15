@@ -52,11 +52,13 @@ _ASSETS = Path(__file__).resolve().parent / "assets"
 def app_icon() -> QIcon:
     """The Aniston wren mark as the window/taskbar icon.
 
-    Prefers the multi-resolution .ico (crisp 16-256 px on Windows); falls back to
-    the high-res mark PNG. Both are loaded by Qt's built-in image readers, so no
-    extra image-format plugin (or Pillow) is needed at runtime.
+    Uses the white mark — the app ships dark-themed (and Windows 11's taskbar is
+    dark by default), so white reads better than the black original. Prefers the
+    multi-resolution .ico (crisp 16-256 px on Windows) and falls back through the
+    white PNG to the black assets. All are loaded by Qt's built-in image readers,
+    so no extra image-format plugin (or Pillow) is needed at runtime.
     """
-    for name in ("aniston.ico", "aniston_mark.png"):
+    for name in ("aniston_white.ico", "aniston_mark_white.png", "aniston.ico", "aniston_mark.png"):
         p = _ASSETS / name
         if p.exists():
             return QIcon(str(p))

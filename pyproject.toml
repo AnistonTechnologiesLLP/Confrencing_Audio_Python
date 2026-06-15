@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "conferencing-audio-pipeline"
-version = "1.15.0"
+version = "1.16.0"
 description = "Configuration, routing, and validation control plane for a networked-conferencing audio system, with a PySide6 workflow-modes desktop app (2D/3D layout editor, live array operations view) and optional host-side array-microphone beamforming control. Not a real-time DSP engine at its core."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -20,6 +20,9 @@ octovox = ["numpy>=1.24", "sounddevice>=0.4", "requests>=2.25", "scipy>=1.7"]  #
 
 [project.scripts]
 conf-pipeline-gui = "conf_pipeline_gui.app:main"
+polaris-beam-demo = "conf_pipeline_control.polaris_beamformer:_demo"
+polaris-vmic-demo = "conf_pipeline_control.virtual_mic_grid:_demo"
+polaris-beam-engine-demo = "conf_pipeline_control.beam_engine:_demo"
 
 [tool.setuptools]
 packages = ["conf_pipeline", "conf_pipeline.sim", "conf_pipeline_gui", "conf_pipeline_gui.panels", "conf_pipeline_control"]
