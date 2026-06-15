@@ -15,7 +15,11 @@ from conf_pipeline_control import doa
 from conf_pipeline_control.audio import InputDevice
 import conf_pipeline_control.beam_engine as be
 from conf_pipeline_control.beam_engine import BeamEngine, Location
-from conf_pipeline_control.polaris_beamformer import DoaReading, PolarisBeamformer
+from conf_pipeline_control.polaris_beamformer import (
+    DEFAULT_BEAM_BANDLIMIT_HZ,
+    DoaReading,
+    PolarisBeamformer,
+)
 from conf_pipeline_control.virtual_mic_grid import VirtualMicGrid
 
 C = 343.0
@@ -157,6 +161,22 @@ def test_set_mode_unknown_and_noop():
         eng.set_mode("bogus")
     eng.set_mode("steered")                                     # already active → noop
     assert not eng._fading and eng.get_mode() == "steered"
+
+
+# --------------------------------------------------------------------------- #
+# Unified band-limit toggle (one knob drives both back-ends)
+# --------------------------------------------------------------------------- #
+def test_engine_bandlimit_toggle_overrides_both():
+    off = BeamEngine(device=None, beam_bandlimit_hz=None)               # disable on both
+    assert off._steered.beam_bandlimit_hz is None and off._grid.beam_bandlimit_hz is None
+    fixed = BeamEngine(device=None, beam_bandlimit_hz=4000.0)           # set both
+    assert fixed._steered.beam_bandlimit_hz == 4000.0 and fixed._grid.beam_bandlimit_hz == 4000.0
+    auto = BeamEngine(device=None)                                      # _AUTO → each back-end default (on)
+    assert auto._steered.beam_bandlimit_hz == DEFAULT_BEAM_BANDLIMIT_HZ
+    assert auto._grid.beam_bandlimit_hz == DEFAULT_BEAM_BANDLIMIT_HZ
+    # an explicit per-back-end cfg key still wins over the engine-level toggle
+    mixed = BeamEngine(device=None, beam_bandlimit_hz=4000.0, steered_cfg={"beam_bandlimit_hz": 6000.0})
+    assert mixed._steered.beam_bandlimit_hz == 6000.0 and mixed._grid.beam_bandlimit_hz == 4000.0
 
 
 # --------------------------------------------------------------------------- #

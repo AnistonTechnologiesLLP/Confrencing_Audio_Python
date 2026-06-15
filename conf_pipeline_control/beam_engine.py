@@ -43,6 +43,7 @@ from .virtual_mic_grid import VirtualMicGrid
 _MODES = ("steered", "grid")
 DEFAULT_CROSSFADE_BLOCKS = 6
 _RESERVED_CFG = ("device", "sample_rate", "blocksize", "monitor", "output_callback")
+_AUTO = object()   # "not specified" sentinel for the engine-level band-limit toggle
 
 
 @dataclass(frozen=True)
@@ -83,6 +84,7 @@ class BeamEngine:
         output_callback: Optional[Callable[[Any], None]] = None,
         output_queue_size: int = 8,
         assumed_range_m: Optional[float] = None,
+        beam_bandlimit_hz: Any = _AUTO,
     ):
         if mode not in _MODES:
             raise ValueError(f"unknown mode {mode!r}; expected one of {_MODES}")
@@ -92,13 +94,19 @@ class BeamEngine:
         self.crossfade_blocks = max(1, int(crossfade_blocks))
         self.assumed_range_m = assumed_range_m
 
+        # One band-limit toggle for both back-ends (the plan's "consistent toggle"): when set,
+        # override both; an explicit per-back-end cfg key still wins. Omit (the _AUTO default) to
+        # let each back-end use its own default (ON at the array aliasing cutoff).
+        scfg, gcfg = _clean_cfg(steered_cfg), _clean_cfg(grid_cfg)
+        if beam_bandlimit_hz is not _AUTO:
+            scfg = {"beam_bandlimit_hz": beam_bandlimit_hz, **scfg}
+            gcfg = {"beam_bandlimit_hz": beam_bandlimit_hz, **gcfg}
+
         # Both back-ends share the SAME device(None)/fs/blocksize so a fed block fits both.
         self._steered = PolarisBeamformer(
-            device=None, sample_rate=self.fs, blocksize=self.blocksize, monitor=False,
-            **_clean_cfg(steered_cfg))
+            device=None, sample_rate=self.fs, blocksize=self.blocksize, monitor=False, **scfg)
         self._grid = VirtualMicGrid(
-            device=None, sample_rate=self.fs, blocksize=self.blocksize, monitor=False,
-            **_clean_cfg(grid_cfg))
+            device=None, sample_rate=self.fs, blocksize=self.blocksize, monitor=False, **gcfg)
         self._by_mode: Dict[str, Any] = {"steered": self._steered, "grid": self._grid}
 
         # Routing state, guarded by _lock (the audio callback reads it; set_mode writes it).
@@ -321,6 +329,8 @@ def _demo(argv: Optional[Any] = None) -> int:
     ap.add_argument("--start-mode", choices=_MODES, default="steered", help="initial mode")
     ap.add_argument("--toggle-seconds", type=float, default=6.0, help="auto-toggle mode every N s (0=off)")
     ap.add_argument("--crossfade-blocks", type=int, default=DEFAULT_CROSSFADE_BLOCKS, help="crossfade length")
+    ap.add_argument("--no-bandlimit", action="store_true",
+                    help="disable the beam band-limit on both back-ends (default: on at ~5.6 kHz)")
     args = ap.parse_args(argv)
 
     if not controls_available():
@@ -338,6 +348,7 @@ def _demo(argv: Optional[Any] = None) -> int:
     eng = BeamEngine(
         device=args.device, fs=args.rate, block_ms=args.block_ms, mode=args.start_mode,
         crossfade_blocks=args.crossfade_blocks, assumed_range_m=2.0,
+        beam_bandlimit_hz=(None if args.no_bandlimit else _AUTO),
     )
     print(f"BeamEngine A/B — steered vs grid on one POLARIS stream (strategy comparison, not a "
           f"quality ranking). Start: {args.start_mode}. Ctrl+C to stop.")

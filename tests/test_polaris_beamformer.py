@@ -17,9 +17,11 @@ from conf_pipeline_control import doa
 from conf_pipeline_control.audio import InputDevice
 import conf_pipeline_control.polaris_beamformer as pb
 from conf_pipeline_control.polaris_beamformer import (
+    DEFAULT_BEAM_BANDLIMIT_HZ,
     DeviceConfigError,
     PolarisBeamformer,
     _TalkerTracker,
+    _lowpass_kernel,
     delay_and_sum_block,
 )
 
@@ -172,6 +174,50 @@ def test_invalid_masks_and_mode_raise():
         PolarisBeamformer(device=None, active_mask=[False] * 8)       # all off
     with pytest.raises(ValueError):
         PolarisBeamformer(device=None, mode="mvdr")                   # not in v1
+
+
+# --------------------------------------------------------------------------- #
+# Beam output band-limit (windowed-sinc FIR, on by default)
+# --------------------------------------------------------------------------- #
+def test_lowpass_kernel_unity_dc_and_rejects_hf():
+    fs = 44100.0
+    h = _lowpass_kernel(DEFAULT_BEAM_BANDLIMIT_HZ, fs)
+    assert len(h) % 2 == 1                                  # odd → exact linear phase
+    assert abs(float(h.sum()) - 1.0) < 1e-9                 # unity DC gain
+
+    def resp(f):                                            # FIR magnitude response at f
+        n = np.arange(len(h))
+        return abs(complex(np.sum(h * np.exp(-2j * np.pi * f / fs * n))))
+
+    assert resp(1000.0) > 0.9                               # passband: speech preserved
+    assert resp(9000.0) < 0.1                               # stopband: aliased band killed
+
+
+def test_beam_bandlimit_default_on_and_disable():
+    on = PolarisBeamformer(device=None)
+    assert on.beam_bandlimit_hz == DEFAULT_BEAM_BANDLIMIT_HZ       # default = aliasing cutoff
+    on._setup_runtime()
+    assert on._lp_kernel is not None and on._lp_tail is not None
+    off = PolarisBeamformer(device=None, beam_bandlimit_hz=None)   # opt out
+    off._setup_runtime()
+    assert off._lp_kernel is None and off._lp_tail is None
+
+
+def test_process_block_bandlimit_attenuates_high_band():
+    fs = 44100.0
+    on = PolarisBeamformer(device=None)                            # FIR on (default)
+    off = PolarisBeamformer(device=None, beam_bandlimit_hz=None)   # same beam, no FIR
+    on._setup_runtime()
+    off._setup_runtime()
+    # Identical delay-and-sum beam (both look at the initial 0°); the only delta is the FIR.
+    hf = _plane_wave_block(on.geometry, 0.0, fs, on.blocksize, tones=(9000.0,))   # above the cutoff
+    lf = _plane_wave_block(on.geometry, 0.0, fs, on.blocksize, tones=(800.0,))    # well in band
+    for _ in range(3):                                             # prime the FIR history ring
+        y_on, y_off = on.process_block(hf), off.process_block(hf)
+    assert float((y_on ** 2).sum()) < 0.2 * float((y_off ** 2).sum())   # HF strongly cut
+    for _ in range(3):
+        z_on, z_off = on.process_block(lf), off.process_block(lf)
+    assert float((z_on ** 2).sum()) > 0.7 * float((z_off ** 2).sum())   # LF preserved
 
 
 # --------------------------------------------------------------------------- #

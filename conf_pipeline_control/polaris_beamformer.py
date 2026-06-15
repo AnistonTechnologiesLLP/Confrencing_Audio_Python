@@ -29,7 +29,10 @@ Array facts and honest caveats (encoded below, not hidden):
 * **Spatial aliasing.** Adjacent-capsule spacing is ``2·R·sin(π/8) ≈ 30.6 mm`` →
   reliable beamforming up to ``c/(2·spacing) ≈ 5.6 kHz``; high-frequency
   selectivity degrades above that (grating lobes). The DOA scan is band-limited to
-  ≤ 3.8 kHz (safe); the beam offers an *optional* gentle band-limit.
+  ≤ 3.8 kHz (safe); the beam **output** is low-passed at the aliasing cutoff
+  (~5.6 kHz, ``beam_bandlimit_hz``) **by default** — keeping speech up to where the
+  array still focuses and dropping the aliased band. Pass ``beam_bandlimit_hz=None``
+  to disable.
 * **Integer-delay v1.** The delay-and-sum uses integer-sample delays (one sample
   ≈ 7.78 mm of travel at 44.1 kHz vs the 80 mm aperture → up to a few degrees of
   pointing error). A fractional-delay / MVDR strategy is a documented seam
@@ -68,6 +71,15 @@ DEFAULT_SWITCH_MARGIN_DEG = 20.0  # only re-steer past this angular move (anti-j
 DEFAULT_DOA_UPDATE_HZ = 10.0      # DOA control-thread rate (NOT the audio block rate)
 # adjacent spacing 2*R*sin(pi/8); aliasing cutoff c/(2*spacing). For R=40mm ≈ 5.6 kHz.
 ALIAS_CUTOFF_HZ = SOUND_SPEED_MPS / (2.0 * 2.0 * POLARIS_RADIUS_M * 0.38268343236508984)
+
+# Realtime processing bands — one source of truth, shared with the grid back-end:
+#   * DOA scan / grid scoring stay ≤ doa.DEFAULT_F_HI_HZ (3.8 kHz), conservatively *below*
+#     the aliasing cutoff so grating-lobe phantom peaks can't corrupt direction-finding;
+#   * the beam *output* is low-passed at the aliasing cutoff (~5.6 kHz) by default — that
+#     keeps speech brightness up to where the array still focuses and drops the higher band
+#     where spatial filtering has broken down (off-axis HF leaks through grating lobes).
+DEFAULT_BEAM_BANDLIMIT_HZ = ALIAS_CUTOFF_HZ
+DEFAULT_BANDLIMIT_TAPS = 63       # Hann-windowed-sinc FIR length (forced odd → linear phase)
 
 MODE_DELAYSUM = "delaysum"
 
@@ -261,6 +273,22 @@ class _DelaySumBeam(BeamStrategy):
         return out.astype(np.float32)
 
 
+def _lowpass_kernel(fc_hz: float, fs: float, numtaps: int = DEFAULT_BANDLIMIT_TAPS) -> Any:
+    """Hann-windowed-sinc low-pass FIR — linear phase, unity DC gain, **pure numpy**.
+
+    Built by hand (windowed ideal-lowpass) so the realtime path stays inside the
+    ``[control]`` extra (numpy only, no scipy). ``numtaps`` is forced odd for an exact
+    symmetric kernel; ``fc_hz`` is the cutoff. Used to band-limit the beam output to the
+    array's spatial-aliasing cutoff — a real roll-off, unlike a crude moving average."""
+    import numpy as np
+
+    taps = max(3, int(numtaps) | 1)                          # odd ≥ 3 → linear phase
+    fc = min(0.499, max(1e-3, float(fc_hz) / float(fs)))     # normalized cutoff (cycles/sample)
+    n = np.arange(taps) - (taps - 1) / 2.0
+    h = 2.0 * fc * np.sinc(2.0 * fc * n) * np.hanning(taps)  # ideal LP × Hann window
+    return (h / h.sum()).astype(float)                       # normalize to unity DC gain
+
+
 def _install_hint() -> str:
     miss = missing_dependencies()
     pkgs = " + ".join(miss) if miss else "numpy + sounddevice"
@@ -318,7 +346,7 @@ class PolarisBeamformer(MicController):
         mode: str = MODE_DELAYSUM,
         steer_to_doa: bool = True,
         fixed_azimuth_deg: Optional[float] = None,
-        beam_bandlimit_hz: Optional[float] = None,
+        beam_bandlimit_hz: Optional[float] = DEFAULT_BEAM_BANDLIMIT_HZ,   # None/0 disables
         output_callback: Optional[Callable[[Any], None]] = None,
         output_queue_size: int = 8,
         output_device: Optional[int] = None,
@@ -604,12 +632,16 @@ class PolarisBeamformer(MicController):
         with self._cov_lock:
             self._cov = np.zeros((len(self._cov_band), self.n_channels, self.n_channels), dtype=complex)
         if self.beam_bandlimit_hz:
-            # Gentle, dependency-free anti-alias: an L-tap moving average whose first
-            # null sits near the band-limit (L ≈ fs / fc). Not a brickwall — for a
-            # steeper filter, swap in a biquad behind a fractional/MVDR BeamStrategy.
-            taps = max(2, int(round(self.sample_rate / float(self.beam_bandlimit_hz))))
-            self._lp_kernel = np.ones(taps, dtype=float) / taps
-            self._lp_tail = np.zeros(taps - 1, dtype=float)
+            # Anti-alias the beam output: a Hann-windowed-sinc low-pass at the band-limit
+            # (default = the array's ~5.6 kHz spatial-aliasing cutoff). Dependency-free
+            # (numpy only); pass beam_bandlimit_hz=None (or 0) to disable. The streaming
+            # history ring (_lp_tail) keeps the per-block convolution continuous across
+            # block boundaries (no edge click).
+            self._lp_kernel = _lowpass_kernel(float(self.beam_bandlimit_hz), self.sample_rate)
+            self._lp_tail = np.zeros(len(self._lp_kernel) - 1, dtype=float)
+        else:
+            self._lp_kernel = None
+            self._lp_tail = None
 
     # ---- external-feed seam (BeamEngine drives the DSP from a shared stream) ----
     def process_block(self, block: Any) -> Any:
@@ -670,6 +702,8 @@ class PolarisBeamformer(MicController):
         with self._state_lock:
             self._reading = DoaReading(None, 0.0, False, False)
         self._steered_az = None
+        if self._lp_kernel is not None and self._np is not None:
+            self._lp_tail = self._np.zeros(len(self._lp_kernel) - 1, dtype=float)  # flush FIR state
         with self._beam_lock:
             self._beam._hist = None        # _DelaySumBeam history ring; rebuilt on next process
 
@@ -876,7 +910,9 @@ def _demo(argv: Optional[Sequence[str]] = None) -> int:
                     help="dead capsule index to mask off (-1 = none; the real board's is 5)")
     ap.add_argument("--hold", type=float, default=DEFAULT_HOLD_SECONDS, help="talker-hold seconds")
     ap.add_argument("--switch-margin", type=float, default=DEFAULT_SWITCH_MARGIN_DEG, help="re-steer margin, deg")
-    ap.add_argument("--bandlimit", type=float, default=None, help="optional beam low-pass cutoff, Hz (~5500)")
+    ap.add_argument("--bandlimit", type=float, default=None,
+                    help="beam low-pass cutoff, Hz (default: array aliasing cutoff ~5500)")
+    ap.add_argument("--no-bandlimit", action="store_true", help="disable the beam band-limit")
     ap.add_argument("--monitor", action="store_true", help="play the mono output (use HEADPHONES)")
     ap.add_argument("--output-device", type=int, default=None, help="monitor output device index")
     ap.add_argument("--wait", action="store_true",
@@ -896,11 +932,17 @@ def _demo(argv: Optional[Sequence[str]] = None) -> int:
         return 0
 
     dead = None if args.dead is None or args.dead < 0 else args.dead
+    # omit beam_bandlimit_hz unless the user spoke → keep the class default (ON at ~5.6 kHz)
+    bl_kw: dict[str, Any] = {}
+    if args.no_bandlimit:
+        bl_kw["beam_bandlimit_hz"] = None
+    elif args.bandlimit is not None:
+        bl_kw["beam_bandlimit_hz"] = args.bandlimit
     bf = PolarisBeamformer(
         device=args.device, radius_m=args.radius, sample_rate=args.rate, block_ms=args.block_ms,
         dead_capsule=dead, hold_seconds=args.hold, switch_margin_deg=args.switch_margin,
-        beam_bandlimit_hz=args.bandlimit, monitor=args.monitor, output_device=args.output_device,
-        wait_for_device=args.wait,
+        monitor=args.monitor, output_device=args.output_device, wait_for_device=args.wait,
+        **bl_kw,
     )
     assert bf.geometry is not None
     print(f"Array: {bf.geometry.n_active}/{POLARIS_N_MICS} capsules, aperture "

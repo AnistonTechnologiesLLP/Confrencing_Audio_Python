@@ -30,7 +30,9 @@ Honest caveats (encoded below, not hidden):
   planar array barely separates points sharing a bearing/range — lift the grid off the plane
   for real separation. Documented, not "fixed."
 * **Spatial aliasing > ~5.6 kHz** (adjacent spacing ``2·R·sin(π/8) ≈ 30.6 mm``): scoring is
-  band-limited to ≤ 3.8 kHz; the output's spatial focus degrades above the cutoff.
+  band-limited to ≤ 3.8 kHz, and the selected output is low-passed at the aliasing cutoff
+  (~5.6 kHz, ``beam_bandlimit_hz``) by default — matching the steered sibling. Pass
+  ``beam_bandlimit_hz=None`` to disable.
 * **Cost = O(N_virtual_mics × N_phys_mics) per block** (plus ``O(N · nfft·log nfft)`` scoring).
   Steering delays are precomputed/cached once (focus points are fixed); per-block work is just
   apply-cached-delays + sum + score. **N is the scaling bottleneck** — true Nureva counts need
@@ -62,6 +64,10 @@ DEFAULT_SCORE_LO_HZ = doa.DEFAULT_F_LO_HZ   # 300
 DEFAULT_SCORE_HI_HZ = doa.DEFAULT_F_HI_HZ   # 3800 — below the aliasing cutoff
 # adjacent spacing 2*R*sin(pi/8); aliasing cutoff c/(2*spacing). For R=40mm ≈ 5.6 kHz.
 ALIAS_CUTOFF_HZ = SOUND_SPEED_MPS / (2.0 * 2.0 * POLARIS_RADIUS_M * 0.38268343236508984)
+# Same convention as the steered sibling: scoring stays ≤ 3.8 kHz (anti-alias for selection);
+# the selected output is low-passed at the aliasing cutoff (~5.6 kHz) by default.
+DEFAULT_BEAM_BANDLIMIT_HZ = ALIAS_CUTOFF_HZ
+DEFAULT_BANDLIMIT_TAPS = 63         # Hann-windowed-sinc FIR length (forced odd → linear phase)
 
 
 # --------------------------------------------------------------------------- #
@@ -86,6 +92,18 @@ def _resolve_active_mask(active_mask: Optional[Sequence[bool]], dead_capsule: Op
     if dead_capsule is not None:
         return tuple(i != dead_capsule for i in range(POLARIS_N_MICS))
     return None
+
+
+def _lowpass_kernel(fc_hz: float, fs: float, numtaps: int = DEFAULT_BANDLIMIT_TAPS) -> Any:
+    """Hann-windowed-sinc low-pass FIR — linear phase, unity DC gain, **pure numpy** (no scipy).
+    Duplicated from the steered sibling so this module stays self-contained/removable."""
+    import numpy as np
+
+    taps = max(3, int(numtaps) | 1)                          # odd ≥ 3 → linear phase
+    fc = min(0.499, max(1e-3, float(fc_hz) / float(fs)))     # normalized cutoff (cycles/sample)
+    n = np.arange(taps) - (taps - 1) / 2.0
+    h = 2.0 * fc * np.sinc(2.0 * fc * n) * np.hanning(taps)
+    return (h / h.sum()).astype(float)
 
 
 # --------------------------------------------------------------------------- #
@@ -217,6 +235,7 @@ class VirtualMicGrid(MicController):
         nfft: int = DEFAULT_NFFT,
         top_k: int = 1,
         selection_smoothing: float = 0.5,
+        beam_bandlimit_hz: Optional[float] = DEFAULT_BEAM_BANDLIMIT_HZ,   # None/0 disables
         output_callback: Optional[Callable[[Any], None]] = None,
         output_queue_size: int = 8,
         output_device: Optional[int] = None,
@@ -245,6 +264,7 @@ class VirtualMicGrid(MicController):
         self.score_band = (float(score_band[0]), float(score_band[1]))
         self.top_k = int(top_k)
         self.selection_smoothing = float(selection_smoothing)
+        self.beam_bandlimit_hz = beam_bandlimit_hz
         self.output_device = output_device
         self.monitor = monitor
 
@@ -282,6 +302,8 @@ class VirtualMicGrid(MicController):
         self._hist: Any = None                  # (maxd, M) history ring
         self._win: Any = None
         self._score_band_idx: Any = None
+        self._lp_kernel: Any = None             # optional output band-limit (windowed-sinc FIR)
+        self._lp_tail: Any = None
 
     # ---- public API ----
     def start(self) -> None:
@@ -376,6 +398,13 @@ class VirtualMicGrid(MicController):
         freqs_full = np.fft.rfftfreq(self.nfft, d=1.0 / self.sample_rate)
         self._score_band_idx = doa.band_indices(freqs_full, self.score_band[0], self.score_band[1])
         self._score_ema = None
+        if self.beam_bandlimit_hz:
+            # Same anti-alias FIR as the steered sibling, applied to the *selected* output.
+            self._lp_kernel = _lowpass_kernel(float(self.beam_bandlimit_hz), self.sample_rate)
+            self._lp_tail = np.zeros(len(self._lp_kernel) - 1, dtype=float)
+        else:
+            self._lp_kernel = None
+            self._lp_tail = None
 
     def process_block(self, block: Any) -> Any:
         """Run one block of the grid DSP and **return** the mono (does not emit).
@@ -393,9 +422,19 @@ class VirtualMicGrid(MicController):
         score = score_grid(monos, self._win, self._score_band_idx, self.nfft)
         _selected, order, ema = self._update_selection(score)
         mono = self._mix_output(monos, order, ema)
+        if self._lp_kernel is not None:
+            mono = self._band_limit(mono)
         rms = float(np.sqrt(np.mean(mono * mono))) if mono.size else 0.0
         self._level = min(1.0, rms)
         return mono
+
+    def _band_limit(self, mono: Any) -> Any:
+        """Streaming windowed-sinc low-pass with a history ring (continuous across blocks)."""
+        np = self._np
+        ext = np.concatenate([self._lp_tail, mono])
+        y = np.convolve(ext, self._lp_kernel, mode="valid")     # (len(mono),)
+        self._lp_tail = ext[-(len(self._lp_kernel) - 1):]
+        return y.astype(np.float32)
 
     def prepare_external(self) -> None:
         """Ready the DSP to be fed an external shared stream — **no device opened**.
@@ -419,6 +458,8 @@ class VirtualMicGrid(MicController):
             self._scores = None
         if self._hist is not None:
             self._hist[...] = 0.0
+        if self._lp_kernel is not None and self._np is not None:
+            self._lp_tail = self._np.zeros(len(self._lp_kernel) - 1, dtype=float)  # flush FIR state
 
     # ---- lifecycle / backend hooks ----
     def _open(self) -> None:
@@ -580,6 +621,8 @@ def _demo(argv: Optional[Sequence[str]] = None) -> int:
     ap.add_argument("--score-hi", type=float, default=DEFAULT_SCORE_HI_HZ, help="score band high, Hz")
     ap.add_argument("--top-k", type=int, default=1, help="blend the top-k virtual mics (1 = pure select)")
     ap.add_argument("--smoothing", type=float, default=0.5, help="selection EMA factor (0..1)")
+    ap.add_argument("--no-bandlimit", action="store_true",
+                    help="disable the output band-limit (default: on at the array aliasing cutoff)")
     ap.add_argument("--monitor", action="store_true", help="play the selected mono (use HEADPHONES)")
     ap.add_argument("--output-device", type=int, default=None, help="monitor output device index")
     args = ap.parse_args(argv)
@@ -597,12 +640,14 @@ def _demo(argv: Optional[Sequence[str]] = None) -> int:
         return 0
 
     dead = None if args.dead is None or args.dead < 0 else args.dead
+    bl_kw: dict[str, Any] = {"beam_bandlimit_hz": None} if args.no_bandlimit else {}  # else default (ON)
     vmg = VirtualMicGrid(
         device=args.device, radius_m=args.radius, sample_rate=args.rate, block_ms=args.block_ms,
         dead_capsule=dead, room_width_m=args.room_width, room_depth_m=args.room_depth,
         grid_cols=args.cols, grid_rows=args.rows, focus_height_m=args.focus_height,
         score_band=(args.score_lo, args.score_hi), top_k=args.top_k,
         selection_smoothing=args.smoothing, monitor=args.monitor, output_device=args.output_device,
+        **bl_kw,
     )
     assert vmg.geometry is not None
     print(f"Grid: {args.cols}×{args.rows} = {vmg.grid_size} virtual mics over "

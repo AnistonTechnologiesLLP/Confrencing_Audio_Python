@@ -145,6 +145,33 @@ def test_topk_blend_and_selected_xy():
 
 
 # --------------------------------------------------------------------------- #
+# Output band-limit (windowed-sinc FIR, on by default — parity with the steered sibling)
+# --------------------------------------------------------------------------- #
+def test_grid_bandlimit_default_on_and_disable():
+    on = VirtualMicGrid(device=None, grid_cols=3, grid_rows=3)
+    assert on.beam_bandlimit_hz == vmgmod.DEFAULT_BEAM_BANDLIMIT_HZ
+    on._setup_runtime()
+    assert on._lp_kernel is not None and on._lp_tail is not None
+    off = VirtualMicGrid(device=None, grid_cols=3, grid_rows=3, beam_bandlimit_hz=None)
+    off._setup_runtime()
+    assert off._lp_kernel is None and off._lp_tail is None
+
+
+def test_grid_output_bandlimit_attenuates_high_band():
+    fs = 44100.0
+    on = VirtualMicGrid(device=None, grid_cols=5, grid_rows=5)
+    off = VirtualMicGrid(device=None, grid_cols=5, grid_rows=5, beam_bandlimit_hz=None)
+    on._setup_runtime()
+    off._setup_runtime()
+    # Selection (pre-FIR) is identical for both → the energy ratio isolates the FIR.
+    t = np.arange(on.blocksize) / fs
+    hf = np.tile(np.sin(2 * np.pi * 9000.0 * t)[:, None], (1, 8))      # above the aliasing cutoff
+    for _ in range(3):                                                 # prime the FIR history
+        y_on, y_off = on.process_block(hf), off.process_block(hf)
+    assert float((y_on ** 2).sum()) < 0.2 * float((y_off ** 2).sum())
+
+
+# --------------------------------------------------------------------------- #
 # Constructor / geometry / mask
 # --------------------------------------------------------------------------- #
 def test_constructor_geometry_and_mask():
