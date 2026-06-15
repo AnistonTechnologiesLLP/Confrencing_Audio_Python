@@ -67,6 +67,19 @@ def _plane_wave_block(geom, az_deg, sr, n, tones=(2000.0, 3000.0, 4000.0)):
     return x
 
 
+def _analytic_plane_wave(geom, az_deg, sr, n, freq):
+    """Continuous-time single tone sampled at each capsule's *exact* (fractional) propagation
+    lead — not integer-rounded like :func:`_plane_wave_block`. This fairly exercises sub-sample
+    steering: the integer beamformer cannot perfectly align it, the fractional one can."""
+    elems = np.array(geom.elements, dtype=float)
+    proj = elems @ _unit(az_deg)                        # (M,) metres; toward source ⇒ earlier
+    t = np.arange(n) / sr
+    x = np.zeros((n, geom.n_channels), dtype=float)
+    for m in range(geom.n_channels):
+        x[:, m] = np.sin(2 * np.pi * freq * (t + proj[m] / C))   # capsule m leads centre by proj/c
+    return x
+
+
 # --------------------------------------------------------------------------- #
 # SRP-PHAT DOA reuse
 # --------------------------------------------------------------------------- #
@@ -165,6 +178,85 @@ def test_beam_block_handles_dead_capsule_mask():
     off = delay_and_sum_block(block, geom, 150.0, sample_rate=44100.0)
     assert on.shape == (4096,)
     assert float((on ** 2).sum()) > 1.5 * float((off ** 2).sum())
+
+
+# --------------------------------------------------------------------------- #
+# Fractional-delay strategy (sub-sample windowed-sinc steering, mode="fracdelay")
+# --------------------------------------------------------------------------- #
+def test_frac_delay_kernel_unity_dc_and_subsample_shift():
+    for frac in (0.0, 0.25, 0.5, 0.75):
+        h = pb._frac_delay_kernel(frac, 15)
+        assert len(h) == 15 and len(h) % 2 == 1                  # odd → integral centre
+        assert abs(float(h.sum()) - 1.0) < 1e-9                  # unity DC gain → no level shift
+        centroid = float(np.sum(np.arange(len(h)) * h))          # ≈ group delay in samples
+        assert abs(centroid - (7.0 + frac)) < 0.1                # centre=(15-1)/2=7, plus frac
+    imp = pb._frac_delay_kernel(0.0, 15)
+    assert int(imp.argmax()) == 7 and imp[7] > 0.999             # frac 0 ⇒ unit impulse at centre
+    clamped = pb._frac_delay_kernel(0.5, 3)                      # 3 taps degenerate (hanning→[0,1,0]) ⇒ floored to 5
+    assert len(clamped) == 5
+    assert abs(float(np.sum(np.arange(5) * clamped)) - 2.5) < 0.05   # real 0.5-sample shift, not an impulse at 2
+
+
+def test_steer_real_delays_round_to_integer_delays():
+    geom = cc.sensibel_8(radius_m=0.040)
+    idx_r, real = pb._steer_real_delays(geom, 73.0, 90.0, 44100.0, C)
+    idx_i, di, maxd = pb._steer_delays(geom, 73.0, 90.0, 44100.0, C)
+    assert idx_r == idx_i
+    assert [int(round(d)) for d in real] == list(di)             # integer path = rounded real path
+    assert maxd == max(di) and min(real) >= 0.0                  # delays are non-negative
+
+
+def test_fracdelay_strategy_selectivity():
+    geom = cc.sensibel_8(radius_m=0.040)
+    block = _analytic_plane_wave(geom, 60.0, 44100.0, 8192, 3000.0)
+    beam = pb._FracDelaySumBeam(geom, 44100.0, C)
+    beam.set_look(60.0)
+    on = beam.process(block)[64:]                                # skip the FIR/ring warm-up
+    beam.set_look(150.0)
+    off = beam.process(block)[64:]
+    assert on.shape == (8192 - 64,)
+    assert float((on ** 2).sum()) > 1.5 * float((off ** 2).sum())
+
+
+def test_fracdelay_aligns_better_than_integer_off_grid():
+    """On a fractional-lead plane wave the integer beam cannot fully align; the fractional one
+    reconstructs the tone near-coherently (RMS → 1/√2 ≈ 0.707 for a unit sine)."""
+    geom = cc.sensibel_8(radius_m=0.040)
+    fs, n, az, freq = 44100.0, 8192, 53.0, 3400.0               # off-grid azimuth, in-band tone
+    block = _analytic_plane_wave(geom, az, fs, n, freq)
+    frac = pb._FracDelaySumBeam(geom, fs, C); frac.set_look(az)
+    integ = pb._DelaySumBeam(geom, fs, C); integ.set_look(az)
+    rms = lambda v: float(np.sqrt(np.mean(v * v)))
+    yf, yi = rms(frac.process(block)[64:]), rms(integ.process(block)[64:])
+    assert yf > 0.69                                            # fractional ⇒ near-ideal coherence
+    assert yf > yi                                              # and better than integer rounding
+
+
+def test_mode_fracdelay_builds_strategy_and_runs():
+    bf = PolarisBeamformer(device=None, mode="fracdelay")
+    assert bf.mode == "fracdelay"
+    assert isinstance(bf._beam, pb._FracDelaySumBeam)
+    bf._setup_runtime()
+    out = bf.process_block(_analytic_plane_wave(bf.geometry, 0.0, bf.sample_rate, bf.blocksize, 1000.0))
+    assert out.shape == (bf.blocksize,) and bool(np.all(np.isfinite(out)))
+    bf.reset_transient()                                        # drops both strategy buffers
+    assert bf._beam._hist is None and bf._beam._frac_tail is None
+
+
+def test_fracdelay_streaming_continuity_across_blocks():
+    """The realtime path calls process() once per audio block; the _frac_tail overlap-save and the
+    _hist integer ring must keep the output identical to processing the whole signal at once — no
+    per-block click at the block rate. Guards the load-bearing cross-block carry (a zeroed tail
+    would still pass every other fracdelay test, which only ever feed one block)."""
+    geom = cc.sensibel_8(radius_m=0.040)
+    sig = _analytic_plane_wave(geom, 41.0, 44100.0, 4096, 2500.0)
+    ref = pb._FracDelaySumBeam(geom, 44100.0, C); ref.set_look(41.0)
+    whole = ref.process(sig)
+    for chunk in (5, 256, 1000):                                # 5 < (taps-1) exercises the n < L1 tail path
+        s = pb._FracDelaySumBeam(geom, 44100.0, C); s.set_look(41.0)
+        streamed = np.concatenate([s.process(sig[i:i + chunk]) for i in range(0, len(sig), chunk)])
+        assert streamed.shape == whole.shape
+        assert np.allclose(streamed, whole, atol=1e-6), f"per-block discontinuity at chunk={chunk}"
 
 
 # --------------------------------------------------------------------------- #

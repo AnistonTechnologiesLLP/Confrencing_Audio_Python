@@ -10,6 +10,19 @@ the TS sibling is at matching v4 parity. The desktop app is presented as
 ## [Unreleased]
 
 ### Added
+- **Fractional-delay beamforming** (`mode="fracdelay"`) — a sub-sample steering tier
+  for `PolarisBeamformer`, alongside the default integer `delaysum`. Each capsule's
+  steer delay is split into an integer part (the existing history-ring read) plus the
+  sub-sample remainder, applied by a short Hann-windowed-sinc fractional-delay FIR per
+  capsule (`_FracDelaySumBeam` / `_frac_delay_kernel`). This removes the up-to-±0.5-sample
+  (≈3.9 mm) pointing error of integer rounding — one sample is ≈7.78 mm of travel at
+  44.1 kHz vs the 80 mm aperture — tightening off-axis alignment for a flat, common
+  ~0.16 ms (`(taps-1)/2`-sample) latency. Stays pure numpy and realtime-safe (no FFT, no
+  added lock). Selectable on the standalone runtime (`--mode`), and on the A/B engine via
+  `BeamEngine(steered_cfg={"mode": "fracdelay"})`. The `BeamStrategy` seam gained a
+  `reset()` method so re-steer / re-activate drops streaming history cleanly. MVDR is the
+  next documented seam. (`conf_pipeline_control/polaris_beamformer.py`; +5 hardware-free
+  tests incl. a non-circular analytic-plane-wave alignment check.)
 - **Live-panel A/B beamforming** — the desktop app's **LIVE** mode can now drive
   `BeamEngine` directly: a "POLARIS A/B beamformer" card with a **steered ↔ grid**
   strategy picker that switches **live** (glitch-free crossfade) on one shared input

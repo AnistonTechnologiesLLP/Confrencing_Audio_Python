@@ -33,9 +33,12 @@ Array facts and honest caveats (encoded below, not hidden):
   (~5.6 kHz, ``beam_bandlimit_hz``) **by default** — keeping speech up to where the
   array still focuses and dropping the aliased band. Pass ``beam_bandlimit_hz=None``
   to disable.
-* **Integer-delay v1.** The delay-and-sum uses integer-sample delays (one sample
-  ≈ 7.78 mm of travel at 44.1 kHz vs the 80 mm aperture → up to a few degrees of
-  pointing error). A fractional-delay / MVDR strategy is a documented seam
+* **Delay model.** The default delay-and-sum (``mode="delaysum"``) uses integer-sample
+  delays (one sample ≈ 7.78 mm of travel at 44.1 kHz vs the 80 mm aperture → up to a few
+  degrees of pointing error from the ±0.5-sample rounding). ``mode="fracdelay"`` recovers
+  the sub-sample remainder with a short Hann-windowed-sinc fractional-delay FIR per capsule
+  (:class:`_FracDelaySumBeam`), tightening off-axis nulls for a flat ~(taps-1)/2-sample of
+  common latency. An MVDR / superdirective strategy is the next documented seam
   (:class:`BeamStrategy`).
 * **Dead capsule.** The real POLARIS eval board's capsule 5 (index 4) is dead.
   By product decision this module **defaults to all 8 active**; pass
@@ -81,8 +84,11 @@ ALIAS_CUTOFF_HZ = SOUND_SPEED_MPS / (2.0 * 2.0 * POLARIS_RADIUS_M * 0.3826834323
 #     where spatial filtering has broken down (off-axis HF leaks through grating lobes).
 DEFAULT_BEAM_BANDLIMIT_HZ = ALIAS_CUTOFF_HZ
 DEFAULT_BANDLIMIT_TAPS = 63       # Hann-windowed-sinc FIR length (forced odd → linear phase)
+DEFAULT_FRACDELAY_TAPS = 15       # fractional-delay FIR length (odd); common latency = (taps-1)/2 ≈ 0.16ms
 
-MODE_DELAYSUM = "delaysum"
+MODE_DELAYSUM = "delaysum"        # integer-sample time-domain delay-and-sum (default)
+MODE_FRACDELAY = "fracdelay"      # sub-sample (fractional) delay-and-sum via windowed-sinc FIR
+_BEAM_MODES = (MODE_DELAYSUM, MODE_FRACDELAY)
 
 
 class DeviceConfigError(ValueError):
@@ -171,10 +177,9 @@ class _TalkerTracker(Tracker):
 # --------------------------------------------------------------------------- #
 # Delay-and-sum steering math (shared by the pure function + streaming strategy).
 # --------------------------------------------------------------------------- #
-def _steer_delays(geom: ArrayGeometry, azimuth_deg: float, off_nadir_deg: float,
-                  sample_rate: float, speed_of_sound: float):
-    """Integer per-active-capsule delays (samples, ≥ 0) to steer a delay-and-sum
-    beam toward ``(azimuth_deg, off_nadir_deg)``.
+def _steer_real_delays(geom: ArrayGeometry, azimuth_deg: float, off_nadir_deg: float,
+                       sample_rate: float, speed_of_sound: float):
+    """Real-valued (un-rounded) per-active-capsule steer delays in **samples** (≥ 0).
 
     For a plane wave from look direction ``u`` (array→source), capsule ``m`` at
     ``p_m`` leads the array centre by ``proj_m = p_m·u`` (a capsule *toward* the
@@ -184,14 +189,28 @@ def _steer_delays(geom: ArrayGeometry, azimuth_deg: float, off_nadir_deg: float,
     the mirror azimuth; verified against the ``a_m = exp(+j·k·p·u)`` manifold used
     by :mod:`conf_pipeline_control.beamformer` / :mod:`conf_pipeline_control.doa`.)
 
-    Returns ``(active_indices, delays_samples, max_delay)``.
+    The integer ``_steer_delays`` rounds these; the fractional strategy
+    (:class:`_FracDelaySumBeam`) keeps the sub-sample remainder. Returns
+    ``(active_indices, delays_samples)``.
     """
     ux, uy, uz = _unit_from_az_offnadir(azimuth_deg, off_nadir_deg)
     idx = geom.active_indices()
     elems = geom.elements
     projs = [elems[m][0] * ux + elems[m][1] * uy + elems[m][2] * uz for m in idx]
     pmin = min(projs) if projs else 0.0
-    delays = [int(round((p - pmin) / speed_of_sound * sample_rate)) for p in projs]
+    delays = [(p - pmin) / speed_of_sound * sample_rate for p in projs]
+    return idx, delays
+
+
+def _steer_delays(geom: ArrayGeometry, azimuth_deg: float, off_nadir_deg: float,
+                  sample_rate: float, speed_of_sound: float):
+    """Integer per-active-capsule delays (samples, ≥ 0) to steer a delay-and-sum
+    beam toward ``(azimuth_deg, off_nadir_deg)`` — :func:`_steer_real_delays` rounded.
+
+    Returns ``(active_indices, delays_samples, max_delay)``.
+    """
+    idx, real = _steer_real_delays(geom, azimuth_deg, off_nadir_deg, sample_rate, speed_of_sound)
+    delays = [int(round(d)) for d in real]
     maxd = max(delays) if delays else 0
     return idx, delays, maxd
 
@@ -226,22 +245,28 @@ def delay_and_sum_block(block: Any, geom: ArrayGeometry, azimuth_deg: float,
 
 
 class BeamStrategy:
-    """Steerable mono beamformer interface.
+    """Steerable mono beamformer interface (``set_look`` / ``process`` / ``reset``).
 
-    v1 ships :class:`_DelaySumBeam` (time-domain, integer-sample). The seam for
-    later tiers, behind this same ``set_look`` / ``process`` contract:
+    Two tiers ship behind this contract:
 
-    * a fractional-delay strategy (per-bin FFT phase ramp ``exp(-j·2π·f·delay_m)``)
-      to remove the integer-rounding pointing error, and
-    * an MVDR / superdirective strategy reusing
-      :func:`conf_pipeline_control.beamformer.delay_and_sum_weights` /
-      ``superdirective_weights`` (frequency-domain, per FFT bin).
+    * :class:`_DelaySumBeam` — time-domain, **integer-sample** delays (``mode="delaysum"``).
+    * :class:`_FracDelaySumBeam` — time-domain, **sub-sample** delays via a windowed-sinc
+      fractional-delay FIR (``mode="fracdelay"``), removing the integer-rounding pointing error.
+
+    The next seam is an MVDR / superdirective strategy reusing
+    :func:`conf_pipeline_control.beamformer.delay_and_sum_weights` / ``superdirective_weights``
+    (frequency-domain, per FFT bin).
     """
 
     def set_look(self, azimuth_deg: float, off_nadir_deg: float = DEFAULT_OFF_NADIR_DEG) -> None:
         raise NotImplementedError
 
     def process(self, block: Any) -> Any:
+        raise NotImplementedError
+
+    def reset(self) -> None:
+        """Drop streaming history so the next block starts clean (re-steer / re-activate).
+        A sub-millisecond transient is acceptable."""
         raise NotImplementedError
 
 
@@ -267,7 +292,10 @@ class _DelaySumBeam(BeamStrategy):
         self._idx, self._delays, self._maxd = _steer_delays(
             self._geom, azimuth_deg, off_nadir_deg, self._sr, self._c
         )
-        self._hist = None   # reset; a sub-millisecond transient on re-steer is acceptable
+        self.reset()   # a sub-millisecond transient on re-steer is acceptable
+
+    def reset(self) -> None:
+        self._hist = None
 
     def process(self, block: Any) -> Any:
         import numpy as np
@@ -283,6 +311,96 @@ class _DelaySumBeam(BeamStrategy):
             start = D - d                       # output row i ↔ ext row D+i; delayed read at D+i-d
             out += ext[start:start + n, m]
         out /= max(1, len(self._idx))
+        if D:
+            self._hist = ext[-D:, :].copy()
+        return out.astype(np.float32)
+
+
+def _frac_delay_kernel(frac: float, numtaps: int = DEFAULT_FRACDELAY_TAPS) -> Any:
+    """Hann-windowed-sinc **fractional-delay** FIR — delays by ``(numtaps-1)/2 + frac`` samples.
+
+    Pure numpy (stays inside the ``[control]`` extra). ``frac`` is the sub-sample remainder in
+    ``[0, 1)``; the kernel is an ideal-delay sinc centred at ``center + frac`` (``center =
+    (taps-1)/2``) tapered by a Hann window and normalized to unity DC gain so the beam level is
+    unchanged. ``numtaps`` is forced odd so ``center`` is integral. At ``frac == 0`` it reduces to a
+    unit impulse at ``center`` (a pure ``center``-sample integer delay)."""
+    import numpy as np
+
+    # Floor at 5, not 3: np.hanning(3) == [0, 1, 0] zeros both edge taps, collapsing the kernel to a
+    # unit impulse at centre (zero fractional delay) for any frac. 5 is the shortest length that keeps
+    # a real sub-sample response. (DEFAULT_FRACDELAY_TAPS=15 is well clear of this.)
+    taps = max(5, int(numtaps) | 1)
+    center = (taps - 1) / 2.0
+    n = np.arange(taps)
+    h = np.sinc(n - center - float(frac)) * np.hanning(taps)  # ideal fractional delay × Hann
+    return (h / h.sum()).astype(float)                        # unity DC → no level shift
+
+
+class _FracDelaySumBeam(BeamStrategy):
+    """Streaming delay-and-sum with **sub-sample** (fractional) steer delays.
+
+    Each capsule's real steer delay ``d_m`` (samples) is split into an integer part read from a
+    per-channel history ring (exactly as :class:`_DelaySumBeam`) and a fractional remainder applied
+    by a short Hann-windowed-sinc fractional-delay FIR (:func:`_frac_delay_kernel`). This removes the
+    up-to-±0.5-sample pointing error of integer rounding (one sample ≈ 7.78 mm of travel at 44.1 kHz
+    vs the 80 mm aperture). The FIR adds a *common* ``center = (taps-1)/2``-sample latency to **every**
+    capsule, so it shifts the whole mono output by ~0.16 ms but does not disturb the inter-capsule
+    alignment. HF passband droop is immaterial here — the beam output is band-limited to the array's
+    ~5.6 kHz aliasing cutoff anyway. Two persistent buffers keep the per-block convolution continuous
+    across block boundaries: the integer ring ``_hist`` and the FIR continuity tail ``_frac_tail``."""
+
+    def __init__(self, geom: ArrayGeometry, sample_rate: float, speed_of_sound: float,
+                 *, numtaps: int = DEFAULT_FRACDELAY_TAPS):
+        self._geom = geom
+        self._sr = float(sample_rate)
+        self._c = float(speed_of_sound)
+        self._L = max(5, int(numtaps) | 1)               # see _frac_delay_kernel: 3 taps degenerate
+        self._idx: tuple = ()
+        self._delays_int: list = []
+        self._kernels: list = []        # one length-L fractional FIR per active capsule
+        self._maxd = 0
+        self._hist: Any = None          # integer ring (maxd, M)
+        self._frac_tail: Any = None     # FIR continuity tail (L-1, M)
+        self.set_look(0.0)
+
+    def set_look(self, azimuth_deg: float, off_nadir_deg: float = DEFAULT_OFF_NADIR_DEG) -> None:
+        import numpy as np
+
+        idx, real = _steer_real_delays(self._geom, azimuth_deg, off_nadir_deg, self._sr, self._c)
+        di = [int(np.floor(d)) for d in real]
+        fr = [d - i for d, i in zip(real, di)]           # sub-sample remainder ∈ [0, 1)
+        self._idx = idx
+        self._delays_int = di
+        self._maxd = max(di) if di else 0
+        self._kernels = [_frac_delay_kernel(f, self._L) for f in fr]
+        self.reset()
+
+    def reset(self) -> None:
+        self._hist = None
+        self._frac_tail = None
+
+    def process(self, block: Any) -> Any:
+        import numpy as np
+
+        x = np.asarray(block, dtype=float)
+        n, M = x.shape
+        D = self._maxd
+        L1 = self._L - 1
+        if self._hist is None or self._hist.shape != (D, M):
+            self._hist = np.zeros((D, M), dtype=float)
+        if self._frac_tail is None or self._frac_tail.shape != (L1, M):
+            self._frac_tail = np.zeros((L1, M), dtype=float)
+        ext = np.concatenate([self._hist, x], axis=0) if D else x
+        out = np.zeros(n, dtype=float)
+        new_tail = self._frac_tail.copy()
+        for m, d, k in zip(self._idx, self._delays_int, self._kernels):
+            start = D - d                                 # integer-aligned read (as _DelaySumBeam)
+            aligned = ext[start:start + n, m]             # (n,)
+            col = np.concatenate([self._frac_tail[:, m], aligned])      # (L1 + n,)
+            out += np.convolve(col, k, mode="valid")      # (n,) fractional-delayed
+            new_tail[:, m] = col[-L1:] if L1 else col[:0]              # carry last L1 aligned samples
+        out /= max(1, len(self._idx))
+        self._frac_tail = new_tail
         if D:
             self._hist = ext[-D:, :].copy()
         return out.astype(np.float32)
@@ -377,11 +495,12 @@ class PolarisBeamformer(MicController):
             geom = with_active_channels(geom, mask)   # validates length / non-empty
         super().__init__(geom, n_channels=POLARIS_N_MICS)
 
-        if mode != MODE_DELAYSUM:
+        if mode not in _BEAM_MODES:
             raise ValueError(
-                f"mode {mode!r} not implemented in v1; only {MODE_DELAYSUM!r} ships today "
-                "(MVDR / fractional-delay are a documented BeamStrategy seam)"
+                f"mode {mode!r} not implemented; choose one of {_BEAM_MODES} "
+                "(MVDR is the next documented BeamStrategy seam)"
             )
+        self.mode = mode
 
         self.device = device
         self.sample_rate = float(sample_rate)
@@ -406,7 +525,11 @@ class PolarisBeamformer(MicController):
         self.device_timeout_s = device_timeout_s
 
         self._tracker = _TalkerTracker(hold_seconds=hold_seconds, switch_margin_deg=switch_margin_deg)
-        self._beam = _DelaySumBeam(geom, self.sample_rate, self.speed_of_sound)
+        self._beam = (
+            _FracDelaySumBeam(geom, self.sample_rate, self.speed_of_sound)
+            if mode == MODE_FRACDELAY else
+            _DelaySumBeam(geom, self.sample_rate, self.speed_of_sound)
+        )
         self._steered_az: Optional[float] = None
         if fixed_azimuth_deg is not None:
             self._beam.set_look(fixed_azimuth_deg, self.off_nadir_deg)
@@ -732,7 +855,7 @@ class PolarisBeamformer(MicController):
         if self._lp_kernel is not None and self._np is not None:
             self._lp_tail = self._np.zeros(len(self._lp_kernel) - 1, dtype=float)  # flush FIR state
         with self._beam_lock:
-            self._beam._hist = None        # _DelaySumBeam history ring; rebuilt on next process
+            self._beam.reset()             # drop the strategy's streaming history; rebuilt on next process
 
     def _open_stream(self) -> None:
         """Validate the device and open the input (+ optional monitor) stream, setting
@@ -930,6 +1053,8 @@ def _demo(argv: Optional[Sequence[str]] = None) -> int:
         description="POLARIS live delay-and-sum beam + dominant-talker DOA (SRP-PHAT)."
     )
     ap.add_argument("--device", type=int, default=None, help="input device index (omit to list devices)")
+    ap.add_argument("--mode", choices=_BEAM_MODES, default=MODE_DELAYSUM,
+                    help="beam strategy: delaysum (integer) or fracdelay (sub-sample windowed-sinc)")
     ap.add_argument("--radius", type=float, default=POLARIS_RADIUS_M, help="capsule-circle radius m (POLARIS=0.040)")
     ap.add_argument("--rate", type=float, default=POLARIS_RATE_HZ, help="sample rate (POLARIS=44100)")
     ap.add_argument("--block-ms", type=float, default=DEFAULT_BLOCK_MS, help="audio block size, ms")
@@ -968,12 +1093,14 @@ def _demo(argv: Optional[Sequence[str]] = None) -> int:
     bf = PolarisBeamformer(
         device=args.device, radius_m=args.radius, sample_rate=args.rate, block_ms=args.block_ms,
         dead_capsule=dead, hold_seconds=args.hold, switch_margin_deg=args.switch_margin,
-        monitor=args.monitor, output_device=args.output_device, wait_for_device=args.wait,
-        **bl_kw,
+        mode=args.mode, monitor=args.monitor, output_device=args.output_device,
+        wait_for_device=args.wait, **bl_kw,
     )
     assert bf.geometry is not None
     print(f"Array: {bf.geometry.n_active}/{POLARIS_N_MICS} capsules, aperture "
           f"{bf.geometry.aperture_m() * 100:.1f} cm.  Aliasing cutoff ~{ALIAS_CUTOFF_HZ / 1000:.1f} kHz.")
+    print(f"Beam strategy: {bf.mode}"
+          + ("  (sub-sample windowed-sinc delays)" if bf.mode == MODE_FRACDELAY else "  (integer-sample delays)"))
     if args.wait:
         print(f"Waiting for device {args.device} @ {args.rate:.0f} Hz (auto-reconnect on) ... Ctrl+C to stop.")
     else:
