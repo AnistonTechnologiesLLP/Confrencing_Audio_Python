@@ -102,6 +102,7 @@ from .doa import (  # noqa: F401
     sector_gate,
 )
 from .autosteer import AutoSteerController, SectorConfig  # noqa: F401
+from .polaris_beamformer import DoaReading, PolarisBeamformer  # noqa: F401
 
 
 def controls_available() -> bool:
@@ -126,6 +127,7 @@ __all__ = [
     "detect", "detect_offline", "sector_gate", "in_sector", "Detection", "DoaResult",
     "DEFAULT_F_LO_HZ", "DEFAULT_F_HI_HZ",
     "AutoSteerController", "SectorConfig",
+    "PolarisBeamformer", "DoaReading",
     "MicController", "MicState", "SimulatedMicController",
     "DEFAULT_DESIGN_FREQ_HZ", "DEFAULT_TARGET_ELEVATION_M", "RESPONSE_FLOOR_DB",
     "SPEECH_BAND_LO_HZ", "SPEECH_BAND_HI_HZ", "SPEECH_OCTAVE_CENTERS_HZ",

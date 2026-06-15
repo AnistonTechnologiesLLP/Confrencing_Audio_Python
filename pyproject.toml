@@ -20,6 +20,7 @@ octovox = ["numpy>=1.24", "sounddevice>=0.4", "requests>=2.25", "scipy>=1.7"]  #
 
 [project.scripts]
 conf-pipeline-gui = "conf_pipeline_gui.app:main"
+polaris-beam-demo = "conf_pipeline_control.polaris_beamformer:_demo"
 
 [tool.setuptools]
 packages = ["conf_pipeline", "conf_pipeline.sim", "conf_pipeline_gui", "conf_pipeline_gui.panels", "conf_pipeline_control"]
