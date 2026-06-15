@@ -72,6 +72,16 @@ ALIAS_CUTOFF_HZ = SOUND_SPEED_MPS / (2.0 * 2.0 * POLARIS_RADIUS_M * 0.3826834323
 MODE_DELAYSUM = "delaysum"
 
 
+class DeviceConfigError(ValueError):
+    """The audio device is **present but cannot satisfy the request** — wrong input
+    channel count or an unsupported sample rate. Distinct from a device that simply
+    isn't there yet (a plain ``ValueError``): in ``wait_for_device`` mode the
+    supervisor keeps retrying for *presence* but gives up immediately on this,
+    because retrying a structural mismatch will never succeed. Subclasses
+    ``ValueError`` so existing strict-mode callers catching ``ValueError`` still work.
+    """
+
+
 @dataclass(frozen=True)
 class DoaReading:
     """Snapshot of the dominant-talker tracker, for the host/GUI/demo."""
@@ -371,6 +381,7 @@ class PolarisBeamformer(MicController):
         self._doa_thread: Optional[threading.Thread] = None
         self._supervisor_thread: Optional[threading.Thread] = None
         self._streaming = False                          # is the input stream currently open + live?
+        self._device_fatal = False                       # supervisor hit a structural device error → gave up
         self._last_block_monotonic: Optional[float] = None  # watchdog: last audio block arrival
         self._reading = DoaReading(None, 0.0, False, False)
         self._detections: list = []
@@ -404,6 +415,7 @@ class PolarisBeamformer(MicController):
         appears (and reopens it if it drops); poll :attr:`streaming` / ``error``.
         """
         self._stop.clear()
+        self._device_fatal = False
         self.connect()                                  # _open(): open now, or hand off to the supervisor
         if self._doa_thread is None:
             self._doa_thread = threading.Thread(target=self._doa_loop, name="polaris-doa", daemon=True)
@@ -424,6 +436,13 @@ class PolarisBeamformer(MicController):
         """True while the input stream is open and delivering audio (False while
         waiting for / reconnecting the device in ``wait_for_device`` mode)."""
         return self._streaming
+
+    @property
+    def device_fatal(self) -> bool:
+        """True if the supervisor gave up on a structural device error (wrong channel
+        count / unsupported rate) — vs. still waiting for the device to appear. See
+        ``error`` for the reason; ``start()`` clears it on the next attempt."""
+        return self._device_fatal
 
     def __enter__(self) -> "PolarisBeamformer":
         self.start()
@@ -538,7 +557,7 @@ class PolarisBeamformer(MicController):
         reconnects after that are unbounded. Errors surface via ``self.error``."""
         waited = 0.0
         connected_once = False
-        while not self._stop.is_set():
+        while not self._stop.is_set() and not self._device_fatal:
             if (not self._streaming and not connected_once and self.device_timeout_s is not None
                     and waited > self.device_timeout_s):
                 self.error = f"device did not appear within {self.device_timeout_s:.0f}s"
@@ -558,6 +577,9 @@ class PolarisBeamformer(MicController):
             try:
                 self._open_stream()
                 self.error = ""
+            except DeviceConfigError as exc:  # present but structurally wrong → give up, don't spin
+                self.error = str(exc)
+                self._device_fatal = True
             except Exception as exc:          # device not present/ready yet → retry next tick
                 self.error = str(exc)
             return
@@ -642,12 +664,14 @@ class PolarisBeamformer(MicController):
         if self.device is not None:
             match = next((d for d in devs if d.index == self.device), None)
             if match is None:
+                # Not present (yet). Plain ValueError → in wait mode the supervisor retries.
                 raise ValueError(
                     f"input device index {self.device} not found; "
                     "run scripts/device_check.py to list devices"
                 )
             if match.max_input_channels < self.n_channels:
-                raise ValueError(
+                # Present but structurally wrong → fatal even in wait mode.
+                raise DeviceConfigError(
                     f"device {self.device} ({match.name!r}) exposes {match.max_input_channels} "
                     f"input channels but POLARIS needs {self.n_channels}; on Windows pick the "
                     "ASIO/WASAPI entry that surfaces all 8 (see scripts/device_check.py)"
@@ -659,8 +683,11 @@ class PolarisBeamformer(MicController):
                 samplerate=self.sample_rate, dtype="float32",
             )
         except Exception as exc:
+            # A present device rejecting the rate/format is treated as structural (fatal).
+            # (A rare transient — e.g. the device momentarily held by another app — would
+            # also land here; wait mode then needs a restart rather than silent retrying.)
             default_sr = match.default_samplerate if match is not None else self.sample_rate
-            raise ValueError(
+            raise DeviceConfigError(
                 f"device {self.device} did not accept {self.sample_rate:.0f} Hz @ "
                 f"{self.n_channels}ch (its default is {default_sr:.0f} Hz; POLARIS runs at "
                 f"{POLARIS_RATE_HZ:.0f}). Original error: {exc}"
@@ -831,6 +858,9 @@ def _demo(argv: Optional[Sequence[str]] = None) -> int:
         bf.start()
         while True:
             time.sleep(0.1)
+            if bf.device_fatal:                    # structural device error in wait mode → stop
+                print(f"\nGiving up: {bf.error}")
+                break
             r = bf.reading()
             az = "  --  " if r.azimuth_deg is None else f"{r.azimuth_deg:5.0f}°"
             if not bf.streaming:

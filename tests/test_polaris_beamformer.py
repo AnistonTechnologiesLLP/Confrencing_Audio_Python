@@ -17,6 +17,7 @@ from conf_pipeline_control import doa
 from conf_pipeline_control.audio import InputDevice
 import conf_pipeline_control.polaris_beamformer as pb
 from conf_pipeline_control.polaris_beamformer import (
+    DeviceConfigError,
     PolarisBeamformer,
     _TalkerTracker,
     delay_and_sum_block,
@@ -188,7 +189,8 @@ def test_too_few_channels_raises(monkeypatch):
     monkeypatch.setattr(pb, "controls_available", lambda: True)
     monkeypatch.setattr(pb, "list_input_devices", lambda: [InputDevice(3, "Stereo Mic", 2, 44100.0)])
     bf = PolarisBeamformer(device=3)
-    with pytest.raises(ValueError, match="needs 8"):
+    # structural (present but wrong) → DeviceConfigError, which is still a ValueError
+    with pytest.raises(DeviceConfigError, match="needs 8"):
         bf.connect()
 
 
@@ -274,6 +276,28 @@ def test_supervisor_retries_until_device_opens(monkeypatch):
     assert not bf.streaming and "not found" in bf.error
     bf._supervise_once(1.0)
     assert bf.streaming and bf.error == ""
+
+
+def test_supervisor_gives_up_on_structural_error(monkeypatch):
+    bf = PolarisBeamformer(device=7, wait_for_device=True)
+
+    def fake_open():
+        raise DeviceConfigError("device 7 exposes 2 input channels but POLARIS needs 8")
+    monkeypatch.setattr(bf, "_open_stream", fake_open)
+
+    bf._supervise_once(0.0)
+    assert bf.device_fatal and not bf.streaming and "needs 8" in bf.error
+
+
+def test_supervisor_keeps_retrying_on_absence(monkeypatch):
+    bf = PolarisBeamformer(device=7, wait_for_device=True)
+
+    def fake_open():
+        raise ValueError("input device index 7 not found")   # absent → NOT fatal
+    monkeypatch.setattr(bf, "_open_stream", fake_open)
+
+    bf._supervise_once(0.0)
+    assert not bf.device_fatal and not bf.streaming and "not found" in bf.error
 
 
 def test_supervisor_reconnects_on_stall(monkeypatch):
