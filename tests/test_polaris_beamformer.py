@@ -249,3 +249,69 @@ def test_set_steering_overrides_and_resumes():
     assert not bf.steer_to_doa and bf._steered_az == 45.0
     bf.set_steering(None)
     assert bf.steer_to_doa
+
+
+# --------------------------------------------------------------------------- #
+# Device supervision: wait-for-device + auto-reconnect (wait_for_device=True)
+# --------------------------------------------------------------------------- #
+def test_streaming_false_until_open():
+    assert PolarisBeamformer(device=None).streaming is False
+
+
+def test_supervisor_retries_until_device_opens(monkeypatch):
+    bf = PolarisBeamformer(device=7, wait_for_device=True)
+    n = {"calls": 0}
+
+    def fake_open():
+        n["calls"] += 1
+        if n["calls"] == 1:
+            raise ValueError("input device index 7 not found")   # not present yet
+        bf._streaming = True
+        bf._last_block_monotonic = 0.0
+    monkeypatch.setattr(bf, "_open_stream", fake_open)
+
+    bf._supervise_once(0.0)
+    assert not bf.streaming and "not found" in bf.error
+    bf._supervise_once(1.0)
+    assert bf.streaming and bf.error == ""
+
+
+def test_supervisor_reconnects_on_stall(monkeypatch):
+    bf = PolarisBeamformer(device=7, wait_for_device=True, device_stall_timeout_s=2.0)
+    bf._streaming = True
+    bf._last_block_monotonic = 0.0
+    closed = {"n": 0}
+
+    def fake_close():
+        closed["n"] += 1
+        bf._streaming = False
+    monkeypatch.setattr(bf, "_close_stream", fake_close)
+
+    bf._supervise_once(5.0)                       # 5 - 0 > 2 s → watchdog trips → reconnect
+    assert closed["n"] == 1 and not bf.streaming
+    assert "stall" in bf.error.lower()
+
+
+def test_supervisor_holds_when_stream_fresh(monkeypatch):
+    bf = PolarisBeamformer(device=7, wait_for_device=True, device_stall_timeout_s=2.0)
+    bf._streaming = True
+    bf._last_block_monotonic = 4.5
+    monkeypatch.setattr(bf, "_close_stream", lambda: pytest.fail("should not reconnect when fresh"))
+    bf._supervise_once(5.0)                       # 0.5 s < 2 s → no action
+    assert bf.streaming
+
+
+def test_wait_mode_start_does_not_raise_when_device_absent(monkeypatch):
+    def _raise():
+        raise ValueError("input device index 7 not found")
+
+    bf = PolarisBeamformer(device=7, wait_for_device=True, reconnect_interval_s=0.05)
+    monkeypatch.setattr(pb, "controls_available", lambda: True)
+    monkeypatch.setattr(bf, "_open_stream", _raise)
+    monkeypatch.setattr(bf, "_close_stream", lambda: None)
+
+    bf.start()                                    # supervisor + DOA threads, no raise
+    assert bf.connected and not bf.streaming
+    bf.stop()
+    assert not bf.connected
+    assert bf._supervisor_thread is None and bf._doa_thread is None

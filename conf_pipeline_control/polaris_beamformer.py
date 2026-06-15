@@ -275,6 +275,12 @@ class PolarisBeamformer(MicController):
     entry points (they manage the audio stream *and* the DOA worker thread);
     ``connect()`` / ``disconnect()`` alone open the stream but leave DOA idle, so
     prefer ``start()`` / ``stop()`` (and ``with PolarisBeamformer(...) as bf``).
+
+    By default the array must be present at ``start()`` (a clear error otherwise).
+    With ``wait_for_device=True`` a supervisor thread instead waits for the array to
+    appear and **auto-reconnects** if it drops mid-session; check :attr:`streaming`
+    and ``error`` for status. Beamforming is continuous the whole time the stream is
+    live — it does not stop after the first detection.
     """
 
     backend = "polaris"
@@ -307,6 +313,10 @@ class PolarisBeamformer(MicController):
         output_queue_size: int = 8,
         output_device: Optional[int] = None,
         monitor: bool = False,
+        wait_for_device: bool = False,
+        reconnect_interval_s: float = 1.0,
+        device_stall_timeout_s: float = 2.0,
+        device_timeout_s: Optional[float] = None,
     ):
         mask = _resolve_active_mask(active_mask, dead_capsule)
         geom = sensibel_8(radius_m=radius_m)
@@ -336,6 +346,11 @@ class PolarisBeamformer(MicController):
         self.beam_bandlimit_hz = beam_bandlimit_hz
         self.output_device = output_device
         self.monitor = monitor
+        # device supervision (opt-in): wait for the array to appear, auto-reconnect if it drops
+        self.wait_for_device = bool(wait_for_device)
+        self.reconnect_interval_s = max(0.05, float(reconnect_interval_s))
+        self.device_stall_timeout_s = max(0.1, float(device_stall_timeout_s))
+        self.device_timeout_s = device_timeout_s
 
         self._tracker = _TalkerTracker(hold_seconds=hold_seconds, switch_margin_deg=switch_margin_deg)
         self._beam = _DelaySumBeam(geom, self.sample_rate, self.speed_of_sound)
@@ -354,6 +369,9 @@ class PolarisBeamformer(MicController):
         self._state_lock = threading.Lock()
         self._stop = threading.Event()
         self._doa_thread: Optional[threading.Thread] = None
+        self._supervisor_thread: Optional[threading.Thread] = None
+        self._streaming = False                          # is the input stream currently open + live?
+        self._last_block_monotonic: Optional[float] = None  # watchdog: last audio block arrival
         self._reading = DoaReading(None, 0.0, False, False)
         self._detections: list = []
         self.error = ""
@@ -378,20 +396,34 @@ class PolarisBeamformer(MicController):
 
     # ---- public API ----
     def start(self) -> None:
-        """Open the array and start DOA tracking + beam steering."""
-        self.connect()                                  # _open(): validate + open the stream
+        """Open the array and start DOA tracking + beam steering.
+
+        With ``wait_for_device=False`` (default) the device must be present now —
+        this raises a clear error otherwise. With ``wait_for_device=True`` it
+        returns immediately and a supervisor thread opens the array as soon as it
+        appears (and reopens it if it drops); poll :attr:`streaming` / ``error``.
+        """
+        self._stop.clear()
+        self.connect()                                  # _open(): open now, or hand off to the supervisor
         if self._doa_thread is None:
-            self._stop.clear()
             self._doa_thread = threading.Thread(target=self._doa_loop, name="polaris-doa", daemon=True)
             self._doa_thread.start()
 
     def stop(self) -> None:
-        """Stop DOA tracking and close the array (idempotent)."""
+        """Stop DOA tracking + supervision and close the array (idempotent)."""
         self._stop.set()
-        if self._doa_thread is not None:
-            self._doa_thread.join(timeout=2.0)
-            self._doa_thread = None
+        for attr in ("_doa_thread", "_supervisor_thread"):
+            th = getattr(self, attr)
+            if th is not None:
+                th.join(timeout=2.0)
+                setattr(self, attr, None)
         self.disconnect()
+
+    @property
+    def streaming(self) -> bool:
+        """True while the input stream is open and delivering audio (False while
+        waiting for / reconnecting the device in ``wait_for_device`` mode)."""
+        return self._streaming
 
     def __enter__(self) -> "PolarisBeamformer":
         self.start()
@@ -486,8 +518,58 @@ class PolarisBeamformer(MicController):
 
     # ---- lifecycle / backend hooks ----
     def _open(self) -> None:
+        # A missing [control] extra is fatal in any mode (not "the device will appear").
         if not controls_available():
             raise RuntimeError(_install_hint())
+        if self.wait_for_device:
+            self._start_supervisor()      # supervisor (re)opens the stream as the device comes/goes
+        else:
+            self._open_stream()           # strict: open now, raise on any device error
+
+    def _start_supervisor(self) -> None:
+        if self._supervisor_thread is None:
+            self._supervisor_thread = threading.Thread(
+                target=self._supervise, name="polaris-supervisor", daemon=True)
+            self._supervisor_thread.start()
+
+    def _supervise(self) -> None:  # pragma: no cover (timing/thread)
+        """Keep the input stream alive: open it once the device appears, and reopen
+        it if it stalls/drops. ``device_timeout_s`` bounds only the FIRST appearance;
+        reconnects after that are unbounded. Errors surface via ``self.error``."""
+        waited = 0.0
+        connected_once = False
+        while not self._stop.is_set():
+            if (not self._streaming and not connected_once and self.device_timeout_s is not None
+                    and waited > self.device_timeout_s):
+                self.error = f"device did not appear within {self.device_timeout_s:.0f}s"
+                break
+            self._supervise_once(time.monotonic())
+            if self._streaming:
+                connected_once = True
+            interval = 0.25 if self._streaming else self.reconnect_interval_s
+            waited += interval
+            self._stop.wait(interval)
+        self._close_stream()
+
+    def _supervise_once(self, now: float) -> None:
+        """One supervision step (thread/sleep-free, for testing): (re)open the stream
+        when it is down, or reconnect it when the audio watchdog goes stale."""
+        if not self._streaming:
+            try:
+                self._open_stream()
+                self.error = ""
+            except Exception as exc:          # device not present/ready yet → retry next tick
+                self.error = str(exc)
+            return
+        last = self._last_block_monotonic
+        if last is not None and (now - last) > self.device_stall_timeout_s:
+            self.error = "input stream stalled; reconnecting"
+            self._close_stream()
+
+    def _open_stream(self) -> None:
+        """Validate the device and open the input (+ optional monitor) stream, setting
+        :attr:`streaming`. Raises on any device/rate problem; the supervisor catches
+        and retries, strict mode lets it propagate."""
         self._validate_input_device()
         import numpy as np
         import sounddevice as sd
@@ -526,25 +608,31 @@ class PolarisBeamformer(MicController):
             self._out_channels = 0
             self._monitor_q = None
 
-        self._stream = sd.InputStream(
-            samplerate=self.sample_rate,
-            channels=self.n_channels,
-            blocksize=self.blocksize,
-            device=self.device,
-            dtype="float32",
-            callback=self._cb_input,
-        )
-        self._stream.start()
-        if self.monitor:
-            self._out_stream = sd.OutputStream(
+        try:
+            self._stream = sd.InputStream(
                 samplerate=self.sample_rate,
-                channels=self._out_channels,
+                channels=self.n_channels,
                 blocksize=self.blocksize,
-                device=self.output_device,
+                device=self.device,
                 dtype="float32",
-                callback=self._cb_output,
+                callback=self._cb_input,
             )
-            self._out_stream.start()
+            self._stream.start()
+            if self.monitor:
+                self._out_stream = sd.OutputStream(
+                    samplerate=self.sample_rate,
+                    channels=self._out_channels,
+                    blocksize=self.blocksize,
+                    device=self.output_device,
+                    dtype="float32",
+                    callback=self._cb_output,
+                )
+                self._out_stream.start()
+        except Exception:
+            self._close_stream()              # tear down any partially-opened stream
+            raise
+        self._last_block_monotonic = time.monotonic()
+        self._streaming = True
 
     def _validate_input_device(self) -> None:
         """Clear errors for a missing device, too few channels, or an unsupported
@@ -579,6 +667,16 @@ class PolarisBeamformer(MicController):
             ) from exc
 
     def _close(self) -> None:
+        # If a supervisor is still running (e.g. disconnect() called directly without
+        # stop()), wind it down first. The normal stop() path already joined it.
+        th = self._supervisor_thread
+        if th is not None and threading.current_thread() is not th:
+            self._stop.set()
+            th.join(timeout=2.0)
+            self._supervisor_thread = None
+        self._close_stream()
+
+    def _close_stream(self) -> None:
         if self._out_stream is not None:
             try:
                 self._out_stream.stop()
@@ -593,6 +691,10 @@ class PolarisBeamformer(MicController):
                 self._stream = None
         self._monitor_q = None
         self._level = 0.0
+        self._streaming = False
+        self._last_block_monotonic = None
+        with self._cov_lock:
+            self._cov = None              # don't let stale covariance drive DOA after a drop
 
     def _raw_level(self) -> float:
         return self._level
@@ -600,6 +702,7 @@ class PolarisBeamformer(MicController):
     # ---- audio thread ----
     def _cb_input(self, indata, frames, time_info, status):  # pragma: no cover (needs hardware)
         np = self._np
+        self._last_block_monotonic = time.monotonic()       # watchdog: stream is alive
         # (a) BEAM PATH — time-domain delay-and-sum, FFT-free, low latency
         with self._beam_lock:
             mono = self._beam.process(indata)
@@ -692,6 +795,8 @@ def _demo(argv: Optional[Sequence[str]] = None) -> int:
     ap.add_argument("--bandlimit", type=float, default=None, help="optional beam low-pass cutoff, Hz (~5500)")
     ap.add_argument("--monitor", action="store_true", help="play the mono output (use HEADPHONES)")
     ap.add_argument("--output-device", type=int, default=None, help="monitor output device index")
+    ap.add_argument("--wait", action="store_true",
+                    help="wait for the array to appear and auto-reconnect if it drops")
     args = ap.parse_args(argv)
 
     if not controls_available():
@@ -711,11 +816,15 @@ def _demo(argv: Optional[Sequence[str]] = None) -> int:
         device=args.device, radius_m=args.radius, sample_rate=args.rate, block_ms=args.block_ms,
         dead_capsule=dead, hold_seconds=args.hold, switch_margin_deg=args.switch_margin,
         beam_bandlimit_hz=args.bandlimit, monitor=args.monitor, output_device=args.output_device,
+        wait_for_device=args.wait,
     )
     assert bf.geometry is not None
     print(f"Array: {bf.geometry.n_active}/{POLARIS_N_MICS} capsules, aperture "
           f"{bf.geometry.aperture_m() * 100:.1f} cm.  Aliasing cutoff ~{ALIAS_CUTOFF_HZ / 1000:.1f} kHz.")
-    print(f"Opening device {args.device} @ {args.rate:.0f} Hz ... Ctrl+C to stop.")
+    if args.wait:
+        print(f"Waiting for device {args.device} @ {args.rate:.0f} Hz (auto-reconnect on) ... Ctrl+C to stop.")
+    else:
+        print(f"Opening device {args.device} @ {args.rate:.0f} Hz ... Ctrl+C to stop.")
     if args.monitor:
         print("Monitoring live — wear HEADPHONES to avoid feedback.")
     try:
@@ -724,7 +833,14 @@ def _demo(argv: Optional[Sequence[str]] = None) -> int:
             time.sleep(0.1)
             r = bf.reading()
             az = "  --  " if r.azimuth_deg is None else f"{r.azimuth_deg:5.0f}°"
-            tag = "HOLD" if r.held else ("LIVE" if r.active else "  · ")
+            if not bf.streaming:
+                tag = "WAIT"                  # waiting for / reconnecting the device
+            elif r.held:
+                tag = "HOLD"
+            elif r.active:
+                tag = "LIVE"
+            else:
+                tag = "  · "
             err = f"  !{bf.error}" if bf.error else ""
             print(f"\r[{tag}] DOA {az}  sal {r.salience_db:4.1f}dB  | lvl {bf.read_level():4.2f}{err}    ",
                   end="", flush=True)
