@@ -258,6 +258,61 @@ def test_live_connect_disconnect_simulated(win, monkeypatch):
     assert win.state.live_overlay is None
 
 
+def test_beam_engine_ab_connect_switch_disconnect(win, monkeypatch):
+    import conf_pipeline_gui.panels.live as live_mod
+
+    c = cp.create_config("T", "2026-06-11T00:00:00Z")
+    c = cp.set_room(c, cp.rectangular_room(8, 6, 3))
+    c = cp.add_device(c, cp.create_microphone_array("A1", "Array"))
+    c = cp.set_device_position(c, "A1", Point2D(4, 3))
+    win.state.set_config(c)
+    win.state.set_mode("live")
+
+    class _FakeEngine:  # stand-in for cc.BeamEngine — no device, mimics the surface the panel uses
+        def __init__(self, **kw):
+            self.kw = kw
+            self.mode = kw.get("mode", "steered")
+            self.error = ""
+        def start(self): pass
+        def stop(self): pass
+        def set_mode(self, m): self.mode = m
+        def read_level(self): return 0.5
+        @property
+        def current_location(self):
+            return live_mod.cc.Location(self.mode, 47.0, (1.0, 1.0), 0.5)
+
+    monkeypatch.setattr(live_mod.cc, "controls_available", lambda: True)
+    monkeypatch.setattr(live_mod.cc, "BeamEngine", _FakeEngine)
+
+    panel = win.panels["live"]
+    panel.refresh()
+    panel.live_array.setCurrentIndex(panel.live_array.findData("A1"))
+    panel.live_beameng.setChecked(True)                       # selects the engine, unchecks the others
+    assert panel.live_beameng_mode.isEnabled()
+    assert not panel.live_autosteer.isChecked() and not panel.live_octovox.isChecked()
+    panel.live_beameng_mode.setCurrentIndex(panel.live_beameng_mode.findData("grid"))
+
+    panel._live_toggle_connect()
+    assert panel._live_busy() and win.modebar._live_connected   # LIVE dot red
+    assert panel._beam_engine.mode == "grid"                  # started in the picked strategy
+    assert not panel.live_mute.isEnabled() and not panel.live_gain.isEnabled()  # inert (no monitor)
+
+    panel._tick_live_meter()                                  # meter + overlay publish
+    ov = win.state.live_overlay
+    assert ov is not None and ov["connected"]
+    assert ov["detections"] and abs(ov["detections"][0][0] - 47.0) < 1e-6   # ray at the tracked bearing
+    win.canvas.repaint()                                      # the ray must paint without raising
+
+    panel.live_beameng_mode.setCurrentIndex(panel.live_beameng_mode.findData("steered"))
+    assert panel._beam_engine.mode == "steered"              # live strategy switch crossfades
+
+    panel._live_toggle_connect()                             # disconnect
+    assert not panel._live_busy() and not win.modebar._live_connected
+    assert panel.live_mute.isEnabled() and panel.live_gain.isEnabled()
+    panel._tick_live_meter()
+    assert win.state.live_overlay is None
+
+
 def test_autosave_tick_and_clean_close_lifecycle(qapp, tmp_path):
     from conf_pipeline_gui.app import MainWindow
 

@@ -557,7 +557,9 @@ The beam output is band-limited at the array's ~5.6 kHz spatial-aliasing cutoff 
 default (`beam_bandlimit_hz`), selection/steering smoothing is swappable behind a
 `Tracker` interface (`tracking.py`, with a constant-velocity Kalman-family hook), and
 `polaris-beam-demo` / `polaris-vmic-demo` / `polaris-beam-engine-demo` are console
-entry points. **Caveat:** the ~cm aperture means coarse-zone selection, not
+entry points. The desktop app's **LIVE** mode also drives the engine directly — a
+steered ↔ grid picker that switches live, with the tracked direction drawn on the room
+map (no monitoring yet). **Caveat:** the ~cm aperture means coarse-zone selection, not
 MXA920/Nureva-scale pinpoint — these isolate a zone or A/B two strategies, they don't
 separate two people at one table.
 

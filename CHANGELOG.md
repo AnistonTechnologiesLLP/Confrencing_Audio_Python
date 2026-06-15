@@ -7,6 +7,19 @@ camelCase, currently `CONFIG_VERSION` = 4 (v1/v2/v3 files migrate losslessly);
 the TS sibling is at matching v4 parity. The desktop app is presented as
 **Aniston Room Designer**.
 
+## [Unreleased]
+
+### Added
+- **Live-panel A/B beamforming** — the desktop app's **LIVE** mode can now drive
+  `BeamEngine` directly: a "POLARIS A/B beamformer" card with a **steered ↔ grid**
+  strategy picker that switches **live** (glitch-free crossfade) on one shared input
+  stream, the level meter, and the tracked direction drawn on the room map (the
+  steered DOA, or the grid's selected bearing). Previously the steered / grid /
+  BeamEngine modules were reachable only through the `polaris-*-demo` CLIs. The
+  three session modes (A/B engine / auto-steer / OCTOVOX) are mutually exclusive;
+  the engine has no playback path yet, so Mute / Gain are disabled during a
+  BeamEngine session. (`conf_pipeline_gui/panels/live.py`; +1 headless GUI test.)
+
 ## [1.16.0] - 2026-06-15
 
 **Room v4 + real-time array beamforming** — the room model gains cameras,
