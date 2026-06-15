@@ -23,6 +23,7 @@ from .model import (  # noqa: F401
     AutomixerConfig,
     Bus,
     Codec,
+    ConferencingCamera,
     ControlConfig,
     CoverageZone,
     Crosspoint,
@@ -41,21 +42,32 @@ from .model import (  # noqa: F401
     RoomLayout,
     RoomObject,
     Route,
+    Scene,
+    SceneSchedule,
+    SceneSteer,
+    SceneZoneState,
+    SeatAnchor,
     SystemConfig,
     Talker,
+    WEEKDAYS,
     WiredMic,
     WirelessMic,
     ZoneChannelRef,
+    angular_separation_deg,
+    bearing_to_deg,
     config_from_dict,
     default_elevation,
     find_device,
     find_port,
     find_talker,
+    is_camera,
     is_mic_device,
     is_pickup_zone,
     is_processor,
+    obb_corners,
     point_in_polygon,
     point_in_rect,
+    point_in_sector,
     point_in_shape,
     to_jsonable,
 )
@@ -75,11 +87,25 @@ from .angles import Point3D, SteeringAngles, steering_angles  # noqa: F401
 from .profiles import (  # noqa: F401
     DEVICE_PROFILES,
     FALLBACK_CAPABILITIES,
+    CameraSpec,
     DeviceCapabilities,
     DeviceProfile,
+    SpeakerSpec,
     default_profile_id,
     device_capabilities,
     get_device_profile,
+)
+from .furniture import (  # noqa: F401
+    DEFAULT_FURNITURE_KIND,
+    FURNITURE_CATALOG,
+    FURNITURE_KINDS,
+    FurnitureType,
+    blocks_audio as furniture_blocks_audio,
+    blocks_camera as furniture_blocks_camera,
+    furniture_corners,
+    furniture_type,
+    resolved_absorption,
+    resolved_dimensions,
 )
 from .blocks import create_dsp_block, default_peq_band, dsp_block_param_issues  # noqa: F401
 from .coverage import (  # noqa: F401
@@ -96,6 +122,7 @@ from .coverage import (  # noqa: F401
     set_zone_output_channel as array_set_zone_output_channel,
 )
 from .devices import (  # noqa: F401
+    create_camera,
     create_codec,
     create_loudspeaker,
     create_processor,
@@ -141,6 +168,28 @@ from .coverage_check import (  # noqa: F401
     zone_coverage_report,
 )
 
+# ---- room/device coverage simulation (cameras, mics, speakers, occlusion) ----
+from .coverage_sim import (  # noqa: F401
+    CameraCoverage,
+    CoverageWedge,
+    MicCoverage,
+    Occluder,
+    RoomCoverage,
+    SpeakerCoverage,
+    Target,
+    TargetHit,
+    camera_coverage,
+    camera_sees,
+    camera_wedge,
+    mic_coverage,
+    room_occluders,
+    room_targets,
+    segment_intersects_obb,
+    simulate_room_coverage,
+    speaker_coverage,
+    speaker_wedge,
+)
+
 # ---- design report export ----
 from .report import design_report  # noqa: F401
 
@@ -163,6 +212,32 @@ from .sim import (  # noqa: F401
 
 # ---- 1.8.0: deployment, naming, routing, templates, projects ----
 from .deployment import DeploymentDiff, deployment_diff, mark_deployed, set_deployment_status  # noqa: F401
+# ---- commissioning: the device-facing transport seam (simulated backend) ----
+from .transport import (  # noqa: F401
+    DeviceStatus,
+    DeviceTransport,
+    DiscoveredDevice,
+    OnlineDeviceState,
+    PushReport,
+    ReconcileEntry,
+    SimulatedTransport,
+    TransportError,
+    online_room_status,
+    push_to_online,
+    reconcile_online,
+)
+# ---- project file management: recent files, autosave, crash recovery ----
+from .files import (  # noqa: F401
+    RECENT_MAX,
+    OpenResult,
+    ProjectFileManager,
+    RecoveryInfo,
+    default_state_dir,
+)
+# ---- local HTTP control API: scene recall / mute / status ----
+from .control_api import ConfigHolder, ControlApiServer  # noqa: F401
+# ---- scene scheduler: recall a scene at a time ----
+from .scheduler import SceneScheduler  # noqa: F401
 from .naming import TYPE_LABEL, apply_naming_scheme, label_collisions, suggested_label  # noqa: F401
 from .routing import (  # noqa: F401
     Subscription,
@@ -194,12 +269,23 @@ from .api import (  # noqa: F401
     MatrixAccessor,
     OptimizeRoomResult,
     TalkerCoverage,
+    add_camera,
     add_coverage_zone,
     add_device,
     add_dsp_block,
+    add_furniture,
     add_mute_group,
     add_talker,
     assign_device_profile,
+    remove_furniture,
+    set_camera_bearing,
+    set_camera_tilt,
+    set_furniture_dimensions,
+    set_furniture_position,
+    set_furniture_rotation,
+    set_seat_anchors,
+    set_speaker_bearing,
+    set_speaker_tilt,
     auto_assign_zone_channels,
     remove_dsp_block,
     set_dsp_block_enabled,
@@ -211,9 +297,19 @@ from .api import (  # noqa: F401
     clear_device_position,
     clear_room,
     configure_automixer,
+    add_scene,
+    add_scene_schedule,
+    capture_scene,
     create_config,
     create_mute_group,
+    create_scene,
+    create_scene_schedule,
     create_talker,
+    get_scene,
+    recall_scene,
+    remove_scene,
+    remove_scene_schedule,
+    set_scene_schedule_enabled,
     matrix_for,
     optimize_room,
     rectangular_room,

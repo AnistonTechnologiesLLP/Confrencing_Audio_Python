@@ -6,21 +6,27 @@ from typing import Callable, Literal
 
 from .blocks import dsp_block_param_issues
 from .dsp import analyze_aec_reference, get_primary_processor, is_valid_gating_sensitivity
+from .furniture import furniture_corners, resolved_dimensions
 from .model import (
     GATING_SENSITIVITY_MAX,
     GATING_SENSITIVITY_MIN,
     MAX_MANUAL_LOBES,
     MAX_ZONES_PER_ARRAY,
     NLP_LEVELS,
+    WEEKDAYS,
     ZONE_GAIN_DB_MAX,
     ZONE_GAIN_DB_MIN,
     RectShape,
     SystemConfig,
+    default_elevation,
     find_device,
     find_port,
     is_mic_device,
     is_pickup_zone,
     is_processor,
+    parse_hhmm,
+    point_in_polygon,
+    point_in_sector,
 )
 from .profiles import device_capabilities, get_device_profile
 
@@ -41,6 +47,8 @@ CODE_DESCRIPTIONS: dict[str, str] = {
     "COVERAGE_CHANNEL_DUPLICATE": "Two coverage areas on the same array share an output channel.",
     "COVERAGE_GAIN_INVALID": "Coverage-area gain trim is out of range.",
     "CONTROL_MUTE_GROUP_INVALID": "A mute group references a missing device or coverage area, or is empty.",
+    "SCENE_INVALID": "A scene is empty, duplicates another scene's id, or references a missing mute group, array, or coverage area.",
+    "SCHEDULE_INVALID": "A scene schedule has a bad time/day, duplicates another schedule's id, or recalls a missing scene.",
     "MANUAL_LOBE_LIMIT": "Manual mode with more than 8 pickup lobes.",
     "AUTOMIXER_INVALID": "Automixer value out of range or output bus unresolved.",
     "DEVICE_PROFILE_UNKNOWN": "Device references a profile id not in the catalog.",
@@ -54,6 +62,11 @@ CODE_DESCRIPTIONS: dict[str, str] = {
     "DSP_CHAIN_NO_LEVEL": "Device has DSP blocks but no gain/mute stage.",
     "NAMING_DUPLICATE_LABEL": "Two or more devices share the same label.",
     "NAMING_EMPTY_LABEL": "A device has an empty label.",
+    "CAMERA_UNPLACED": "A conferencing camera has no position in the room.",
+    "CAMERA_NO_SUBJECT": "A placed camera's field of view frames no talker or seat.",
+    "FURNITURE_OUTSIDE_ROOM": "A furniture object is placed outside the room outline.",
+    "FURNITURE_GEOMETRY_INVALID": "A furniture object has non-positive width/depth.",
+    "DEVICE_INSIDE_FURNITURE": "A device sits inside a furniture object's footprint, below its top.",
 }
 
 
@@ -86,6 +99,7 @@ def validate(config: SystemConfig) -> ValidationResult:
     _validate_commissioning(config, add)
     _validate_naming(config, add)
     _validate_control(config, add)
+    _validate_room_and_devices(config, add)
 
     errors = [i for i in issues if i.severity == "error"]
     warnings = [i for i in issues if i.severity == "warning"]
@@ -258,6 +272,93 @@ def _validate_control(config: SystemConfig, add: AddIssue) -> None:
                 add("error", "CONTROL_MUTE_GROUP_INVALID", f'Mute group "{group.id}" references missing array "{ref.array_id}".', [group.id, ref.array_id])
             elif not any(z.id == ref.zone_id for z in arr.zones):
                 add("error", "CONTROL_MUTE_GROUP_INVALID", f'Mute group "{group.id}" references missing zone "{ref.zone_id}" on array "{ref.array_id}".', [group.id, ref.array_id, ref.zone_id])
+    group_ids = {g.id for g in config.control.mute_groups}
+    seen_scene_ids: set[str] = set()
+    for scene in config.control.scenes:
+        if scene.id in seen_scene_ids:
+            add("error", "SCENE_INVALID", f'Duplicate scene id "{scene.id}".', [scene.id])
+        seen_scene_ids.add(scene.id)
+        if not scene.mute_states and not scene.zone_states and not scene.steer:
+            add("error", "SCENE_INVALID", f'Scene "{scene.id}" is empty (no mute states, zone states, or steer).', [scene.id])
+        for gid in scene.mute_states:
+            if gid not in group_ids:
+                add("error", "SCENE_INVALID", f'Scene "{scene.id}" references missing mute group "{gid}".', [scene.id, gid])
+        for zs in scene.zone_states:
+            arr = find_device(config, zs.array_id)
+            if arr is None or arr.type != "microphoneArray":
+                add("error", "SCENE_INVALID", f'Scene "{scene.id}" references missing array "{zs.array_id}".', [scene.id, zs.array_id])
+            elif not any(z.id == zs.zone_id for z in arr.zones):
+                add("error", "SCENE_INVALID", f'Scene "{scene.id}" references missing zone "{zs.zone_id}" on array "{zs.array_id}".', [scene.id, zs.array_id, zs.zone_id])
+        for st in scene.steer:
+            arr = find_device(config, st.array_id)
+            if arr is None or arr.type != "microphoneArray":
+                add("error", "SCENE_INVALID", f'Scene "{scene.id}" steers a missing array "{st.array_id}".', [scene.id, st.array_id])
+    scene_ids = {s.id for s in config.control.scenes}
+    seen_schedule_ids: set[str] = set()
+    for sched in config.control.schedules:
+        if sched.id in seen_schedule_ids:
+            add("error", "SCHEDULE_INVALID", f'Duplicate schedule id "{sched.id}".', [sched.id])
+        seen_schedule_ids.add(sched.id)
+        if sched.scene_id not in scene_ids:
+            add("error", "SCHEDULE_INVALID", f'Schedule "{sched.id}" recalls missing scene "{sched.scene_id}".', [sched.id, sched.scene_id])
+        if parse_hhmm(sched.time) is None:
+            add("error", "SCHEDULE_INVALID", f'Schedule "{sched.id}" has invalid time "{sched.time}" (expected "HH:MM").', [sched.id])
+        if not sched.days:
+            add("error", "SCHEDULE_INVALID", f'Schedule "{sched.id}" has no days.', [sched.id])
+        for day in sched.days:
+            if day not in WEEKDAYS:
+                add("error", "SCHEDULE_INVALID", f'Schedule "{sched.id}" has unknown day "{day}" (expected one of {", ".join(WEEKDAYS)}).', [sched.id])
+
+
+def _validate_room_and_devices(config: SystemConfig, add: AddIssue) -> None:
+    """v4 coverage-design checks: furniture geometry/placement, devices embedded in
+    furniture, and cameras that frame nobody. All advisory (warnings) except a
+    degenerate furniture footprint, which is an error."""
+    room = config.room
+
+    if room is not None:
+        verts = room.vertices
+        has_outline = len(verts) >= 3
+        for o in room.objects:
+            w, d, _h = resolved_dimensions(o)
+            if w <= 0 or d <= 0:
+                add("error", "FURNITURE_GEOMETRY_INVALID",
+                    f'Furniture "{o.id}" ({o.kind}) has non-positive dimensions ({w}×{d} m).', [o.id])
+            if has_outline and not point_in_polygon(o.position, verts):
+                add("warning", "FURNITURE_OUTSIDE_ROOM",
+                    f'Furniture "{o.id}" ({o.kind}) is outside the room outline.', [o.id])
+        # devices physically embedded in furniture (below its top, inside its footprint)
+        for dev in config.devices:
+            pos = getattr(dev, "position", None)
+            if pos is None:
+                continue
+            elev = dev.elevation if dev.elevation is not None else default_elevation(dev, room.height)
+            for o in room.objects:
+                _w, _d, oh = resolved_dimensions(o)
+                if elev < oh and point_in_polygon(pos, furniture_corners(o)):
+                    add("warning", "DEVICE_INSIDE_FURNITURE",
+                        f'Device "{dev.id}" sits inside furniture "{o.id}" ({o.kind}).', [dev.id, o.id])
+                    break
+
+    # cameras: unplaced, or framing no subject
+    subjects = [t.position for t in config.talkers]
+    if room is not None:
+        for o in room.objects:
+            subjects.extend(s.position for s in (o.seats or []))
+    for dev in config.devices:
+        if dev.type != "camera":
+            continue
+        if dev.position is None:
+            add("warning", "CAMERA_UNPLACED", f'Camera "{dev.id}" is not placed in the room.', [dev.id])
+            continue
+        spec = device_capabilities(dev).camera
+        if spec is None or not subjects:
+            continue
+        half = spec.fov_h_deg / 2.0
+        bearing = float(getattr(dev, "bearing_deg", 0.0)) % 360.0
+        if not any(point_in_sector(dev.position, s, bearing, half, spec.max_range_m) for s in subjects):
+            add("warning", "CAMERA_NO_SUBJECT",
+                f'Camera "{dev.id}" frames no talker or seat — aim it or move it.', [dev.id])
 
 
 def _validate_naming(config: SystemConfig, add: AddIssue) -> None:

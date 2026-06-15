@@ -45,6 +45,14 @@ class AppState(QObject):
         self.sim_show_heatmap = False
         self.show_coverage = False                    # draw array coverage circles on the canvas
         self.calibrating = False                      # floor-plan scale calibration drag in progress
+        # ---- coverage simulation overlays (v4; transient view state) ----
+        self.sim_show_pickup = False                  # mic voice-pickup sectors
+        self.sim_show_fov = False                     # camera field-of-view wedges
+        self.sim_show_dispersion = False              # loudspeaker dispersion cones
+        self.sim_show_occlusion = False               # furniture line-of-sight blocking
+        self.furniture_kind = "table"                 # active kind for the furniture tool
+        self.sim_device_id: Optional[str] = None      # focused device for coverage (None = all)
+        self._room_coverage = None                    # cached cp.RoomCoverage for self.config
         # ---- live-session overlay (transient view state; never in history) ----
         # dict published by the Live panel while a session runs:
         # {"array_id", "sector": (center, half_width, front_offset) | None,
@@ -68,9 +76,21 @@ class AppState(QObject):
         self.live_overlay = data
         self.liveOverlayChanged.emit()
 
+    # ---- coverage simulation (recomputed on config change, cached for paint) ----
+    def room_coverage(self):
+        """Cached cp.RoomCoverage for the current config — recomputed lazily after
+        any config change (set_config/undo/redo/room switch invalidate it)."""
+        if self._room_coverage is None:
+            self._room_coverage = cp.simulate_room_coverage(self.config)
+        return self._room_coverage
+
+    def _invalidate_coverage(self) -> None:
+        self._room_coverage = None
+
     # ---- history ----
     def set_config(self, new, record: bool = True) -> None:
         self.config = new
+        self._invalidate_coverage()
         if record:
             self._history = self._history[: self._idx + 1]
             self._history.append(new)
@@ -84,6 +104,7 @@ class AppState(QObject):
         if self._idx > 0:
             self._idx -= 1
             self.config = self._history[self._idx]
+            self._invalidate_coverage()
             self._prune_selection()
             self.changed.emit()
 
@@ -91,6 +112,7 @@ class AppState(QObject):
         if self._idx < len(self._history) - 1:
             self._idx += 1
             self.config = self._history[self._idx]
+            self._invalidate_coverage()
             self._prune_selection()
             self.changed.emit()
 
@@ -110,6 +132,8 @@ class AppState(QObject):
         r = self.rooms[i]
         self.config, self._history, self._idx = r["config"], r["history"], r["idx"]
         self.selection = None
+        self.sim_device_id = None
+        self._invalidate_coverage()
         self.changed.emit()
 
     def add_room(self) -> None:
@@ -136,6 +160,14 @@ class AppState(QObject):
         new_active = self.active_room - 1 if i < self.active_room else self.active_room
         self._load(min(max(new_active, 0), len(self.rooms) - 1))
 
+    def load_rooms(self, rooms: list[dict], active: int = 0) -> None:
+        """Replace the whole workspace (e.g. crash recovery). Each room dict needs
+        ``id`` / ``config`` / ``history`` / ``idx`` / ``last_deployed`` keys."""
+        if not rooms:
+            return
+        self.rooms = rooms
+        self._load(min(max(active, 0), len(rooms) - 1))
+
     def rename_room(self, i: int, name: str) -> None:
         import copy
         r = self.rooms[i]
@@ -152,8 +184,88 @@ class AppState(QObject):
         diff = cp.deployment_diff(base, self.config)
         self.config = cp.mark_deployed(self.config, now_iso())
         room["last_deployed"] = self.config
+        # a deploy "ships" the design: newly designed devices get installed in
+        # the (simulated) physical room, so a later discovery can find them
+        t = room.get("transport")
+        if t is not None:
+            for d in self.config.devices:
+                if not t.has_device(d.id):
+                    t.add_device(d)
         self.set_config(self.config)
         return diff
+
+    # ---- online room (simulated transport; A2) ----
+    @property
+    def transport(self):
+        return self.rooms[self.active_room].get("transport")
+
+    @property
+    def online(self) -> bool:
+        return bool(self.rooms[self.active_room].get("online"))
+
+    def go_online(self) -> None:
+        """Open the (simulated) room: seed the transport on first use — from the
+        last deployed snapshot when there is one, else from the current design —
+        then connect everything discoverable."""
+        room = self.rooms[self.active_room]
+        t = room.get("transport")
+        if t is None:
+            seed = room.get("last_deployed") or self.config
+            t = cp.SimulatedTransport(seed.devices)
+            room["transport"] = t
+        for d in t.discover():
+            try:
+                t.connect(d.id)
+            except cp.TransportError:
+                pass                       # went offline between discover and connect
+        room["online"] = True
+        self.changed.emit()
+
+    def go_offline(self) -> None:
+        room = self.rooms[self.active_room]
+        t = room.get("transport")
+        if t is not None:
+            t.disconnect_all()
+        room["online"] = False
+        self.changed.emit()
+
+    def device_status(self) -> list:
+        """Per-device online state (empty when the room is offline)."""
+        room = self.rooms[self.active_room]
+        t = room.get("transport")
+        if not room.get("online") or t is None:
+            return []
+        return cp.online_room_status(self.config, room.get("last_deployed"), t)
+
+    def simulate_device_offline(self, device_id: str, offline: bool = True) -> None:
+        """Demo/test control: unplug (or re-plug) a device in the simulated room."""
+        t = self.rooms[self.active_room].get("transport")
+        if t is None or not isinstance(t, cp.SimulatedTransport):
+            return
+        try:
+            t.set_offline(device_id, offline)
+        except ValueError:
+            return                         # designed but not installed — nothing to unplug
+        self.changed.emit()
+
+    def push_online(self):
+        """Deploy to online devices: push the design through the transport, read
+        back, reconcile. The last-deployed snapshot updates **only** when every
+        device was pushed and reads back matching — a partial push leaves the
+        changed-since-deploy badges nagging about exactly what didn't make it.
+        Returns the ``cp.PushReport`` (None while offline)."""
+        room = self.rooms[self.active_room]
+        t = room.get("transport")
+        if not room.get("online") or t is None:
+            return None
+        report = cp.push_to_online(self.config, t)
+        if report.complete and report.clean:
+            self.config = cp.mark_deployed(self.config, now_iso())
+            room["last_deployed"] = self.config
+            self.set_config(self.config)
+        else:
+            self.changed.emit()            # statuses moved even without a snapshot
+        return report
 
     # ---- selection ----
     def select(self, sel: Optional[dict]) -> None:
@@ -168,6 +280,10 @@ class AppState(QObject):
             self.selection = None
         elif s["kind"] == "talker" and not any(t.id == s["id"] for t in self.config.talkers):
             self.selection = None
+        elif s["kind"] == "furniture":
+            objs = self.config.room.objects if self.config.room else []
+            if not any(o.id == s["id"] for o in objs):
+                self.selection = None
 
     # ---- id helpers ----
     def next_zone_id(self, array_id: str) -> str:
@@ -184,9 +300,19 @@ class AppState(QObject):
 
     def next_device_id(self, dtype: str) -> str:
         prefix = {"processor": "P", "microphoneArray": "A", "wirelessMic": "WM",
-                  "wiredMic": "WD", "loudspeaker": "L", "codec": "C"}.get(dtype, "D")
+                  "wiredMic": "WD", "loudspeaker": "L", "codec": "C", "camera": "CAM"}.get(dtype, "D")
         n = 1
         existing = {d.id for d in self.config.devices}
         while f"{prefix}{n}" in existing:
             n += 1
         return f"{prefix}{n}"
+
+    def next_furniture_id(self) -> str:
+        """Per-room furniture id (deduped against the ACTIVE room's objects, so two
+        rooms never collide — multi-room is live, unlike a single global counter)."""
+        objs = self.config.room.objects if self.config.room else []
+        existing = {o.id for o in objs}
+        n = 1
+        while f"F{n}" in existing:
+            n += 1
+        return f"F{n}"

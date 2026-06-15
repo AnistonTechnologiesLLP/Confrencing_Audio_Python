@@ -12,6 +12,31 @@ _SPK = ["gain", "mute", "peq4", "delay", "compressor"]
 
 
 @dataclass
+class CameraSpec:
+    """Field-of-view / reach for a conferencing camera (v4). Lives on the device
+    profile, mirroring how a mic array's ``coverage_angle_deg`` lives here. The
+    coverage simulator draws a horizontal FOV wedge of half-angle ``fov_h_deg/2``
+    and a 3D frustum using ``fov_v_deg``; ``zoom_min_fov_deg`` (if set) is the
+    tightest framing a PTZ can reach."""
+
+    fov_h_deg: float
+    fov_v_deg: float
+    max_range_m: float
+    zoom_min_fov_deg: Optional[float] = None
+
+
+@dataclass
+class SpeakerSpec:
+    """Dispersion / reach for a loudspeaker (v4). Drives the dispersion cone and a
+    coarse inverse-distance SPL falloff in the coverage simulator."""
+
+    dispersion_h_deg: float
+    dispersion_v_deg: float
+    max_range_m: float
+    spl_1m_db: Optional[float] = None
+
+
+@dataclass
 class DeviceCapabilities:
     aec: bool
     automix: bool
@@ -19,6 +44,8 @@ class DeviceCapabilities:
     supported_blocks: list[DspBlockKind]
     max_coverage_zones: int
     coverage_angle_deg: Optional[float] = None  # full pickup cone (arrays only); None = no coverage geometry
+    camera: Optional[CameraSpec] = None         # FOV/range (camera profiles only)
+    speaker: Optional[SpeakerSpec] = None       # dispersion/range (loudspeaker profiles)
 
 
 @dataclass
@@ -30,10 +57,10 @@ class DeviceProfile:
     port_defaults: dict = field(default_factory=dict)
 
 
-def _cap(aec, automix, mute, blocks, zones, coverage_angle=None):
+def _cap(aec, automix, mute, blocks, zones, coverage_angle=None, camera=None, speaker=None):
     return DeviceCapabilities(
         aec=aec, automix=automix, mute=mute, supported_blocks=list(blocks),
-        max_coverage_zones=zones, coverage_angle_deg=coverage_angle,
+        max_coverage_zones=zones, coverage_angle_deg=coverage_angle, camera=camera, speaker=speaker,
     )
 
 
@@ -44,9 +71,13 @@ DEVICE_PROFILES: dict[str, DeviceProfile] = {
     "generic-wired-mic": DeviceProfile("generic-wired-mic", "Generic wired mic", ["wiredMic"], _cap(True, True, True, ["gain", "mute", "peq4"], 0), {"analogOutputs": 1}),
     "generic-hardware-dsp": DeviceProfile("generic-hardware-dsp", "Generic hardware DSP", ["processor"], _cap(True, True, True, _FULL, 0), {"danteInputs": 8, "danteOutputs": 8, "analogInputs": 2, "analogOutputs": 2}),
     "generic-software-dsp": DeviceProfile("generic-software-dsp", "Generic software DSP", ["processor"], _cap(True, True, True, _FULL, 0), {"danteInputs": 16, "danteOutputs": 16}),
-    "generic-loudspeaker": DeviceProfile("generic-loudspeaker", "Generic loudspeaker", ["loudspeaker"], _cap(False, False, True, _SPK, 0), {"analogInputs": 1}),
+    "generic-loudspeaker": DeviceProfile("generic-loudspeaker", "Generic loudspeaker", ["loudspeaker"], _cap(False, False, True, _SPK, 0, speaker=SpeakerSpec(dispersion_h_deg=90.0, dispersion_v_deg=60.0, max_range_m=8.0, spl_1m_db=90.0)), {"analogInputs": 1}),
     "generic-codec": DeviceProfile("generic-codec", "Generic codec (far-end)", ["codec"], _cap(False, False, True, ["gain", "mute"], 0), {"danteInputs": 1, "danteOutputs": 1}),
     "generic-mute-control": DeviceProfile("generic-mute-control", "Generic mute/logic control", ["codec", "processor"], _cap(False, False, True, ["mute"], 0), {}),
+    # v4 — conferencing cameras (coverage-only; no DSP, no audio routing required).
+    "generic-ptz-camera": DeviceProfile("generic-ptz-camera", "Generic PTZ camera", ["camera"], _cap(False, False, False, [], 0, camera=CameraSpec(fov_h_deg=70.0, fov_v_deg=40.0, max_range_m=10.0, zoom_min_fov_deg=6.0)), {}),
+    "generic-wide-camera": DeviceProfile("generic-wide-camera", "Generic wide-angle camera", ["camera"], _cap(False, False, False, [], 0, camera=CameraSpec(fov_h_deg=120.0, fov_v_deg=70.0, max_range_m=6.0)), {}),
+    "generic-soundbar-camera": DeviceProfile("generic-soundbar-camera", "Generic soundbar camera", ["camera"], _cap(False, False, False, [], 0, camera=CameraSpec(fov_h_deg=110.0, fov_v_deg=60.0, max_range_m=5.0)), {}),
 }
 
 FALLBACK_CAPABILITIES = _cap(True, True, True, _FULL, 8)
@@ -60,6 +91,7 @@ def default_profile_id(device_type: DeviceType) -> str:
         "processor": "generic-hardware-dsp",
         "loudspeaker": "generic-loudspeaker",
         "codec": "generic-codec",
+        "camera": "generic-ptz-camera",
     }.get(device_type, "generic-hardware-dsp")
 
 

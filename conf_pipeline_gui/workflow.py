@@ -91,8 +91,10 @@ def stage_status(state, validation=None) -> dict[str, str]:
         route = TODO
 
     deployed = state.rooms[state.active_room].get("last_deployed") is not None
-    if res.ok and deployed:
-        deploy = DONE
+    rows = state.device_status()           # [] while the room is offline
+    pending = any(r.changed_since_deploy or r.new_since_deploy for r in rows)
+    if res.ok and deployed and not pending:
+        deploy = DONE                      # online: also requires the room in sync
     elif res.ok and c.devices:
         deploy = PARTIAL
     else:
@@ -139,6 +141,12 @@ def next_hint(state, mode: str) -> str:
             return f"Fix {len(res.errors)} error(s) before deploying"
         if state.rooms[state.active_room].get("last_deployed") is None:
             return "Next: Deploy to snapshot this design"
+        rows = state.device_status()
+        n_off = sum(1 for r in rows if not r.online)
+        if n_off:
+            return f"{n_off} device(s) offline in the room"
+        if any(r.changed_since_deploy or r.new_since_deploy for r in rows):
+            return "Design changed since the last deploy — Deploy again"
         return ""
     if mode == "live":
         if not any(d.type == "microphoneArray" and d.position for d in c.devices):

@@ -256,3 +256,273 @@ def test_live_connect_disconnect_simulated(win, monkeypatch):
     assert not win.modebar._live_connected
     panel._tick_live_meter()
     assert win.state.live_overlay is None
+
+
+def test_autosave_tick_and_clean_close_lifecycle(qapp, tmp_path):
+    from conf_pipeline_gui.app import MainWindow
+
+    files = cp.ProjectFileManager(state_dir=tmp_path / "state")
+    w = MainWindow(files=files)
+    try:
+        w._autosave_tick()                           # nothing dirty yet
+        assert files.pending_recovery() is None
+        c = cp.add_device(w.state.config, cp.create_processor("P1", "DSP"))
+        w.state.set_config(c)                        # an edit marks the work dirty
+        assert w._dirty
+        w._autosave_tick()
+        info = files.pending_recovery()
+        assert info is not None                      # crash marker present
+        restored = cp.deserialize_project(files.read_recovery())
+        assert any(d.id == "P1" for d in restored.rooms[0].config.devices)
+        assert not w._dirty                          # tick consumed the dirty flag
+    finally:
+        w.close()                                    # clean exit clears the marker
+    assert files.pending_recovery() is None
+
+
+def test_recovery_restores_multi_room_workspace(qapp, tmp_path, monkeypatch):
+    from PySide6.QtWidgets import QMessageBox
+
+    from conf_pipeline_gui.app import MainWindow
+
+    files = cp.ProjectFileManager(state_dir=tmp_path / "state")
+    crashed = MainWindow(files=files)
+    crashed.state.add_room()                         # two rooms in the workspace
+    crashed._autosave_tick()
+    del crashed                                      # simulated crash: no close()
+    assert files.pending_recovery() is not None
+
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.Yes)
+    w = MainWindow(files=files)
+    try:
+        assert len(w.state.rooms) == 1               # fresh window starts empty
+        w._offer_recovery()
+        assert len(w.state.rooms) == 2               # workspace came back
+        assert files.pending_recovery() is None      # offered once, then cleared
+    finally:
+        w.close()
+
+
+def test_open_path_shows_migration_notice(win, tmp_path, monkeypatch):
+    import json
+
+    from PySide6.QtWidgets import QMessageBox
+
+    doc = json.loads(cp.serialize(cp.create_config("Legacy", "x")))
+    doc["version"] = 1
+    p = tmp_path / "legacy.json"
+    p.write_text(json.dumps(doc), encoding="utf-8")
+
+    seen = {}
+    monkeypatch.setattr(QMessageBox, "information",
+                        lambda _parent, title, text: seen.update(title=title, text=text))
+    win._open_path(str(p))
+    assert seen["title"] == "File upgraded"
+    assert "version 1" in seen["text"]
+    assert win.state.config.metadata["name"] == "Legacy"
+    assert str(p.resolve()) in win.files.recent_files()
+
+
+def test_recent_menu_populates_and_opens(win, tmp_path):
+    win.files.clear_recent()
+    win._fill_recent_menu()
+    labels = [a.text() for a in win.recent_menu.actions()]
+    assert labels == ["(no recent files)"]
+    p = tmp_path / "cfg.json"
+    win.files.save_config(cp.create_config("FromRecent", "x"), p)
+    win._fill_recent_menu()
+    actions = win.recent_menu.actions()
+    assert actions[0].text() == str(p.resolve())
+    actions[0].trigger()                             # open via the menu entry
+    assert win.state.config.metadata["name"] == "FromRecent"
+
+
+def test_online_room_lifecycle_drives_deploy_dot(win):
+    from conf_pipeline_gui import workflow
+
+    c = cp.create_config("T", "2026-06-12T00:00:00Z")
+    c = cp.set_room(c, cp.rectangular_room(8, 6, 3))
+    c = cp.add_device(c, cp.create_microphone_array("A1", "Array"))
+    c = cp.set_device_position(c, "A1", Point2D(4, 3))
+    win.state.set_config(c)
+    win.state.deploy()                                   # ship it first
+    assert workflow.stage_status(win.state)["deploy"] == workflow.DONE
+
+    win.state.go_online()                                # seeds from last_deployed
+    assert win.state.online
+    rows = win.state.device_status()
+    assert [r.device_id for r in rows] == ["A1"]
+    assert rows[0].online and rows[0].connected and rows[0].in_sync
+    assert workflow.stage_status(win.state)["deploy"] == workflow.DONE
+
+    c2 = cp.rename_device(win.state.config, "A1", "Array (moved)")
+    win.state.set_config(c2)                             # design drifts
+    rows = win.state.device_status()
+    assert rows[0].changed_since_deploy
+    assert workflow.stage_status(win.state)["deploy"] == workflow.PARTIAL  # dot regressed
+    assert "changed since the last deploy" in workflow.next_hint(win.state, "deploy")
+
+    win.state.simulate_device_offline("A1")              # unplug it
+    rows = win.state.device_status()
+    assert not rows[0].online
+    assert "offline" in workflow.next_hint(win.state, "deploy")
+
+    win.state.simulate_device_offline("A1", False)
+    win.state.go_offline()
+    assert not win.state.online and win.state.device_status() == []
+    win.state.set_mode("design")
+
+
+def test_deploy_installs_new_devices_into_online_room(win):
+    c = cp.create_config("T", "2026-06-12T00:00:00Z")
+    c = cp.add_device(c, cp.create_processor("P1", "DSP"))
+    win.state.set_config(c)
+    win.state.go_online()                                # never deployed → seeds from design
+    c2 = cp.add_device(win.state.config, cp.create_loudspeaker("L1", "Speaker", "analog"))
+    win.state.set_config(c2)
+    rows = {r.device_id: r for r in win.state.device_status()}
+    assert not rows["L1"].online                         # designed, not installed
+    win.state.deploy()                                   # shipping installs it
+    rows = {r.device_id: r for r in win.state.device_status()}
+    assert rows["L1"].online and rows["L1"].in_sync
+    win.state.go_offline()
+
+
+def test_deploy_panel_online_group(win):
+    c = cp.create_config("T", "2026-06-12T00:00:00Z")
+    c = cp.add_device(c, cp.create_microphone_array("A1", "Array"))
+    win.state.set_config(c)
+    win.state.set_mode("deploy")
+    panel = win.panels["deploy"]
+    panel.refresh()
+    assert panel.online_btn.text() == "Go online"
+    panel._toggle_online()
+    panel.refresh()
+    assert panel.online_btn.text() == "Go offline"
+    assert "1/1 online" in panel.online_summary.text()
+    assert panel.device_rows.count() == 1                # one status row per device
+    win.state.go_offline()
+    win.state.set_mode("design")
+
+
+def test_scene_capture_recall_remove_cycle(win):
+    from conf_pipeline.model import RectShape
+
+    c = cp.create_config("T", "2026-06-12T00:00:00Z")
+    c = cp.add_device(c, cp.create_microphone_array("A1", "Array"))
+    c = cp.add_coverage_zone(c, "A1", cp.CoverageZone("z1", "dynamic", RectShape(Point2D(1, 1), 2, 2), False, "Table"))
+    c = cp.add_mute_group(c, cp.create_mute_group("mg1", "Room", device_ids=["A1"]))
+    c = cp.set_zone_gain_db(c, "A1", "z1", -6.0)
+    win.state.set_config(c)
+    panel = win.panels["route"]
+    panel.refresh()
+
+    panel.scene_name.setText("Meeting")
+    panel._capture_scene()                               # snapshot current surface
+    scenes = win.state.config.control.scenes
+    assert len(scenes) == 1 and scenes[0].label == "Meeting"
+    assert scenes[0].zone_states[0].gain_db == -6.0
+
+    # drift, then recall via the list selection
+    win.state.set_config(cp.set_zone_gain_db(win.state.config, "A1", "z1", 0.0))
+    panel.refresh()
+    panel.scene_list.setCurrentRow(0)
+    panel._recall_selected_scene()
+    assert cp.find_device(win.state.config, "A1").zones[0].gain_db == -6.0
+
+    panel.scene_list.setCurrentRow(0)
+    panel._remove_selected_scene()
+    assert win.state.config.control.scenes == []
+
+
+def test_push_online_clean_marks_deployed_and_dot_done(win):
+    from conf_pipeline_gui import workflow
+
+    c = cp.create_config("T", "2026-06-12T00:00:00Z")
+    c = cp.set_room(c, cp.rectangular_room(8, 6, 3))
+    c = cp.add_device(c, cp.create_microphone_array("A1", "Array"))
+    c = cp.set_device_position(c, "A1", Point2D(4, 3))
+    win.state.set_config(c)
+    win.state.deploy()
+    win.state.go_online()
+    c2 = cp.rename_device(win.state.config, "A1", "Array (renamed)")
+    win.state.set_config(c2)                             # design drifts from room + snapshot
+    assert workflow.stage_status(win.state)["deploy"] == workflow.PARTIAL
+
+    report = win.state.push_online()
+    assert report is not None and report.complete and report.clean
+    assert report.pushed == ("A1",)
+    # clean+complete push refreshed the snapshot: dot is DONE, room in sync
+    assert workflow.stage_status(win.state)["deploy"] == workflow.DONE
+    rows = win.state.device_status()
+    assert rows[0].in_sync
+    win.state.go_offline()
+    win.state.set_mode("design")
+
+
+def test_push_online_partial_keeps_pending_state(win):
+    from conf_pipeline_gui import workflow
+
+    c = cp.create_config("T", "2026-06-12T00:00:00Z")
+    c = cp.add_device(c, cp.create_processor("P1", "DSP"))
+    c = cp.add_device(c, cp.create_microphone_array("A1", "Array"))
+    win.state.set_config(c)
+    win.state.deploy()
+    win.state.go_online()
+    c2 = cp.rename_device(win.state.config, "A1", "Array (renamed)")
+    win.state.set_config(c2)
+    win.state.simulate_device_offline("A1")              # the drifted one is unplugged
+
+    report = win.state.push_online()
+    assert report is not None
+    assert report.skipped_offline == ("A1",) and not report.complete
+    # snapshot NOT updated: the changed device still nags
+    rows = {r.device_id: r for r in win.state.device_status()}
+    assert rows["A1"].changed_since_deploy
+    assert workflow.stage_status(win.state)["deploy"] == workflow.PARTIAL
+    win.state.simulate_device_offline("A1", False)
+    win.state.go_offline()
+    win.state.set_mode("design")
+
+
+def test_deploy_panel_push_button(win):
+    c = cp.create_config("T", "2026-06-12T00:00:00Z")
+    c = cp.add_device(c, cp.create_microphone_array("A1", "Array"))
+    win.state.set_config(c)
+    win.state.set_mode("deploy")
+    panel = win.panels["deploy"]
+    panel.refresh()
+    assert not panel.push_btn.isEnabled()                # offline: nothing to push to
+    win.state.go_online()
+    panel.refresh()
+    assert panel.push_btn.isEnabled()
+    panel._push_online()
+    assert "Pushed 1 device(s)." in panel.deploy_info.text()
+    assert "in sync" in panel.deploy_info.text()
+    win.state.go_offline()
+    win.state.set_mode("design")
+
+
+def test_live_design_readout_shows_frequency_curve(win):
+    from conf_pipeline.model import RectShape
+
+    c = cp.create_config("T", "2026-06-12T00:00:00Z")
+    c = cp.set_room(c, cp.rectangular_room(8, 6, 3))
+    c = cp.add_device(c, cp.create_microphone_array("A1", "Array"))
+    c = cp.set_device_position(c, "A1", Point2D(4, 3))
+    arr = cp.find_device(c, "A1")
+    arr.zones = [
+        cp.CoverageZone("p1", "dynamic", RectShape(Point2D(6.5, 2.5), 1, 1), False, "Presenter"),
+        cp.CoverageZone("x1", "exclusion", RectShape(Point2D(0.5, 2.5), 1, 1), False, "Hallway"),
+    ]
+    win.state.set_config(c)
+    win.state.set_mode("live")
+    panel = win.panels["live"]
+    panel.refresh()
+    panel._live_design_from_zones()
+    text = panel.live_design_view.toPlainText()
+    # B1 per-band line + B2 curve table both land in the readout
+    assert "bands 250–8000 Hz" in text
+    assert "DI / beamwidth vs frequency (Presenter):" in text
+    assert "8000 Hz" in text
+    win.state.set_mode("design")

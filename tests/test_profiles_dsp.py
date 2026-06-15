@@ -119,7 +119,7 @@ def test_v1_migration():
         d.pop("profileId", None)
         d.pop("dspBlocks", None)
     restored = cp.deserialize(json.dumps(v1))
-    assert restored.version == 2
+    assert restored.version == cp.CONFIG_VERSION
     assert cp.find_device(restored, "P").profile_id == "generic-hardware-dsp"
     assert cp.find_device(restored, "A").dsp_blocks == []
 
@@ -130,4 +130,4 @@ def test_round_trip_with_blocks():
     c = cp.add_dsp_block(c, "P", cp.create_dsp_block("peq4", "q1"))
     c = cp.update_dsp_block(c, "P", "q1", {"target_bus_id": "P-out-dante-1"})
     assert cp.serialize(cp.deserialize(cp.serialize(c))) == cp.serialize(c)
-    assert json.loads(cp.serialize(c))["version"] == 2
+    assert json.loads(cp.serialize(c))["version"] == cp.CONFIG_VERSION

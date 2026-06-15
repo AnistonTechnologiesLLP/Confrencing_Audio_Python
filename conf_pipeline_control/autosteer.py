@@ -204,6 +204,8 @@ class AutoSteerController:
                 mode=self.mode,
                 loading=self.loading,
                 array_id="POLARIS",
+                bands=(),   # hot loop: skip band verification — the live runtime
+                            # re-derives the weights per FFT bin anyway
             )
             self.ctrl.apply_design(design)
             if self.gate_when_empty:

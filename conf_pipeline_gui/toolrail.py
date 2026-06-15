@@ -11,11 +11,13 @@ from PySide6.QtCore import QSize, Qt, Signal
 from PySide6.QtGui import QAction, QActionGroup
 from PySide6.QtWidgets import QButtonGroup, QFrame, QMenu, QToolButton, QVBoxLayout
 
+import conf_pipeline as cp
+
 from . import icons
 from .theme import palette
 
 MODE_TOOLS = {
-    "design": ["select", "room", "zone", "talker"],
+    "design": ["select", "room", "zone", "talker", "furniture"],
     "simulate": ["select"],
     "route": ["select", "connect"],
     "deploy": ["select"],
@@ -27,14 +29,18 @@ TOOL_META = {
     "room": ("Room", "R", "Click to draw the room outline; double-click to close"),
     "zone": ("Zone", "Z", "Drag a coverage/exclusion area on the floor; click the arrow to pick the zone kind"),
     "talker": ("Talker", "T", "Click to drop a person (talker)"),
+    "furniture": ("Furniture", "F", "Click to place furniture; click the arrow to pick the kind"),
 }
 ZONE_KINDS = [("dynamic", "Records (dynamic)"), ("dedicated", "Always-on (dedicated)"),
               ("exclusion", "No-pickup (exclusion)")]
+# Furniture kinds for the flyout, labelled from the catalog.
+FURNITURE_KINDS = [(k, cp.FURNITURE_CATALOG[k].label) for k in cp.FURNITURE_KINDS]
 
 
 class ToolRail(QFrame):
     toolSelected = Signal(str)
     zoneKindSelected = Signal(str)
+    furnitureKindSelected = Signal(str)
 
     def __init__(self, theme: str = "dark"):
         super().__init__()
@@ -81,6 +87,23 @@ class ToolRail(QFrame):
             self.zone_actions[kind] = a
         self.zone_actions["dynamic"].setChecked(True)
         zb.setMenu(menu)
+
+        # furniture-kind flyout on the Furniture button (same pattern as Zone)
+        fb = self.buttons["furniture"]
+        fb.setPopupMode(QToolButton.MenuButtonPopup)
+        fmenu = QMenu(fb)
+        fgrp = QActionGroup(fmenu)
+        fgrp.setExclusive(True)
+        self.furniture_actions: dict[str, QAction] = {}
+        for kind, label in FURNITURE_KINDS:
+            a = QAction(label, fmenu, checkable=True)
+            a.triggered.connect(lambda _c=False, k=kind: self.furnitureKindSelected.emit(k))
+            fgrp.addAction(a)
+            fmenu.addAction(a)
+            self.furniture_actions[kind] = a
+        self.furniture_actions["table"].setChecked(True)
+        fb.setMenu(fmenu)
+
         self._tint_icons()
 
     def _tint_icons(self):
@@ -105,5 +128,10 @@ class ToolRail(QFrame):
 
     def set_zone_kind(self, kind: str) -> None:
         a = self.zone_actions.get(kind)
+        if a is not None:
+            a.setChecked(True)
+
+    def set_furniture_kind(self, kind: str) -> None:
+        a = self.furniture_actions.get(kind)
         if a is not None:
             a.setChecked(True)

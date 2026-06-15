@@ -618,6 +618,10 @@ class LivePanel(PanelBase):
             # compact azimuth pattern of the first beam, as a text sparkline
             pat = cc.beam_pattern_azimuth(list(design.beams[0].weights), geom, design.freq_hz, steps=36)
             text += "\n\nAzimuth response (beam 1), 0°→350°:\n" + self._sparkline([db for _a, db in pat])
+            # broadband verification: DI / beamwidth as a function of frequency
+            curves = cc.frequency_curves(design)
+            if curves:
+                text += "\n\n" + curves[0].table()
             # per-talker leakage: how loudly each placed person is captured
             if self.state.config.talkers:
                 leak = cc.talker_leakage_db(self.state.config, aid, geom, list(design.beams[0].weights), design.freq_hz)

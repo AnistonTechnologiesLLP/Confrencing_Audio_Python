@@ -1,11 +1,267 @@
 # Changelog
 
 Python port of the Conferencing Audio Pipeline. Format based on
-[Keep a Changelog](https://keepachangelog.com/); versions track the TypeScript
-project they were ported from. The JSON **config schema** (`CONFIG_VERSION` = 1,
-camelCase keys) is identical to the TS version, so configs interoperate.
+[Keep a Changelog](https://keepachangelog.com/); versions originally tracked
+the TypeScript project they were ported from. The JSON **config schema** is
+camelCase, currently `CONFIG_VERSION` = 3 (v1/v2 files migrate losslessly);
+the TS sibling tracks v2 and needs a matching update to read v3 exports.
 
-## [Unreleased]
+## [1.15.0] - 2026-06-12
+
+**Commissioning, scenes & broadband honesty** — the phased evolution plan
+landed in full: repository hygiene (CI, type checking, pinned dev deps),
+wideband beam design with measured DI/beamwidth-vs-frequency curves, the
+simulated commissioning workflow (device transport, per-device online state,
+push + reconcile, project file manager), and the control story (scenes,
+a local HTTP control API, scene scheduling). Schema v2 → v3 (scenes), with
+schedules additive on v3. 357 tests (was 259); `conf_pipeline/` and
+`conf_pipeline_control/` are mypy-clean.
+
+**Wideband (subband) beam design** — the published beam design is now verified
+across the speech band (250 Hz–8 kHz) instead of asserted at a single 1 kHz
+design frequency. Python-only, `conf_pipeline_control` only; the JSON config
+schema is unchanged.
+
+### Added
+- **Per-band design verification** (`beamformer.py`): `design_zone_beams`,
+  `design_from_bearings`, and `design_multi_bearings` re-derive the weights at
+  each **octave-band center** (250 / 500 / 1k / 2k / 4k / 8k Hz —
+  `SPEECH_OCTAVE_CENTERS_HZ`) by default and attach a `BandMetrics` per band to
+  each `ZoneBeam` (`band_metrics`: weights, pickup gain, WNG, DI, excluded-area
+  attenuation, per-band degradation note). `BeamDesign.band_freqs` records the
+  grid; `summary()` gains a per-beam band line (DI/WNG ranges + the worst
+  excluded leak and the band it occurs at). A custom grid is a parameter away
+  (`bands=(…)`); `bands=()` opts out (used by the auto-steer control loop, since
+  the live runtime re-derives weights per FFT bin anyway).
+- `freq_hz` is now documented as the **reference frequency**: the legacy scalar
+  fields (`pickup_gain_db`, `di_db`, `wng_db`, `exclusion_atten_db`, lobes) are
+  reported at it, unchanged — the single-frequency design is the `bands=()`
+  special case, so existing callers and serialized expectations are unaffected.
+- Tests (`tests/test_wideband.py`, 14): pickup unity and deep exclusion nulls at
+  **every** band center (zone + bearing + delay-and-sum paths), per-band WNG
+  surfacing the low-frequency cost, single-frequency equivalence at each center,
+  custom/empty/invalid grids, dead-capsule zero weights per band, summary
+  content, and a numpy cross-check that the stdlib per-band weights equal the
+  live runtime's per-FFT-bin weights (skipped without the `[control]` extra).
+
+**Scene scheduling (C3)** — recall a scene at a time, on the room's weekly
+rhythm.
+
+### Added
+- **`SceneSchedule`** (`ControlConfig.schedules` — additive optional, schema
+  **stays v3**, matching the 1.12 precedent for optional fields): recall
+  ``sceneId`` at local ``"HH:MM"`` on the given weekday keys, every week;
+  per-entry ``enabled``. Builders `create_scene_schedule` /
+  `add_scene_schedule` / `remove_scene_schedule` /
+  `set_scene_schedule_enabled`; `parse_hhmm` joins the model helpers.
+- **`SceneScheduler`** (`conf_pipeline/scheduler.py`, stdlib): executes the
+  config's schedule entries through the same `get_config`/`apply` pair as the
+  control API, so GUI, HTTP, and scheduler mutate one consistent config.
+  Deterministic by construction — injectable clock, `run_pending()` manual
+  tick (fires at most once per scheduled minute, skips vanished scenes),
+  `next_fire()`, and an optional daemon polling thread for headless use.
+- **Validation**: `SCHEDULE_INVALID` — duplicate ids, missing scene, bad
+  `"HH:MM"`, empty/unknown days.
+- `GET /api/status` now reports the schedule list.
+- Tests (`tests/test_scheduler.py`, 13): additive round-trip (v3 unchanged,
+  pre-schedule v3 files load), builder guards, the validation matrix, and
+  clock-driven firing — due/day/disabled/wrong-minute filters, once-per-minute
+  dedup + re-arm a week later, multi-entry minutes, dangling-scene skip,
+  `next_fire` same-day vs week-wrap, thread lifecycle, and the status
+  endpoint.
+
+**External control API (C2)** — a local HTTP surface for room-control
+integrations: scene recall / mute / status.
+
+### Added
+- **`conf_pipeline/control_api.py`** (pure stdlib — `http.server`, **no new
+  dependency**, not even an optional extra): `ControlApiServer` bound to
+  localhost (ephemeral port by default) exposing JSON routes in the OCTOVOX
+  `/api/…` style — `GET /api/status` (name, schema version, deployment state,
+  mute groups, scenes), `GET /api/scenes`, `POST /api/scenes/<id>/recall`, and
+  `POST /api/mute-groups/<id>` (`{"muted": bool}`), with JSON 400/404 errors.
+  The recall response carries the scene's config-inert live-layer hints
+  (`steer`, `activeZones`) so the external controller can aim the beamformer.
+- The server owns no config: the host supplies `get_config` / `apply`
+  callables. `ConfigHolder` is the thread-safe headless/test owner; the GUI
+  can supply a main-thread-marshalled pair later.
+- Tests (`tests/test_control_api.py`, 9): live request/response against an
+  ephemeral-port server via urllib — status/scene payloads, recall side
+  effects + hints, unknown-scene/group 404s, body validation 400s, unknown
+  routes, sequential-consistency, and the start/stop lifecycle.
+
+**Scenes (C1)** — named, recallable snapshots of the control surface.
+**Schema v2 → v3** (lossless migration; the TS sibling needs a matching update
+before it can read v3 exports — v1/v2 files keep loading here).
+
+### Added
+- **`Scene`** (`ControlConfig.scenes`, schema v3): typed sections —
+  `muteStates` (mute-group id → muted), `zoneStates`
+  (`{arrayId, zoneId, gainDb?, active?}`), and `steer`
+  (`{arrayId, azimuthDeg, offNadirDeg}`). `gainDb` applies to the config on
+  recall; **`active` and `steer` are config-inert live-layer hints** (which
+  pickup areas to beamform and where to aim) — deliberately, because the
+  config-side `always_on` flag is a zone-*type* invariant (dedicated ⇔ True),
+  not an operational toggle, so recall must not touch it. `None` fields mean
+  "leave as-is", so scenes can be partial.
+- **API**: `create_scene` / `add_scene` / `remove_scene` / `get_scene`,
+  `capture_scene` (snapshot every mute group's state + every pickup area's
+  gain trim), `recall_scene` (pure config→config; entries referencing vanished
+  things are skipped — validation owns flagging them). Mute-group builders now
+  preserve scenes when rebuilding `ControlConfig`.
+- **Migration**: `CONFIG_VERSION` 2 → 3 with a chained, lossless
+  `_migrate_v2_to_v3` (adds an empty `control.scenes`; v1 files run the
+  existing v1→v2 step first). Unsupported versions are still rejected.
+- **Validation**: `SCENE_INVALID` — empty scene, duplicate scene ids, or a
+  scene referencing a missing mute group / array / coverage area (incl. steer
+  targets).
+- **GUI**: a **Scenes** editor in the Route panel — capture the current
+  surface as a named scene, recall, remove — beside the mute-group editor.
+- Tests (`tests/test_scenes.py`, 12 + 1 smoke): camelCase round-trip incl.
+  field omission, v2→v3 lossless upgrade (byte-compared modulo the additive
+  fields), the v1→v2→v3 chain, capture→drift→recall restoring the surface,
+  dangling-ref recall safety, purity/idempotence, scene↔mute-group
+  coexistence, and the validation matrix. Existing hardcoded `version == 2`
+  asserts now track `CONFIG_VERSION`.
+
+**Push + reconcile (A3)** — "Deploy to online devices": push the design through
+the transport, read back, and reconcile device-reported vs designed.
+
+### Added
+- **`push_to_online(config, transport)`** (`transport.py`) → `PushReport`:
+  pushes every *online* designed device (connecting as needed), reads each
+  back, and attaches a `ReconcileEntry` per device (matches / which components
+  differ — label, profile, ports, processing blocks — the same granularity as
+  `deployment_diff`'s fingerprint, so the two views of "changed" always
+  agree). Offline devices are skipped and reported; per-device transport
+  errors are collected, never raised. `report.complete` / `.clean` /
+  `.summary()`. **`reconcile_online(config, transport)`** is the read-only
+  check (no push).
+- **`AppState.push_online()`**: runs the push and updates the last-deployed
+  snapshot **only on a clean, complete push** — a partial push (offline
+  devices, failures, mismatched read-back) leaves the snapshot alone so the
+  DEPLOY dot and the changed-since-deploy badges keep pointing at exactly the
+  devices that didn't make it.
+- **Deploy panel**: a **⇪ Deploy to online devices** button in the Online-room
+  group (enabled while online) rendering the push report — pushed/skipped/
+  failed plus the per-device ✓/✗ reconcile lines — inline in the panel.
+- Tests: 6 engine tests (drift detection + component granularity, offline
+  skipping, drifted-room push round-trip, skipped/uninstalled devices,
+  per-device failure collection via a flaky simulated push) and 3 GUI smoke
+  tests (clean push → snapshot refreshed → dot DONE; partial push with the
+  drifted device unplugged → snapshot untouched → still nagging; the panel
+  button lifecycle).
+
+**Online-room state (A2)** — per-device connected / offline / changed-since-
+deploy, surfaced through the existing workflow status-dot infrastructure.
+
+### Added
+- **`online_room_status(config, last_deployed, transport)`** (`transport.py`)
+  → one `OnlineDeviceState` per designed device: `online` / `connected` from
+  the transport, `changed_since_deploy` / `new_since_deploy` from
+  `deployment_diff` (a never-deployed design marks every device new), plus an
+  `in_sync` aggregate. `SimulatedTransport.has_device` joins the simulation
+  controls.
+- **`AppState` online session** (per room): `go_online()` seeds the simulated
+  transport on first use — **from the last deployed snapshot when there is
+  one, else from the current design** — and connects everything discoverable;
+  `go_offline()`, `device_status()`, and `simulate_device_offline()` (the
+  demo/test "unplug" control). `deploy()` now also *installs* newly designed
+  devices into an already-seeded simulated room, so shipping the design makes
+  them discoverable.
+- **Deploy panel**: an **Online room (simulated)** group — Go online/offline
+  button, a summary line (`n/m online · k changed/new since deploy`), and one
+  status row per device (●/○, connected/changed/new tags, and a per-device
+  *offline* checkbox driving the simulated unplug).
+- **Workflow dots**: the DEPLOY dot now regresses to *in progress* while the
+  room is online and any device is changed/new since the last deploy; the
+  hint chip reports offline devices and pending changes.
+- Tests: 4 engine tests (status matrix: never-deployed, changed+new vs
+  deploy, connection/offline reflection, sorting) and 3 GUI smoke tests (the
+  full online lifecycle driving the deploy dot through DONE→PARTIAL,
+  deploy-installs-new-devices, and the panel group rendering).
+
+**Project file manager (A4)** — recent files, autosave, crash recovery, and a
+user-visible migration notice on open.
+
+### Added
+- **`conf_pipeline/files.py`** (pure stdlib — deliberately the only engine
+  module that touches the filesystem): `ProjectFileManager` with
+  `open_config` / `save_config` (atomic writes), a most-recent-first
+  **recent-files list** (deduped, capped at 10, pruned of deleted files,
+  persisted), **autosave** of an opaque workspace payload, and **crash
+  recovery** — the autosave file doubles as the crash marker: it is cleared on
+  clean exit, so a leftover autosave at startup means the last session died.
+  `OpenResult.migrated_from` + `migration_notice()` report when an old-schema
+  file (e.g. v1) was upgraded on open. All state lives in one per-user
+  directory (`%APPDATA%/conf-pipeline` / `~/.local/state/conf-pipeline`),
+  overridable via `CONF_PIPELINE_STATE_DIR` or the constructor.
+- **GUI**: an **Open recent** submenu in the ☰ menu (populated on open, with
+  *Clear list*); import/export now go through the manager; opening an
+  old-schema file shows an explicit **"File upgraded"** dialog; a 30 s
+  **autosave timer** snapshots the whole multi-room workspace (as a project
+  JSON) whenever there are unsaved edits; on startup `main()` offers **"Recover
+  unsaved work?"** when a crash left an autosave behind, restoring every room;
+  closing the window cleanly clears the marker. `AppState.load_rooms` replaces
+  the workspace wholesale for recovery.
+- Tests: `tests/test_files.py` (11 — round trip + recent semantics, v1
+  migration notice, autosave/recovery lifecycle incl. missing-meta and
+  project-payload round trip, env-var state dir) and 4 GUI smoke tests
+  (autosave tick + clean-close lifecycle, multi-room crash recovery via a
+  monkeypatched dialog, migration notice on `_open_path`, recent-menu
+  populate/open). `tests/conftest.py` points the state dir at a temp directory
+  so the suite never touches real user state.
+
+**Device transport (A1)** — the device-facing seam of the commissioning
+workflow, simulated behind a clean interface (no real protocols).
+
+### Added
+- **`conf_pipeline/transport.py`** (pure stdlib): abstract `DeviceTransport`
+  (site-level — `discover` / `connect` / `disconnect` / `read_config` /
+  `push_config` / `read_status`) mirroring the `MicController` /
+  `SimulatedMicController` pattern: the base owns the connection registry
+  (idempotent connect/disconnect, config I/O requires a connection, status
+  polling deliberately doesn't, context manager disconnects all). Plus
+  `DiscoveredDevice`, `DeviceStatus`, and `TransportError`.
+- **`SimulatedTransport`**: a deterministic, hardware-free room of devices —
+  seeded with (deep-copied) device configs, `set_offline` simulates unplugging
+  (drops the connection, vanishes from discovery), `add_device` plugs one in,
+  pushes update the device-side store. Seeding with drifted configs is the
+  reconcile-diff story Phase A3 builds on.
+- Tests (`tests/test_transport.py`, 13): discovery determinism + offline
+  filtering, connection bookkeeping + error paths, copy isolation on
+  `read_config`, push round-trip, the seeded-drift → push → reconciled
+  scenario, status-without-connection, and simulation-control guards.
+
+**Broadband verification curves** — directivity index and beamwidth as a
+*function of frequency*, turning the README's honest-fidelity note from an
+assertion into a measured result.
+
+### Added
+- **`frequency_curves(design)`** (`beamformer.py`) → one
+  `BeamFrequencyCurve` per beam: DI, −3 dB beamwidth, WNG, and lobe/grating
+  counts at each frequency of a grid (default: **third-octave centers**,
+  250 Hz–8 kHz — `SPEECH_THIRD_OCTAVE_CENTERS_HZ`), re-deriving the weights per
+  point with the same formula the live runtime applies per FFT bin. Pure stdlib.
+  `BeamFrequencyCurve.table()` renders an aligned text table with grating-lobe
+  warnings and per-point degradation notes.
+- **GUI**: the Live panel's *Design beam from zones* readout now appends the
+  DI/beamwidth-vs-frequency table for the first beam, under the azimuth
+  sparkline — the canvas readout shows where the beam narrows, where
+  superdirectivity pays off, and where grating lobes start.
+- Tests (+7): curve shape/grid, known-geometry physics on the 10 cm aperture
+  (DI rises ≥ 2 dB and beamwidth at 8 kHz < half its 250 Hz value for
+  delay-and-sum; superdirective beats delay-and-sum by > 2 dB DI at 250–630 Hz),
+  octave-grid consistency with `BandMetrics`, empty-design/bad-grid handling,
+  table content, and a GUI smoke test asserting the readout carries both the
+  per-band line and the curve table.
+
+### Notes
+- The live overlap-add path was **already broadband-correct** (it re-derives
+  weights per FFT bin from the design's directions); what was narrowband was the
+  *published verification*. This release closes that gap — the readout now
+  proves what the runtime actually does, honest about where physics degrades
+  (per-band WNG/DI make the low-band cost visible).
 
 **Repository hygiene** — no engine, schema, or GUI behaviour changes.
 

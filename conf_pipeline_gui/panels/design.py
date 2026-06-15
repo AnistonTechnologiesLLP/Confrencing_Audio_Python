@@ -144,6 +144,8 @@ class DesignPanel(PanelBase):
             dev = cp.create_wired_mic(did, label, transport)
         elif dtype == "loudspeaker":
             dev = cp.create_loudspeaker(did, label, transport)
+        elif dtype == "camera":
+            dev = cp.create_camera(did, label)
         else:
             dev = cp.create_codec(did, label, transport)
         cfg = cp.add_device(self.state.config, dev)
@@ -329,8 +331,20 @@ class DesignPanel(PanelBase):
             prof.setCurrentIndex(i)
         prof.currentIndexChanged.connect(lambda *_a: None if self._refreshing else self.state.set_config(cp.assign_device_profile(self.state.config, d.id, prof.currentData())))
         form.addRow("Profile", prof)
+        # aim (cameras + loudspeakers) — drives the coverage FOV/dispersion cone
+        if d.type in ("camera", "loudspeaker"):
+            bearing = self._spin(float(getattr(d, "bearing_deg", 0.0) or 0.0), lambda v: self._set_bearing(d, v))
+            bearing.setRange(0, 360)
+            form.addRow("Bearing (°)", bearing)
+            tilt = self._spin(float(getattr(d, "tilt_deg", 0.0) or 0.0), lambda v: self._set_tilt(d, v))
+            tilt.setRange(-90, 90)
+            form.addRow("Tilt (°)", tilt)
         caps = cp.device_capabilities(d)
         captxt = " · ".join([s for s, on in [("AEC", caps.aec), ("automix", caps.automix), ("mute", caps.mute)] if on]) or "—"
+        if caps.camera is not None:
+            captxt = f"FOV {caps.camera.fov_h_deg:.0f}°×{caps.camera.fov_v_deg:.0f}° · {caps.camera.max_range_m:.0f} m"
+        elif caps.speaker is not None:
+            captxt = f"dispersion {caps.speaker.dispersion_h_deg:.0f}°×{caps.speaker.dispersion_v_deg:.0f}°"
         form.addRow("Caps", QLabel(captxt))
         self.sel_layout.addLayout(form)
         if cp.is_mic_device(d) or d.type == "processor":
@@ -347,6 +361,14 @@ class DesignPanel(PanelBase):
         nx = x if x is not None else d.position.x
         ny = y if y is not None else d.position.y
         self.state.set_config(cp.set_device_position(self.state.config, did, Point2D(nx, ny)))
+
+    def _set_bearing(self, d, v):
+        fn = cp.set_camera_bearing if d.type == "camera" else cp.set_speaker_bearing
+        self.state.set_config(fn(self.state.config, d.id, float(v)))
+
+    def _set_tilt(self, d, v):
+        fn = cp.set_camera_tilt if d.type == "camera" else cp.set_speaker_tilt
+        self.state.set_config(fn(self.state.config, d.id, float(v)))
 
     def _talker_props(self, t):
         form = QFormLayout()

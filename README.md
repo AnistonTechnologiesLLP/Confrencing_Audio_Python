@@ -13,8 +13,9 @@ and steering angles are planning abstractions; the optional **placement simulato
 placement, with an opt-in physics-validation backend — still no real-time DSP.
 
 The engine is a faithful port of the TypeScript version and writes the **same
-JSON schema** (`version` 1, camelCase keys), so configs interoperate between the
-two.
+JSON schema** (camelCase keys; currently `version` 3 — older v1/v2 files load
+and migrate losslessly). The TS sibling tracks v2, so it needs a matching v3
+update to read configs exported with scenes.
 
 ## Layout
 
@@ -31,6 +32,10 @@ conf_pipeline/        the engine (pure dataclasses + functions, no Qt)
   api.py              public builder API, auto_configure, auto_route, talkers, angles, coverage, floor-plan
   coverage_check.py   array coverage circles + covered/uncovered/overlap report
   report.py           shareable design report (Markdown / HTML)
+  transport.py        DeviceTransport seam + SimulatedTransport, online status, push + reconcile
+  files.py            project file manager: recent files, autosave, crash recovery, migration notice
+  control_api.py      local HTTP control API (scene recall / mute / status; stdlib http.server)
+  scheduler.py        scene scheduler (weekly "HH:MM" recalls; injectable clock)
   sim/                placement simulation (scoring, search, pluggable validation)
 conf_pipeline_gui/    the PySide6 app — "Stagebar" workflow-modes shell
   state.py            AppState (undo/redo, selection, tool, mode, camera, live overlay)
@@ -57,7 +62,7 @@ conf_pipeline_control/ host-side array-microphone control (optional [control] ex
   octovox_bridge.py   zones → azimuths + HTTP client to the OCTOVOX clean server
   octovox_monitor.py  near-live cleaned monitor (rolling chunk → clean → playback)
   ab_test.py          A/B harness: record → beamform N ways → WAVs + dB report
-tests/                pytest suite (259 tests; incl. headless GUI smoke)
+tests/                pytest suite (357 tests; incl. headless GUI smoke)
 run_gui.py            launcher
 ```
 
@@ -291,8 +296,11 @@ import conf_pipeline_control as cc
 
 c = ...                                  # a config with an array + pickup/exclusion zones
 geom = cc.sensibel_8(radius_m=0.05)      # set radius to your array's actual value
-design = cc.design_zone_beams(c, "A", geom, freq_hz=1000)
+design = cc.design_zone_beams(c, "A", geom)
 print(design.summary())                  # pickup gain, white-noise gain, excluded-area leak per zone
+for m in design.beams[0].band_metrics:   # …and the same numbers per octave band
+    print(f"{m.freq_hz:6.0f} Hz: pickup {m.pickup_gain_db:+.1f} dB, "
+          f"DI {m.di_db:+.1f} dB, excluded leak {max(m.exclusion_atten_db):+.0f} dB")
 ```
 
 `design_zone_beams` steers a beam toward each **Records / dedicated** zone and
@@ -301,6 +309,22 @@ places spatial **nulls** toward each **No-pickup (exclusion)** zone (pure stdlib
 directivity directly (`cc.beam_pattern_azimuth`, `cc.response_db`,
 `cc.directivity_index_db`) to *prove* a pickup area is on-axis and an excluded
 area is attenuated.
+
+**Wideband by default** — speech spans ~250 Hz–8 kHz, so the design is re-derived
+and verified at each **octave-band center** (250…8000 Hz), not just at one
+frequency: each beam carries per-band pickup / DI / WNG / excluded-leak numbers
+(`ZoneBeam.band_metrics`), and `freq_hz` is just the *reference* band for the
+headline scalars. This matches what the live runtime actually does (it applies
+the design **per FFT bin**); pass `bands=()` to skip the per-band verification
+in a hot loop, or your own list of centers for a finer grid.
+
+**Measured, not asserted** — `cc.frequency_curves(design)` returns DI, −3 dB
+beamwidth, WNG, and lobe/grating counts **as a function of frequency**
+(third-octave grid by default) for each beam, with a `table()` text rendering;
+the Live panel's design readout shows it under the azimuth sparkline. On the
+8-capsule / 10 cm aperture this is the fidelity note as numbers: the beam
+narrows from ~130° at 250 Hz to ~20–30° at 8 kHz while grating lobes start
+appearing in the top octave.
 
 **Superdirective by default** — a small array is barely directional with plain
 delay-and-sum at speech frequencies, so it picks up diffuse background almost as
@@ -440,6 +464,39 @@ res = client.clean_8ch(y8, 44100, target_az=za.target_az, interferer_az=za.inter
   the result back. **Delayed by ~chunk + processing (~4–5 s), not real-time
   talkback** (OCTOVOX's neural stages are whole-file/offline), with audible seams
   at chunk boundaries. Use headphones. `cc.CleanMonitor` drives it.
+
+## Scenes & external control (1.15.0)
+
+**Scenes** (schema v3) are named, recallable snapshots of the control surface —
+mute-group states and per-area gain trims, plus config-inert live-layer hints
+(**active** areas and per-array **steer** bearings) that tell the beamformer
+what to do on recall. Capture/recall/remove from the Route panel or the API
+(`cp.capture_scene`, `cp.recall_scene`). Older v1/v2 files migrate losslessly.
+
+**External control API** — a pure-stdlib local HTTP server for room-control
+integrations (no extra deps):
+
+```python
+holder = cp.ConfigHolder(config)
+with cp.ControlApiServer(holder.get, holder.apply, port=8765) as srv:
+    ...  # GET /api/status · GET /api/scenes
+         # POST /api/scenes/<id>/recall · POST /api/mute-groups/<id> {"muted": true}
+```
+
+Recall responses include the scene's `steer` / `activeZones` hints so the
+caller can aim the live beamformer.
+
+**Scheduling** — schedules live in the config (additive on v3): recall a scene
+at a local time on chosen weekdays, every week. `cp.SceneScheduler` executes
+them through the same `get/apply` pair as the API (injectable clock,
+`run_pending()` manual tick, or a daemon polling thread):
+
+```python
+c = cp.add_scene_schedule(c, cp.create_scene_schedule("morning", "meeting", "08:30", ["mon", "tue", "wed", "thu", "fri"]))
+holder = cp.ConfigHolder(c)
+with cp.SceneScheduler(holder.get, holder.apply) as sched:
+    ...  # fires at 08:30 on weekdays; sched.next_fire() tells you when
+```
 
 ## Designer-inspired workflow (1.8.0)
 

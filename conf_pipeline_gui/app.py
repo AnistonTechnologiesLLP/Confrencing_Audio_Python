@@ -8,9 +8,10 @@ the mode, and a validation pill in the top bar is visible from everywhere.
 from __future__ import annotations
 
 import sys
+from pathlib import Path
 
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QAction, QFont, QGuiApplication, QKeySequence, QShortcut
+from PySide6.QtCore import Qt, QTimer
+from PySide6.QtGui import QAction, QFont, QGuiApplication, QIcon, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
     QFileDialog,
@@ -36,21 +37,46 @@ from .issues import IssuesDrawer
 from .modebar import ModeBar
 from .panels import DesignPanel, DeployPanel, LivePanel, RoutePanel, SimulatePanel
 from .scenarios import SCENARIOS
+from .simbar import SimBar
 from .state import AppState, now_iso
 from .theme import DARK_QSS, LIGHT_QSS, build_qss, palette  # noqa: F401 (re-exported)
 from .toolrail import MODE_TOOLS, ToolRail
 from .viewbar import ViewBar
 
 # Pressing a tool key outside its home mode hops there first (Fusion-style).
-TOOL_HOME_MODE = {"room": "design", "zone": "design", "talker": "design", "connect": "route"}
+TOOL_HOME_MODE = {"room": "design", "zone": "design", "talker": "design", "furniture": "design", "connect": "route"}
+
+_ASSETS = Path(__file__).resolve().parent / "assets"
+
+
+def app_icon() -> QIcon:
+    """The Aniston wren mark as the window/taskbar icon.
+
+    Prefers the multi-resolution .ico (crisp 16-256 px on Windows); falls back to
+    the high-res mark PNG. Both are loaded by Qt's built-in image readers, so no
+    extra image-format plugin (or Pillow) is needed at runtime.
+    """
+    for name in ("aniston.ico", "aniston_mark.png"):
+        p = _ASSETS / name
+        if p.exists():
+            return QIcon(str(p))
+    return QIcon()
+
+
+AUTOSAVE_INTERVAL_MS = 30_000
 
 
 class MainWindow(QMainWindow):
-    def __init__(self):
+    def __init__(self, files: cp.ProjectFileManager | None = None):
         super().__init__()
-        self.setWindowTitle("Conferencing Audio Pipeline — Configurator")
+        self.setWindowTitle("Aniston Room Designer")
+        self.setWindowIcon(app_icon())
         self.resize(1320, 840)
         self.state = AppState()
+        # project file manager: recent files, autosave, crash recovery
+        self.files = files if files is not None else cp.ProjectFileManager()
+        self._dirty = False
+        self._sim_overlays_seeded = False   # seed pickup+FOV once on entering Simulate/Live
 
         self.canvas = Canvas(self.state)
         self.canvas.coord_cb = lambda s: self.coord_label.setText(s)
@@ -75,9 +101,19 @@ class MainWindow(QMainWindow):
         self.viewbar.coverageToggled.connect(self._toggle_coverage)
         self.viewbar.heatmapToggled.connect(self._toggle_heatmap)
 
+        # floating simulation bar over the canvas's top-right corner
+        self.simbar = SimBar(self.canvas)
+        self.simbar.pickupToggled.connect(self._toggle_pickup)
+        self.simbar.fovToggled.connect(self._toggle_fov)
+        self.simbar.dispersionToggled.connect(self._toggle_dispersion)
+        self.simbar.occlusionToggled.connect(self._toggle_occlusion)
+        self.canvas.on_resize = self._position_simbar  # re-anchor top-right on canvas resize
+        self._position_simbar()
+
         self.toolrail = ToolRail(self.state.theme)
         self.toolrail.toolSelected.connect(self._set_tool)
         self.toolrail.zoneKindSelected.connect(self._zone_kind_selected)
+        self.toolrail.furnitureKindSelected.connect(self._furniture_kind_selected)
         self.toolrail.set_mode(self.state.mode)
 
         split = QSplitter()
@@ -108,7 +144,12 @@ class MainWindow(QMainWindow):
         self._build_statusbar()
         self._shortcuts()
         self.state.changed.connect(self._sync_chrome)
+        self.state.changed.connect(self._mark_dirty)
         self.state.modeChanged.connect(self._apply_mode)
+        self._autosave_timer = QTimer(self)
+        self._autosave_timer.setInterval(AUTOSAVE_INTERVAL_MS)
+        self._autosave_timer.timeout.connect(self._autosave_tick)
+        self._autosave_timer.start()
         self._sync_chrome()
 
     # ------------------------------------------------------------------ top bar
@@ -176,6 +217,8 @@ class MainWindow(QMainWindow):
         samples.addAction("Empty", lambda: self._load_scenario("empty"))
 
         m.addAction("Import config…", self._import)
+        self.recent_menu = m.addMenu("Open recent")
+        self.recent_menu.aboutToShow.connect(self._fill_recent_menu)
         m.addAction("Export config…", self._export)
         m.addAction("Export design report…", self._export_report)
         m.addSeparator()
@@ -237,7 +280,7 @@ class MainWindow(QMainWindow):
         QShortcut(QKeySequence.Redo, self, self.state.redo)
         QShortcut(QKeySequence("Delete"), self, self._delete_selection)
         QShortcut(QKeySequence("Backspace"), self, self._delete_selection)
-        for k, tool in [("V", "select"), ("C", "connect"), ("R", "room"), ("Z", "zone"), ("T", "talker")]:
+        for k, tool in [("V", "select"), ("C", "connect"), ("R", "room"), ("Z", "zone"), ("T", "talker"), ("F", "furniture")]:
             QShortcut(QKeySequence(k), self, lambda t=tool: self._shortcut_tool(t))
         QShortcut(QKeySequence("2"), self, lambda: self._set_view("2d"))
         QShortcut(QKeySequence("3"), self, lambda: self._set_view("3d"))
@@ -279,8 +322,14 @@ class MainWindow(QMainWindow):
         self.viewbar.set_view(self.state.view)
         self.viewbar.set_coverage(self.state.show_coverage)
         self.viewbar.set_heatmap(self.state.sim_show_heatmap)
+        self.simbar.set_pickup(self.state.sim_show_pickup)
+        self.simbar.set_fov(self.state.sim_show_fov)
+        self.simbar.set_dispersion(self.state.sim_show_dispersion)
+        self.simbar.set_occlusion(self.state.sim_show_occlusion)
+        self._refresh_sim_summary()
         self.toolrail.set_tool(self.state.tool)
         self.toolrail.set_zone_kind(self.state.zone_kind)
+        self.toolrail.set_furniture_kind(self.state.furniture_kind)
 
     # ------------------------------------------------------------------- modes
     def _apply_mode(self, mode: str):
@@ -293,6 +342,15 @@ class MainWindow(QMainWindow):
         # per-mode overlay defaults (user-overridable afterwards)
         if mode in ("simulate", "live") and not self.state.show_coverage:
             self.state.show_coverage = True
+        # entering SIMULATE/LIVE turns on the coverage view once, so the angles are
+        # visible without hunting for the SimBar; the user can toggle them off after
+        if mode in ("simulate", "live") and not self._sim_overlays_seeded:
+            self.state.sim_show_pickup = True
+            self.state.sim_show_fov = True
+            self._sim_overlays_seeded = True
+            self.simbar.set_pickup(True)
+            self.simbar.set_fov(True)
+            self._refresh_sim_summary()
         if mode != "live" and self.panels["live"]._live_busy():
             self.toast("Live session running — the LIVE dot stays red until you disconnect")
         self.canvas.update()
@@ -315,6 +373,7 @@ class MainWindow(QMainWindow):
         live = self.panels.get("live")
         if live is not None and live._live_busy():
             live._live_disconnect()
+        self.files.clear_autosave()       # clean exit — the autosave is the crash marker
         super().closeEvent(e)
 
     # ------------------------------------------------------------------ actions
@@ -390,6 +449,56 @@ class MainWindow(QMainWindow):
         # Bridge to the Simulate panel's checkbox so its compute logic runs.
         self.panels["simulate"].set_heatmap(bool(on))
 
+    # ---- coverage-simulation overlays (SimBar) ----
+    def _position_simbar(self):
+        self.simbar.adjustSize()
+        x = max(12, self.canvas.width() - self.simbar.width() - 12)
+        self.simbar.move(x, 12)
+
+    def _toggle_pickup(self, on):
+        self.state.sim_show_pickup = bool(on)
+        self._refresh_sim_summary()
+        self.canvas.update()
+
+    def _toggle_fov(self, on):
+        self.state.sim_show_fov = bool(on)
+        self._refresh_sim_summary()
+        self.canvas.update()
+
+    def _toggle_dispersion(self, on):
+        self.state.sim_show_dispersion = bool(on)
+        self._refresh_sim_summary()
+        self.canvas.update()
+
+    def _toggle_occlusion(self, on):
+        self.state.sim_show_occlusion = bool(on)
+        self._refresh_sim_summary()
+        self.canvas.update()
+
+    def _furniture_kind_selected(self, kind):
+        self.state.furniture_kind = kind
+        if self.state.mode == "design":
+            self._set_tool("furniture")
+
+    def _refresh_sim_summary(self):
+        st = self.state
+        any_on = st.sim_show_pickup or st.sim_show_fov or st.sim_show_dispersion or st.sim_show_occlusion
+        if not any_on:
+            self.simbar.set_summary("")
+            return
+        s = st.room_coverage().summary
+        n = s.get("target_count", 0)
+        if n == 0:
+            self.simbar.set_summary("No talkers/seats to cover")
+            return
+        gaps = len(s.get("mic_gaps", []))
+        parts = [f"Pickup {s.get('mic_coverage_pct', 0):.0f}%"]
+        if gaps:
+            parts.append(f"{gaps} gap{'s' if gaps != 1 else ''}")
+        if s.get("has_camera"):
+            parts.append(f"Framed {s.get('camera_framed_pct', 0):.0f}%")
+        self.simbar.set_summary(" · ".join(parts))
+
     def _import_floor_plan(self):
         path, _ = QFileDialog.getOpenFileName(self, "Floor plan image", "", "Images (*.png *.jpg *.jpeg *.bmp *.gif)")
         if not path:
@@ -430,6 +539,8 @@ class MainWindow(QMainWindow):
                 self.state.set_config(cp.remove_talker(cfg, sel["id"]))
             elif sel["kind"] == "zone":
                 self.state.set_config(cp.remove_coverage_zone(cfg, sel["array_id"], sel["zone_id"]))
+            elif sel["kind"] == "furniture":
+                self.state.set_config(cp.remove_furniture(cfg, sel["id"]))
             self.state.selection = None
         except Exception as exc:
             self.toast(str(exc))
@@ -448,8 +559,7 @@ class MainWindow(QMainWindow):
     def _export(self):
         path, _ = QFileDialog.getSaveFileName(self, "Export config", "config.json", "JSON (*.json)")
         if path:
-            with open(path, "w", encoding="utf-8") as f:
-                f.write(cp.serialize(self.state.config, pretty=True))
+            self.files.save_config(self.state.config, path)
             self.toast("Exported")
 
     def _export_report(self):
@@ -464,14 +574,86 @@ class MainWindow(QMainWindow):
 
     def _import(self):
         path, _ = QFileDialog.getOpenFileName(self, "Import config", "", "JSON (*.json)")
-        if not path:
-            return
+        if path:
+            self._open_path(path)
+
+    def _open_path(self, path: str):
+        """Open a config file with the migration-notice contract."""
         try:
-            with open(path, "r", encoding="utf-8") as f:
-                self.state.set_config(cp.deserialize(f.read()))
-            self.toast("Imported")
+            res = self.files.open_config(path)
         except Exception as exc:
             QMessageBox.warning(self, "Import failed", str(exc))
+            return
+        self.state.set_config(res.config)
+        if res.migrated:
+            QMessageBox.information(self, "File upgraded", res.migration_notice())
+        else:
+            self.toast("Imported")
+
+    def _fill_recent_menu(self):
+        self.recent_menu.clear()
+        recent = self.files.recent_files()
+        if not recent:
+            a = self.recent_menu.addAction("(no recent files)")
+            a.setEnabled(False)
+            return
+        for p in recent:
+            self.recent_menu.addAction(p, lambda _c=False, path=p: self._open_path(path))
+        self.recent_menu.addSeparator()
+        self.recent_menu.addAction("Clear list", self.files.clear_recent)
+
+    # ---- autosave / crash recovery ----
+    def _mark_dirty(self):
+        self._dirty = True
+
+    def _workspace_payload(self) -> str:
+        """The whole multi-room workspace as a project JSON (all rooms survive)."""
+        self.state._snapshot()            # fold the live room back into the rooms list
+        rooms = [cp.ProjectRoom(id=r["id"], config=r["config"]) for r in self.state.rooms]
+        project = cp.Project(
+            version=cp.PROJECT_VERSION,
+            metadata={"name": self.state.config.metadata.get("name", "Untitled"), "createdAt": now_iso()},
+            rooms=rooms,
+            active_room_id=self.state.rooms[self.state.active_room]["id"],
+        )
+        return cp.serialize_project(project, pretty=True)
+
+    def _autosave_tick(self):
+        if not self._dirty:
+            return
+        self.files.autosave(self._workspace_payload(),
+                            origin=self.state.config.metadata.get("name", "Untitled"))
+        self._dirty = False
+
+    def _offer_recovery(self):
+        """Startup crash recovery: offer a leftover autosave back to the user.
+        Called from main() — never from __init__, so embedding/tests stay modal-free."""
+        info = self.files.pending_recovery()
+        if info is None:
+            return
+        when = f" (saved {info.saved_at})" if info.saved_at else ""
+        what = f' "{info.origin}"' if info.origin else ""
+        ans = QMessageBox.question(
+            self, "Recover unsaved work?",
+            f"The last session did not exit cleanly. Recover the autosaved workspace{what}{when}?",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes,
+        )
+        if ans == QMessageBox.Yes:
+            try:
+                self._restore_workspace(self.files.read_recovery())
+                self.toast("Workspace recovered")
+            except Exception as exc:
+                QMessageBox.warning(self, "Recovery failed", str(exc))
+        self.files.clear_autosave()       # offered once, either way
+
+    def _restore_workspace(self, payload: str):
+        project = cp.deserialize_project(payload)
+        rooms = [
+            {"id": r.id, "config": r.config, "history": [r.config], "idx": 0, "last_deployed": None}
+            for r in project.rooms
+        ]
+        active = next((i for i, r in enumerate(project.rooms) if r.id == project.active_room_id), 0)
+        self.state.load_rooms(rooms, active)
 
     def _auto_name(self):
         self.state.set_config(cp.apply_naming_scheme(self.state.config))
@@ -513,15 +695,31 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(msg, 3000)
 
 
+def _set_windows_app_id(app_id: str = "Aniston.RoomDesigner") -> None:
+    """Tell Windows this is its own app so the taskbar shows our icon, not
+    python.exe's. No-op off Windows or if the shell call is unavailable."""
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(app_id)
+    except Exception:
+        pass
+
+
 def main():
+    _set_windows_app_id()
     app = QApplication.instance() or QApplication(sys.argv)
     f = QFont("Segoe UI")
     f.setPointSize(9)
     app.setFont(f)
     app.setStyleSheet(DARK_QSS)
-    QGuiApplication.setApplicationDisplayName("Conferencing Audio Pipeline")
+    QGuiApplication.setApplicationDisplayName("Aniston Room Designer")
+    app.setWindowIcon(app_icon())
     win = MainWindow()
     win.show()
+    win._offer_recovery()                 # crash recovery, after the window is up
     sys.exit(app.exec())
 
 

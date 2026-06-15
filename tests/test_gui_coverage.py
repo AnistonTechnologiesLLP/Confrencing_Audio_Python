@@ -1,0 +1,114 @@
+"""Headless GUI tests for the v4 coverage-simulation UI: the SimBar overlays,
+furniture authoring (one undo per edit), camera aim, and multi-room furniture ids.
+Skipped when PySide6 is absent.
+"""
+import os
+
+import pytest
+
+pytest.importorskip("PySide6")
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+import conf_pipeline as cp  # noqa: E402
+from conf_pipeline.model import Point2D  # noqa: E402
+
+
+@pytest.fixture(scope="module")
+def qapp():
+    from PySide6.QtWidgets import QApplication
+    app = QApplication.instance() or QApplication([])
+    yield app
+
+
+@pytest.fixture
+def win(qapp):
+    from conf_pipeline_gui.app import MainWindow, build_qss
+    qapp.setStyleSheet(build_qss("dark"))
+    w = MainWindow()
+    w.show()
+    w.state.set_config(cp.set_room(w.state.config, cp.rectangular_room(6, 5, 3)))
+    yield w
+    w.close()
+
+
+def test_simbar_toggles_flip_state_and_paint(win):
+    st = win.state
+    win._toggle_pickup(True)
+    win._toggle_fov(True)
+    win._toggle_dispersion(True)
+    win._toggle_occlusion(True)
+    assert st.sim_show_pickup and st.sim_show_fov and st.sim_show_dispersion and st.sim_show_occlusion
+    # bar reflects state after a chrome sync
+    win._sync_chrome()
+    assert win.simbar.buttons["pickup"].isChecked()
+    # both views paint with every overlay on
+    st.view = "2d"
+    assert win.canvas.grab().width() > 0
+    st.view = "3d"
+    assert win.canvas.grab().width() > 0
+
+
+def test_entering_simulate_seeds_pickup_and_fov(win):
+    assert not win.state.sim_show_pickup
+    win.state.set_mode("simulate")
+    assert win.state.sim_show_pickup and win.state.sim_show_fov
+    assert win.simbar.buttons["pickup"].isChecked()
+
+
+def test_furniture_place_and_edit_one_undo_each(win):
+    st = win.state
+    st.furniture_kind = "table"
+    # place via the canvas furniture tool
+    st.tool = "furniture"
+    win.canvas._down2d(_screen(win, Point2D(3, 2.5)))
+    assert len(st.config.room.objects) == 1
+    fid = st.config.room.objects[0].id
+    base = st._idx
+    # a move drag commits exactly one undo step on release
+    win.canvas.drag = {"kind": "furniture-move", "id": fid, "grab": (0.0, 0.0), "pos": Point2D(4, 3)}
+    win.canvas._up2d()
+    assert st._idx == base + 1
+    assert st.config.room.objects[0].position.x == 4
+    # rotate is one more step
+    win.canvas.drag = {"kind": "furniture-rotate", "id": fid, "rotation_deg": 45.0}
+    win.canvas._up2d()
+    assert st._idx == base + 2
+    assert st.config.room.objects[0].rotation_deg == 45.0
+    # undo unwinds one gesture at a time
+    st.undo()
+    assert st.config.room.objects[0].rotation_deg in (None, 0.0)
+
+
+def test_multi_room_furniture_ids_dont_collide(win):
+    st = win.state
+    st.set_config(cp.add_furniture(st.config, st.next_furniture_id(), "table", Point2D(2, 2)))
+    assert st.config.room.objects[0].id == "F1"
+    st.add_room()
+    st.set_config(cp.set_room(st.config, cp.rectangular_room(4, 4, 3)))
+    # second room mints its own F1 (deduped against the active room, not global)
+    assert st.next_furniture_id() == "F1"
+    st.set_config(cp.add_furniture(st.config, st.next_furniture_id(), "chair", Point2D(2, 2)))
+    assert st.config.room.objects[0].id == "F1"
+    # coverage cache is per-room: switching rooms recomputes against the active config
+    st.switch_room(0)
+    assert st.config.room.objects[0].kind == "table"
+
+
+def test_add_camera_and_aim_via_design_panel(win):
+    st = win.state
+    design = win.panels["design"]
+    design.dev_type.setCurrentIndex([design.dev_type.itemData(i) for i in range(design.dev_type.count())].index("camera"))
+    design._add_device()
+    cams = [d for d in st.config.devices if d.type == "camera"]
+    assert len(cams) == 1
+    cam = cams[0]
+    st2 = cp.set_camera_bearing(st.config, cam.id, 123.0)
+    st.set_config(st2)
+    assert cp.find_device(st.config, cam.id).bearing_deg == 123.0
+
+
+def _screen(win, world):
+    """World point → screen QPointF using the canvas's current 2D transform."""
+    win.state.view = "2d"
+    v = win.canvas.view2d()
+    return win.canvas.w2s(world, v)

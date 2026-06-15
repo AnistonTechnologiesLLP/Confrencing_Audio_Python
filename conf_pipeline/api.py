@@ -21,6 +21,7 @@ from .model import (
     Crosspoint,
     Device,
     MatrixMixer,
+    ConferencingCamera,
     MuteGroup,
     MuteTrigger,
     Point2D,
@@ -28,17 +29,27 @@ from .model import (
     Route,
     RoomBackground,
     RoomLayout,
+    RoomObject,
+    Scene,
+    SceneSchedule,
+    SceneSteer,
+    SceneZoneState,
+    SeatAnchor,
     SystemConfig,
     Talker,
+    WEEKDAYS,
     ZoneChannelRef,
     ZoneShape,
     default_elevation,
     find_device,
     is_mic_device,
+    is_pickup_zone,
     is_processor,
     point_in_shape,
     to_jsonable,
 )
+from .devices import create_camera
+from .furniture import furniture_type
 
 # --------------------------------------------------------------------------- #
 # Config lifecycle
@@ -436,6 +447,115 @@ def talker_elevation(talker: Talker) -> float:
     return talker.elevation if talker.elevation is not None else DEFAULT_TALKER_ELEVATION_M
 
 
+# --------------------------------------------------------------------------- #
+# Cameras & device aim (v4)
+# --------------------------------------------------------------------------- #
+def add_camera(config: SystemConfig, camera: ConferencingCamera) -> SystemConfig:
+    """Add a conferencing camera (coverage-only). Thin wrapper over add_device so
+    duplicate-id checks and cloning stay in one place."""
+    return add_device(config, camera)
+
+
+def _aimed(d: Device, device_id: str, **changes) -> Device:
+    if d.type not in ("camera", "loudspeaker"):
+        raise ValueError(f"Device {device_id} is not a camera or loudspeaker (no aim).")
+    return _with(d, **changes)
+
+
+def set_camera_bearing(config: SystemConfig, device_id: str, bearing_deg: float) -> SystemConfig:
+    return _map_device(config, device_id, lambda d: _aimed(d, device_id, bearing_deg=bearing_deg % 360.0))
+
+
+def set_camera_tilt(config: SystemConfig, device_id: str, tilt_deg: float) -> SystemConfig:
+    return _map_device(config, device_id, lambda d: _aimed(d, device_id, tilt_deg=tilt_deg))
+
+
+def set_speaker_bearing(config: SystemConfig, device_id: str, bearing_deg: float) -> SystemConfig:
+    return _map_device(config, device_id, lambda d: _aimed(d, device_id, bearing_deg=bearing_deg % 360.0))
+
+
+def set_speaker_tilt(config: SystemConfig, device_id: str, tilt_deg: float) -> SystemConfig:
+    return _map_device(config, device_id, lambda d: _aimed(d, device_id, tilt_deg=tilt_deg))
+
+
+# --------------------------------------------------------------------------- #
+# Furniture / room objects (v4)
+# --------------------------------------------------------------------------- #
+def _map_room_objects(config: SystemConfig, fn: Callable[[list[RoomObject]], list[RoomObject]]) -> SystemConfig:
+    if config.room is None:
+        raise ValueError("No room to place furniture in — set a room first.")
+    room = copy.copy(config.room)
+    room.objects = fn(list(config.room.objects))
+    return _clone(config, room=room)
+
+
+def _map_room_object(config: SystemConfig, object_id: str, fn: Callable[[RoomObject], RoomObject]) -> SystemConfig:
+    def apply(objs: list[RoomObject]) -> list[RoomObject]:
+        found = False
+        out = []
+        for o in objs:
+            if o.id == object_id:
+                found = True
+                out.append(fn(o))
+            else:
+                out.append(o)
+        if not found:
+            raise ValueError(f"Unknown room object: {object_id}")
+        return out
+    return _map_room_objects(config, apply)
+
+
+def add_furniture(
+    config: SystemConfig, object_id: str, kind: str, position: Point2D, *,
+    rotation_deg: Optional[float] = None, width: Optional[float] = None,
+    depth: Optional[float] = None, height: Optional[float] = None,
+    seats: Optional[list[SeatAnchor]] = None,
+) -> SystemConfig:
+    """Place a piece of furniture, defaulting its size from the catalog for ``kind``.
+    Occlusion/absorption stay catalog-resolved (left unset) so catalog tuning
+    improves existing designs; geometry the user can edit is persisted explicitly."""
+    ft = furniture_type(kind)
+    obj = RoomObject(
+        id=object_id, kind=kind, position=position,
+        width=width if width is not None else (ft.width if ft else None),
+        depth=depth if depth is not None else (ft.depth if ft else None),
+        height=height if height is not None else (ft.height if ft else None),
+        rotation_deg=rotation_deg,
+        seat_capacity=(ft.seat_capacity if ft and ft.seat_capacity else None),
+        seats=list(seats) if seats else None,
+    )
+
+    def add(objs: list[RoomObject]) -> list[RoomObject]:
+        if any(o.id == object_id for o in objs):
+            raise ValueError(f"Duplicate room-object id: {object_id}")
+        return [*objs, obj]
+    return _map_room_objects(config, add)
+
+
+def remove_furniture(config: SystemConfig, object_id: str) -> SystemConfig:
+    return _map_room_objects(config, lambda objs: [o for o in objs if o.id != object_id])
+
+
+def set_furniture_position(config: SystemConfig, object_id: str, position: Point2D) -> SystemConfig:
+    return _map_room_object(config, object_id, lambda o: _with(o, position=position))
+
+
+def set_furniture_rotation(config: SystemConfig, object_id: str, rotation_deg: float) -> SystemConfig:
+    return _map_room_object(config, object_id, lambda o: _with(o, rotation_deg=rotation_deg % 360.0))
+
+
+def set_furniture_dimensions(
+    config: SystemConfig, object_id: str, *,
+    width: Optional[float] = None, depth: Optional[float] = None, height: Optional[float] = None,
+) -> SystemConfig:
+    changes = {k: v for k, v in (("width", width), ("depth", depth), ("height", height)) if v is not None}
+    return _map_room_object(config, object_id, lambda o: _with(o, **changes))
+
+
+def set_seat_anchors(config: SystemConfig, object_id: str, seats: Optional[list[SeatAnchor]]) -> SystemConfig:
+    return _map_room_object(config, object_id, lambda o: _with(o, seats=list(seats) if seats else None))
+
+
 def array_to_talker_angles(config: SystemConfig, array_id: str, talker_id: str) -> Optional[SteeringAngles]:
     array = find_device(config, array_id)
     talker = next((t for t in config.talkers if t.id == talker_id), None)
@@ -661,7 +781,7 @@ def auto_route(config: SystemConfig) -> AutoRouteResult:
 # Logic / control — mute groups (v1.12.0)
 # --------------------------------------------------------------------------- #
 def _ensure_control(config: SystemConfig) -> ControlConfig:
-    return config.control if config.control is not None else ControlConfig(mute_groups=[])
+    return config.control if config.control is not None else ControlConfig()
 
 
 def create_mute_group(
@@ -684,7 +804,7 @@ def add_mute_group(config: SystemConfig, group: MuteGroup) -> SystemConfig:
     ctrl = _ensure_control(config)
     if any(g.id == group.id for g in ctrl.mute_groups):
         raise ValueError(f"Duplicate mute-group id: {group.id}")
-    return _clone(config, control=ControlConfig(mute_groups=[*ctrl.mute_groups, group]))
+    return _clone(config, control=_with(ctrl, mute_groups=[*ctrl.mute_groups, group]))
 
 
 def remove_mute_group(config: SystemConfig, group_id: str) -> SystemConfig:
@@ -693,14 +813,138 @@ def remove_mute_group(config: SystemConfig, group_id: str) -> SystemConfig:
     groups = [g for g in config.control.mute_groups if g.id != group_id]
     if len(groups) == len(config.control.mute_groups):
         return config
-    return _clone(config, control=ControlConfig(mute_groups=groups))
+    return _clone(config, control=_with(config.control, mute_groups=groups))
 
 
 def set_mute_group_muted(config: SystemConfig, group_id: str, muted: bool) -> SystemConfig:
     if config.control is None:
         raise ValueError("No control config.")
     groups = [_with(g, muted=muted) if g.id == group_id else g for g in config.control.mute_groups]
-    return _clone(config, control=ControlConfig(mute_groups=groups))
+    return _clone(config, control=_with(config.control, mute_groups=groups))
+
+
+# --------------------------------------------------------------------------- #
+# Scenes (v3) — named, recallable snapshots of the control surface
+# --------------------------------------------------------------------------- #
+def create_scene(
+    id: str,
+    label: str,
+    mute_states: Optional[dict[str, bool]] = None,
+    zone_states: Optional[list[SceneZoneState]] = None,
+    steer: Optional[list[SceneSteer]] = None,
+) -> Scene:
+    return Scene(
+        id=id, label=label,
+        mute_states=dict(mute_states or {}),
+        zone_states=list(zone_states or []),
+        steer=list(steer or []),
+    )
+
+
+def add_scene(config: SystemConfig, scene: Scene) -> SystemConfig:
+    ctrl = _ensure_control(config)
+    if any(s.id == scene.id for s in ctrl.scenes):
+        raise ValueError(f"Duplicate scene id: {scene.id}")
+    return _clone(config, control=_with(ctrl, scenes=[*ctrl.scenes, scene]))
+
+
+def remove_scene(config: SystemConfig, scene_id: str) -> SystemConfig:
+    if config.control is None:
+        return config
+    scenes = [s for s in config.control.scenes if s.id != scene_id]
+    if len(scenes) == len(config.control.scenes):
+        return config
+    return _clone(config, control=_with(config.control, scenes=scenes))
+
+
+def get_scene(config: SystemConfig, scene_id: str) -> Optional[Scene]:
+    if config.control is None:
+        return None
+    return next((s for s in config.control.scenes if s.id == scene_id), None)
+
+
+def capture_scene(config: SystemConfig, id: str, label: str) -> Scene:
+    """Snapshot the current control surface: every mute group's muted state and
+    every pickup area's gain trim. ``active`` flags and steer hints are
+    live-layer state, not config, so a captured scene leaves them unset. A zone
+    whose trim is unset is captured as ``None`` ("leave as-is" on recall)."""
+    ctrl = config.control
+    mute_states = {g.id: g.muted for g in (ctrl.mute_groups if ctrl is not None else [])}
+    zone_states = []
+    for d in config.devices:
+        if d.type != "microphoneArray":
+            continue
+        for z in d.zones:
+            if is_pickup_zone(z):
+                zone_states.append(SceneZoneState(array_id=d.id, zone_id=z.id, gain_db=z.gain_db))
+    return Scene(id=id, label=label, mute_states=mute_states, zone_states=zone_states)
+
+
+def create_scene_schedule(
+    id: str,
+    scene_id: str,
+    time: str,
+    days: Optional[list[str]] = None,
+    enabled: bool = True,
+) -> SceneSchedule:
+    """A weekly schedule entry: recall ``scene_id`` at local ``time`` ("HH:MM")
+    on the given weekday keys (``mon``…``sun``; default: every day)."""
+    return SceneSchedule(
+        id=id, scene_id=scene_id, time=time,
+        days=list(days) if days is not None else list(WEEKDAYS),
+        enabled=enabled,
+    )
+
+
+def add_scene_schedule(config: SystemConfig, schedule: SceneSchedule) -> SystemConfig:
+    ctrl = _ensure_control(config)
+    if any(s.id == schedule.id for s in ctrl.schedules):
+        raise ValueError(f"Duplicate schedule id: {schedule.id}")
+    return _clone(config, control=_with(ctrl, schedules=[*ctrl.schedules, schedule]))
+
+
+def remove_scene_schedule(config: SystemConfig, schedule_id: str) -> SystemConfig:
+    if config.control is None:
+        return config
+    schedules = [s for s in config.control.schedules if s.id != schedule_id]
+    if len(schedules) == len(config.control.schedules):
+        return config
+    return _clone(config, control=_with(config.control, schedules=schedules))
+
+
+def set_scene_schedule_enabled(config: SystemConfig, schedule_id: str, enabled: bool) -> SystemConfig:
+    if config.control is None:
+        raise ValueError("No control config.")
+    schedules = [_with(s, enabled=enabled) if s.id == schedule_id else s for s in config.control.schedules]
+    return _clone(config, control=_with(config.control, schedules=schedules))
+
+
+def recall_scene(config: SystemConfig, scene_id: str) -> SystemConfig:
+    """Apply a scene: mute-group states and per-area gain trims. Pure —
+    returns a new config. Entries referencing things that no longer exist are
+    skipped (validation flags them as ``SCENE_INVALID``); ``None`` fields mean
+    "leave as-is". A scene's ``active`` flags and steer hints are config-inert —
+    the live layer reads them (``get_scene(...)``) to choose which areas to
+    beamform and where to aim."""
+    scene = get_scene(config, scene_id)
+    if scene is None:
+        raise ValueError(f"Unknown scene: {scene_id}")
+    new = config
+    ctrl = new.control
+    assert ctrl is not None  # the scene was found in it
+    groups = [
+        _with(g, muted=scene.mute_states[g.id]) if g.id in scene.mute_states else g
+        for g in ctrl.mute_groups
+    ]
+    new = _clone(new, control=_with(ctrl, mute_groups=groups))
+    for zs in scene.zone_states:
+        if zs.gain_db is None:
+            continue
+        arr = find_device(new, zs.array_id)
+        if arr is None or arr.type != "microphoneArray" or not any(z.id == zs.zone_id for z in arr.zones):
+            continue
+        new = set_zone_gain_db(new, zs.array_id, zs.zone_id, zs.gain_db)
+    return new
 
 
 # --------------------------------------------------------------------------- #
