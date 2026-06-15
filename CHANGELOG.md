@@ -10,6 +10,23 @@ the TS sibling is at matching v4 parity. The desktop app is presented as
 ## [Unreleased]
 
 ### Added
+- **Superdirective beamforming** (`mode="superdirective"`) — a third `PolarisBeamformer`
+  tier and the first frequency-domain one: a windowed overlap-add STFT (1024/512 Hann, ~0.1%
+  COLA ripple) with a per-FFT-bin **diffuse-noise MVDR** weight vector `w = R⁻¹a / (aᴴR⁻¹a)`,
+  `R = Γ(f) + loading·I`, `Γ_ij = sinc(k·d_ij)` (`_FreqDomainBeam`, mirroring
+  `beamformer.superdirective_weights` vectorised over bins). It rejects isotropic
+  room/background noise far better than delay-and-sum, which the studio-grade capsules make
+  genuinely usable at low diagonal loading. **Realtime-safe by construction:** `BeamStrategy`
+  gained a `plan_look`/`commit_look` split — the per-bin matrix solves (several ms over 513
+  bins) run in `plan_look` **off the audio lock**, and only the cheap atomic weight-array
+  publish (`commit_look`) is taken under `_beam_lock`, so the audio callback is pure
+  multiply-accumulate and never blocks behind a solve. An input/output FIFO adapts the caller's
+  block size to the internal 512-hop framing (round-trip latency ≈ frame+hop, ~35 ms).
+  `superdirective_loading` param (floored so `0` = max directivity stays solvable) + `--mode
+  superdirective --loading` on the demo. This lands the STFT/plan-commit plumbing that the next
+  tier — **data-adaptive MVDR** (measured covariance gated on `noise_only`) — reuses unchanged.
+  (`conf_pipeline_control/polaris_beamformer.py`; +7 hardware-free tests: exact MVDR unit-gain,
+  steering selectivity, block-size-agnostic FIFO, off-lock plan/commit, zero-loading construction.)
 - **Fractional-delay beamforming** (`mode="fracdelay"`) — a sub-sample steering tier
   for `PolarisBeamformer`, alongside the default integer `delaysum`. Each capsule's
   steer delay is split into an integer part (the existing history-ring read) plus the

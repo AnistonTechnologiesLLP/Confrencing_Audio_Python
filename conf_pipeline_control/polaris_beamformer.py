@@ -38,8 +38,10 @@ Array facts and honest caveats (encoded below, not hidden):
   degrees of pointing error from the ±0.5-sample rounding). ``mode="fracdelay"`` recovers
   the sub-sample remainder with a short Hann-windowed-sinc fractional-delay FIR per capsule
   (:class:`_FracDelaySumBeam`), tightening off-axis nulls for a flat ~(taps-1)/2-sample of
-  common latency. An MVDR / superdirective strategy is the next documented seam
-  (:class:`BeamStrategy`).
+  common latency. ``mode="superdirective"`` switches to a frequency-domain diffuse-noise MVDR
+  beam (:class:`_FreqDomainBeam`) that rejects isotropic background far better than
+  delay-and-sum. Data-adaptive MVDR (measured covariance) is the next documented seam, on the
+  same STFT plumbing (:class:`BeamStrategy`).
 * **Dead capsule.** The real POLARIS eval board's capsule 5 (index 4) is dead.
   By product decision this module **defaults to all 8 active**; pass
   ``dead_capsule=5`` or an explicit ``active_mask`` to exclude it on the real board.
@@ -85,10 +87,14 @@ ALIAS_CUTOFF_HZ = SOUND_SPEED_MPS / (2.0 * 2.0 * POLARIS_RADIUS_M * 0.3826834323
 DEFAULT_BEAM_BANDLIMIT_HZ = ALIAS_CUTOFF_HZ
 DEFAULT_BANDLIMIT_TAPS = 63       # Hann-windowed-sinc FIR length (forced odd → linear phase)
 DEFAULT_FRACDELAY_TAPS = 15       # fractional-delay FIR length (odd); common latency = (taps-1)/2 ≈ 0.16ms
+_STFT_FRAME = DEFAULT_NFFT        # frequency-domain beam STFT length (1024)
+_STFT_HOP = _STFT_FRAME // 2      # 50% overlap → COLA-exact Hann overlap-add
+DEFAULT_SUPERDIRECTIVE_LOADING = 0.05   # diagonal loading for the superdirective solve (robustness↔DI)
 
 MODE_DELAYSUM = "delaysum"        # integer-sample time-domain delay-and-sum (default)
 MODE_FRACDELAY = "fracdelay"      # sub-sample (fractional) delay-and-sum via windowed-sinc FIR
-_BEAM_MODES = (MODE_DELAYSUM, MODE_FRACDELAY)
+MODE_SUPERDIRECTIVE = "superdirective"  # frequency-domain diffuse-noise MVDR (fixed analytic Γ)
+_BEAM_MODES = (MODE_DELAYSUM, MODE_FRACDELAY, MODE_SUPERDIRECTIVE)
 
 
 class DeviceConfigError(ValueError):
@@ -247,19 +253,39 @@ def delay_and_sum_block(block: Any, geom: ArrayGeometry, azimuth_deg: float,
 class BeamStrategy:
     """Steerable mono beamformer interface (``set_look`` / ``process`` / ``reset``).
 
-    Two tiers ship behind this contract:
+    Three tiers ship behind this contract:
 
     * :class:`_DelaySumBeam` — time-domain, **integer-sample** delays (``mode="delaysum"``).
     * :class:`_FracDelaySumBeam` — time-domain, **sub-sample** delays via a windowed-sinc
       fractional-delay FIR (``mode="fracdelay"``), removing the integer-rounding pointing error.
+    * :class:`_FreqDomainBeam` — frequency-domain **superdirective** (diffuse-noise MVDR)
+      per-FFT-bin weights (``mode="superdirective"``), rejecting isotropic background far better
+      than delay-and-sum.
 
-    The next seam is an MVDR / superdirective strategy reusing
-    :func:`conf_pipeline_control.beamformer.delay_and_sum_weights` / ``superdirective_weights``
-    (frequency-domain, per FFT bin).
+    The next seam is **data-adaptive MVDR** — the same :class:`_FreqDomainBeam` STFT/atomic-swap
+    plumbing fed a *measured* covariance (gated on :attr:`PolarisBeamformer.noise_only`) instead of
+    the fixed analytic Γ.
+
+    **Re-steer is split into ``plan_look`` + ``commit_look``** so the owner can do the heavy work
+    OFF the audio-lock critical section: ``plan_look`` computes a steering plan from immutable state
+    only (no shared mutation — safe to call WITHOUT ``_beam_lock``), and ``commit_look`` installs it
+    cheaply (the part that must be serialised against :meth:`process`). For the time-domain tiers the
+    plan is trivial; for :class:`_FreqDomainBeam` it is the multi-millisecond per-bin solve, which
+    therefore never blocks the audio callback. ``set_look`` composes the two for synchronous callers
+    (construction, tests, ``fixed_azimuth_deg``) where there is no concurrent ``process``.
     """
 
-    def set_look(self, azimuth_deg: float, off_nadir_deg: float = DEFAULT_OFF_NADIR_DEG) -> None:
+    def plan_look(self, azimuth_deg: float, off_nadir_deg: float = DEFAULT_OFF_NADIR_DEG) -> Any:
+        """Compute a steering plan (pure; reads only immutable state). Safe to call un-locked."""
         raise NotImplementedError
+
+    def commit_look(self, plan: Any) -> None:
+        """Install a plan from :meth:`plan_look` (cheap; serialise against :meth:`process`)."""
+        raise NotImplementedError
+
+    def set_look(self, azimuth_deg: float, off_nadir_deg: float = DEFAULT_OFF_NADIR_DEG) -> None:
+        """Plan + commit in one call — for synchronous callers with no concurrent :meth:`process`."""
+        self.commit_look(self.plan_look(azimuth_deg, off_nadir_deg))
 
     def process(self, block: Any) -> Any:
         raise NotImplementedError
@@ -288,10 +314,11 @@ class _DelaySumBeam(BeamStrategy):
         self._hist: Any = None
         self.set_look(0.0)
 
-    def set_look(self, azimuth_deg: float, off_nadir_deg: float = DEFAULT_OFF_NADIR_DEG) -> None:
-        self._idx, self._delays, self._maxd = _steer_delays(
-            self._geom, azimuth_deg, off_nadir_deg, self._sr, self._c
-        )
+    def plan_look(self, azimuth_deg: float, off_nadir_deg: float = DEFAULT_OFF_NADIR_DEG) -> Any:
+        return _steer_delays(self._geom, azimuth_deg, off_nadir_deg, self._sr, self._c)
+
+    def commit_look(self, plan: Any) -> None:
+        self._idx, self._delays, self._maxd = plan
         self.reset()   # a sub-millisecond transient on re-steer is acceptable
 
     def reset(self) -> None:
@@ -363,16 +390,17 @@ class _FracDelaySumBeam(BeamStrategy):
         self._frac_tail: Any = None     # FIR continuity tail (L-1, M)
         self.set_look(0.0)
 
-    def set_look(self, azimuth_deg: float, off_nadir_deg: float = DEFAULT_OFF_NADIR_DEG) -> None:
+    def plan_look(self, azimuth_deg: float, off_nadir_deg: float = DEFAULT_OFF_NADIR_DEG) -> Any:
         import numpy as np
 
         idx, real = _steer_real_delays(self._geom, azimuth_deg, off_nadir_deg, self._sr, self._c)
         di = [int(np.floor(d)) for d in real]
         fr = [d - i for d, i in zip(real, di)]           # sub-sample remainder ∈ [0, 1)
-        self._idx = idx
-        self._delays_int = di
-        self._maxd = max(di) if di else 0
-        self._kernels = [_frac_delay_kernel(f, self._L) for f in fr]
+        kernels = [_frac_delay_kernel(f, self._L) for f in fr]
+        return idx, di, (max(di) if di else 0), kernels
+
+    def commit_look(self, plan: Any) -> None:
+        self._idx, self._delays_int, self._maxd, self._kernels = plan
         self.reset()
 
     def reset(self) -> None:
@@ -403,6 +431,117 @@ class _FracDelaySumBeam(BeamStrategy):
         self._frac_tail = new_tail
         if D:
             self._hist = ext[-D:, :].copy()
+        return out.astype(np.float32)
+
+
+class _FreqDomainBeam(BeamStrategy):
+    """Frequency-domain **superdirective** (diffuse-noise MVDR) beamformer.
+
+    A windowed overlap-add STFT (``_STFT_FRAME``=1024, ``_STFT_HOP``=512, symmetric Hann, 50%
+    overlap → near-COLA, ~0.1% amplitude ripple, well below the array's own spatial errors) with one
+    complex weight vector ``W(f)`` per rfft bin. The weights are the superdirective / diffuse-MVDR
+    solution ``w = R⁻¹a / (aᴴR⁻¹a)`` with ``R = Γ(f) + loading·I`` and ``Γ_ij = sinc(k·d_ij)`` — the
+    isotropic-noise coherence a small array minimises against, so it rejects room/background noise far
+    better than delay-and-sum (this mirrors
+    :func:`conf_pipeline_control.beamformer.superdirective_weights`, vectorised over bins). It is
+    a **fixed analytic** design (no measured covariance) — the data-adaptive MVDR tier reuses this
+    same STFT/atomic-swap plumbing with a measured ``R``.
+
+    **Realtime split:** the per-bin matrix solves (several milliseconds over 513 bins) run only in
+    :meth:`plan_look`, which the owner calls **off the audio lock**; :meth:`commit_look` then publishes
+    the result by a single atomic array assignment, snapshot once per :meth:`process`. So the audio
+    callback is pure multiply-accumulate (``Y = Σ conj(W)·X``) and is never blocked behind a solve.
+    An input/output FIFO adapts the caller's block size to the internal 512-hop framing; the round-trip
+    latency is ≈ ``_STFT_FRAME + _STFT_HOP`` samples (~35 ms). Weights are full-length (zero on inactive
+    capsules), so the MAC ignores a dead one.
+    """
+
+    def __init__(self, geom: ArrayGeometry, sample_rate: float, speed_of_sound: float,
+                 *, loading: float = DEFAULT_SUPERDIRECTIVE_LOADING,
+                 off_nadir_deg: float = DEFAULT_OFF_NADIR_DEG):
+        self._geom = geom
+        self._sr = float(sample_rate)
+        self._c = float(speed_of_sound)
+        # Floor the loading: at exactly 0.0 the DC bin's Γ is the rank-1 all-ones matrix and the
+        # solve is singular; 1e-9 is numerically ≈ "no loading" (max directivity) but stays solvable.
+        self._loading = max(1e-9, float(loading))
+        self._off = float(off_nadir_deg)
+        self._W: Any = None            # (nbins, M) complex — published atomically, read by process()
+        self._init_state()
+        self.set_look(0.0, off_nadir_deg)
+
+    def _init_state(self) -> None:
+        import numpy as np
+
+        M = self._geom.n_channels
+        self._win = np.hanning(_STFT_FRAME).astype(float)
+        self._inbuf = np.zeros((_STFT_FRAME, M), dtype=float)        # sliding STFT input frame
+        self._ola = np.zeros(_STFT_FRAME, dtype=float)               # overlap-add accumulator
+        self._inq = np.zeros((0, M), dtype=float)                    # pending input samples (FIFO)
+        self._outq = np.zeros(_STFT_FRAME, dtype=float)              # primed with FRAME zeros = framing latency
+        self._freqs = np.fft.rfftfreq(_STFT_FRAME, d=1.0 / self._sr)
+
+    def reset(self) -> None:
+        self._init_state()             # drop streaming history; weights (_W) stay valid
+
+    def plan_look(self, azimuth_deg: float, off_nadir_deg: float = DEFAULT_OFF_NADIR_DEG) -> Any:
+        return self._compute_weights(azimuth_deg, off_nadir_deg)     # heavy solve — call OFF the audio lock
+
+    def commit_look(self, plan: Any) -> None:
+        self._W = plan                                              # atomic publish (single assignment)
+
+    def _compute_weights(self, azimuth_deg: float, off_nadir_deg: float) -> Any:
+        """Per-bin superdirective weights, vectorised over rfft bins (the multi-ms work; off-lock)."""
+        import numpy as np
+
+        geom = self._geom
+        idx = list(geom.active_indices())
+        na = len(idx)
+        elems = np.array([geom.elements[i] for i in idx], dtype=float)        # (na, 3)
+        u = np.array(_unit_from_az_offnadir(azimuth_deg, off_nadir_deg), dtype=float)
+        proj = elems @ u                                                      # (na,) along-look projection
+        diff = elems[:, None, :] - elems[None, :, :]
+        d = np.sqrt(np.sum(diff * diff, axis=2))                             # (na, na) pairwise distances
+        k = 2.0 * np.pi * self._freqs / self._c                             # (nb,) wavenumbers
+        a = np.exp(1j * k[:, None] * proj[None, :])                          # (nb, na) manifold a(f) = exp(+jk·proj)
+        arg = k[:, None, None] * d[None, :, :]                              # (nb, na, na)
+        gamma = np.ones_like(arg)
+        nz = arg != 0.0
+        gamma[nz] = np.sin(arg[nz]) / arg[nz]                               # Γ_ij = sinc(k·d_ij) (unnormalised sinc)
+        R = gamma.astype(complex) + self._loading * np.eye(na)[None, :, :]  # diagonal-loaded; DC → solvable
+        rinv_a = np.linalg.solve(R, a[:, :, None])[:, :, 0]                 # (nb, na) = R⁻¹a
+        denom = np.sum(np.conj(a) * rinv_a, axis=1)                         # (nb,) = aᴴR⁻¹a
+        w_active = rinv_a / denom[:, None]                                  # (nb, na) MVDR weights
+        W = np.zeros((len(self._freqs), geom.n_channels), dtype=complex)
+        W[:, idx] = w_active                                               # scatter; inactive capsules stay 0
+        return W
+
+    def process(self, block: Any) -> Any:
+        import numpy as np
+
+        x = np.asarray(block, dtype=float)
+        n = x.shape[0]
+        W = self._W                                                        # atomic snapshot for this block
+        F, H = _STFT_FRAME, _STFT_HOP
+        self._inq = np.concatenate([self._inq, x], axis=0)
+        while self._inq.shape[0] >= H:
+            hop_in = self._inq[:H]
+            self._inq = self._inq[H:]
+            self._inbuf[:-H] = self._inbuf[H:]                            # slide frame left by one hop
+            self._inbuf[-H:] = hop_in
+            X = np.fft.rfft(self._inbuf * self._win[:, None], axis=0)     # (nb, M)
+            Y = np.sum(np.conj(W) * X, axis=1)                           # (nb,) pure MAC — no solve here
+            y = np.fft.irfft(Y, n=F)                                     # (F,)
+            self._ola[:-H] = self._ola[H:]
+            self._ola[-H:] = 0.0
+            self._ola += y                                              # overlap-add
+            self._outq = np.concatenate([self._outq, self._ola[:H].copy()])
+        if self._outq.shape[0] >= n:
+            out = self._outq[:n]
+            self._outq = self._outq[n:]
+        else:                                                            # startup underflow only (front-pad)
+            out = np.concatenate([np.zeros(n - self._outq.shape[0]), self._outq])
+            self._outq = self._outq[:0]
         return out.astype(np.float32)
 
 
@@ -477,6 +616,7 @@ class PolarisBeamformer(MicController):
         vad_floor_db: float = 3.0,
         min_separation_deg: float = 40.0,
         mode: str = MODE_DELAYSUM,
+        superdirective_loading: float = DEFAULT_SUPERDIRECTIVE_LOADING,   # mode="superdirective" only
         steer_to_doa: bool = True,
         fixed_azimuth_deg: Optional[float] = None,
         beam_bandlimit_hz: Optional[float] = DEFAULT_BEAM_BANDLIMIT_HZ,   # None/0 disables
@@ -498,9 +638,10 @@ class PolarisBeamformer(MicController):
         if mode not in _BEAM_MODES:
             raise ValueError(
                 f"mode {mode!r} not implemented; choose one of {_BEAM_MODES} "
-                "(MVDR is the next documented BeamStrategy seam)"
+                "(data-adaptive MVDR is the next documented BeamStrategy seam, on the same STFT plumbing)"
             )
         self.mode = mode
+        self.superdirective_loading = float(superdirective_loading)
 
         self.device = device
         self.sample_rate = float(sample_rate)
@@ -525,11 +666,7 @@ class PolarisBeamformer(MicController):
         self.device_timeout_s = device_timeout_s
 
         self._tracker = _TalkerTracker(hold_seconds=hold_seconds, switch_margin_deg=switch_margin_deg)
-        self._beam = (
-            _FracDelaySumBeam(geom, self.sample_rate, self.speed_of_sound)
-            if mode == MODE_FRACDELAY else
-            _DelaySumBeam(geom, self.sample_rate, self.speed_of_sound)
-        )
+        self._beam = self._make_beam(geom)
         self._steered_az: Optional[float] = None
         if fixed_azimuth_deg is not None:
             self._beam.set_look(fixed_azimuth_deg, self.off_nadir_deg)
@@ -570,6 +707,15 @@ class PolarisBeamformer(MicController):
         self._cov_alpha = 0.05
         self._lp_kernel: Any = None       # optional beam band-limit (moving-average FIR)
         self._lp_tail: Any = None
+
+    def _make_beam(self, geom: ArrayGeometry) -> BeamStrategy:
+        """Build the steering strategy for the configured ``mode``."""
+        if self.mode == MODE_SUPERDIRECTIVE:
+            return _FreqDomainBeam(geom, self.sample_rate, self.speed_of_sound,
+                                   loading=self.superdirective_loading, off_nadir_deg=self.off_nadir_deg)
+        if self.mode == MODE_FRACDELAY:
+            return _FracDelaySumBeam(geom, self.sample_rate, self.speed_of_sound)
+        return _DelaySumBeam(geom, self.sample_rate, self.speed_of_sound)
 
     # ---- public API ----
     def start(self) -> None:
@@ -654,8 +800,9 @@ class PolarisBeamformer(MicController):
             self.steer_to_doa = True
             return
         self.steer_to_doa = False
+        plan = self._beam.plan_look(float(azimuth_deg), self.off_nadir_deg)   # heavy work off the lock
         with self._beam_lock:
-            self._beam.set_look(float(azimuth_deg), self.off_nadir_deg)
+            self._beam.commit_look(plan)
             self._steered_az = float(azimuth_deg)
 
     # ---- DOA detection (pure-ish; covariance in, dominant azimuth out) ----
@@ -700,8 +847,9 @@ class PolarisBeamformer(MicController):
             self._detections = dets
         if self.steer_to_doa and reading.azimuth_deg is not None \
                 and reading.azimuth_deg != self._steered_az:
+            plan = self._beam.plan_look(reading.azimuth_deg, self.off_nadir_deg)   # heavy work off the lock
             with self._beam_lock:
-                self._beam.set_look(reading.azimuth_deg, self.off_nadir_deg)
+                self._beam.commit_look(plan)
                 self._steered_az = reading.azimuth_deg
 
     def _snapshot_covariance(self):
@@ -1054,7 +1202,9 @@ def _demo(argv: Optional[Sequence[str]] = None) -> int:
     )
     ap.add_argument("--device", type=int, default=None, help="input device index (omit to list devices)")
     ap.add_argument("--mode", choices=_BEAM_MODES, default=MODE_DELAYSUM,
-                    help="beam strategy: delaysum (integer) or fracdelay (sub-sample windowed-sinc)")
+                    help="beam strategy: delaysum (integer) | fracdelay (sub-sample) | superdirective (freq-domain MVDR)")
+    ap.add_argument("--loading", type=float, default=DEFAULT_SUPERDIRECTIVE_LOADING,
+                    help="superdirective diagonal loading (higher = more robust, lower DI)")
     ap.add_argument("--radius", type=float, default=POLARIS_RADIUS_M, help="capsule-circle radius m (POLARIS=0.040)")
     ap.add_argument("--rate", type=float, default=POLARIS_RATE_HZ, help="sample rate (POLARIS=44100)")
     ap.add_argument("--block-ms", type=float, default=DEFAULT_BLOCK_MS, help="audio block size, ms")
@@ -1093,14 +1243,19 @@ def _demo(argv: Optional[Sequence[str]] = None) -> int:
     bf = PolarisBeamformer(
         device=args.device, radius_m=args.radius, sample_rate=args.rate, block_ms=args.block_ms,
         dead_capsule=dead, hold_seconds=args.hold, switch_margin_deg=args.switch_margin,
-        mode=args.mode, monitor=args.monitor, output_device=args.output_device,
+        mode=args.mode, superdirective_loading=args.loading,
+        monitor=args.monitor, output_device=args.output_device,
         wait_for_device=args.wait, **bl_kw,
     )
     assert bf.geometry is not None
     print(f"Array: {bf.geometry.n_active}/{POLARIS_N_MICS} capsules, aperture "
           f"{bf.geometry.aperture_m() * 100:.1f} cm.  Aliasing cutoff ~{ALIAS_CUTOFF_HZ / 1000:.1f} kHz.")
-    print(f"Beam strategy: {bf.mode}"
-          + ("  (sub-sample windowed-sinc delays)" if bf.mode == MODE_FRACDELAY else "  (integer-sample delays)"))
+    _mode_desc = {
+        MODE_DELAYSUM: "integer-sample delay-and-sum",
+        MODE_FRACDELAY: "sub-sample windowed-sinc delay-and-sum",
+        MODE_SUPERDIRECTIVE: f"frequency-domain superdirective (diffuse-noise MVDR, loading={bf.superdirective_loading})",
+    }
+    print(f"Beam strategy: {bf.mode}  ({_mode_desc.get(bf.mode, '')})")
     if args.wait:
         print(f"Waiting for device {args.device} @ {args.rate:.0f} Hz (auto-reconnect on) ... Ctrl+C to stop.")
     else:

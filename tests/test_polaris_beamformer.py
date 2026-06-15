@@ -80,6 +80,12 @@ def _analytic_plane_wave(geom, az_deg, sr, n, freq):
     return x
 
 
+def _run_blocks(beam, sig, block):
+    """Feed `sig` (n, M) through `beam.process` in `block`-row chunks; return the concatenated mono."""
+    outs = [np.asarray(beam.process(sig[i:i + block])) for i in range(0, sig.shape[0], block)]
+    return np.concatenate(outs)
+
+
 # --------------------------------------------------------------------------- #
 # SRP-PHAT DOA reuse
 # --------------------------------------------------------------------------- #
@@ -257,6 +263,92 @@ def test_fracdelay_streaming_continuity_across_blocks():
         streamed = np.concatenate([s.process(sig[i:i + chunk]) for i in range(0, len(sig), chunk)])
         assert streamed.shape == whole.shape
         assert np.allclose(streamed, whole, atol=1e-6), f"per-block discontinuity at chunk={chunk}"
+
+
+# --------------------------------------------------------------------------- #
+# Frequency-domain superdirective strategy (mode="superdirective")
+# --------------------------------------------------------------------------- #
+def test_superdirective_unit_gain_at_look():
+    """The MVDR/superdirective constraint is unit gain toward the look direction: wᴴa(u0) = 1
+    at every bin (R real-symmetric ⇒ exact)."""
+    geom = cc.sensibel_8(radius_m=0.040)
+    beam = pb._FreqDomainBeam(geom, 44100.0, C)
+    beam.set_look(72.0)
+    W, freqs = beam._W, beam._freqs
+    elems = np.array(geom.elements, dtype=float)
+    u = _unit(72.0)
+    for bi in (0, 12, 60, 200):                                 # DC + in-band + above the cutoff
+        k = 2.0 * np.pi * freqs[bi] / C
+        a = np.exp(1j * k * (elems @ u))                        # (M,) manifold at the look
+        resp = complex(np.sum(np.conj(W[bi]) * a))
+        assert abs(abs(resp) - 1.0) < 1e-6
+
+
+def test_superdirective_set_look_recomputes_weights():
+    geom = cc.sensibel_8(radius_m=0.040)
+    beam = pb._FreqDomainBeam(geom, 44100.0, C)
+    beam.set_look(0.0)
+    w0 = beam._W.copy()
+    beam.set_look(90.0)
+    assert not np.allclose(w0, beam._W)                         # re-solved for the new look (atomic swap)
+
+
+def test_superdirective_selectivity():
+    geom = cc.sensibel_8(radius_m=0.040)
+    sig = _analytic_plane_wave(geom, 60.0, 44100.0, 8192, 2000.0)
+    on_beam = pb._FreqDomainBeam(geom, 44100.0, C); on_beam.set_look(60.0)
+    off_beam = pb._FreqDomainBeam(geom, 44100.0, C); off_beam.set_look(150.0)
+    on = _run_blocks(on_beam, sig, 1411)[2048:]                 # skip the OLA warm-up (~one frame + prime)
+    off = _run_blocks(off_beam, sig, 1411)[2048:]
+    assert float((on ** 2).sum()) > 1.5 * float((off ** 2).sum())
+
+
+def test_superdirective_block_size_adapter():
+    """The input/output FIFO frames at a fixed 512-hop internally, so the mono stream is identical
+    regardless of how the caller chunks the input."""
+    geom = cc.sensibel_8(radius_m=0.040)
+    sig = _analytic_plane_wave(geom, 35.0, 44100.0, 8192, 2500.0)
+    a = pb._FreqDomainBeam(geom, 44100.0, C); a.set_look(35.0)
+    b = pb._FreqDomainBeam(geom, 44100.0, C); b.set_look(35.0)
+    out_a = _run_blocks(a, sig, 512)
+    out_b = _run_blocks(b, sig, 1411)
+    L = min(len(out_a), len(out_b))
+    assert L > 4096
+    assert np.allclose(out_a[:L], out_b[:L], atol=1e-6)         # block-size-agnostic
+
+
+def test_mode_superdirective_builds_and_runs():
+    bf = PolarisBeamformer(device=None, mode="superdirective")
+    assert bf.mode == "superdirective"
+    assert isinstance(bf._beam, pb._FreqDomainBeam)
+    assert bf.superdirective_loading == pb.DEFAULT_SUPERDIRECTIVE_LOADING
+    bf._setup_runtime()
+    out = bf.process_block(_analytic_plane_wave(bf.geometry, 0.0, bf.sample_rate, bf.blocksize, 1500.0))
+    assert out.shape == (bf.blocksize,) and bool(np.all(np.isfinite(out)))
+    bf.reset_transient()                                        # drops the STFT FIFO/OLA state
+    assert bf._beam._inq.shape[0] == 0 and bf._beam._outq.shape[0] == pb._STFT_FRAME
+
+
+def test_superdirective_loading_zero_constructs():
+    """loading=0 ('max directivity', invited by --loading help) must not crash — the DC bin's Γ is
+    the rank-1 all-ones matrix and is singular without a diagonal floor."""
+    bf = PolarisBeamformer(device=None, mode="superdirective", superdirective_loading=0.0)
+    assert isinstance(bf._beam, pb._FreqDomainBeam)
+    assert bf._beam._loading >= 1e-9                            # floored, so the solve stays valid
+    assert bool(np.all(np.isfinite(bf._beam._W)))              # finite weights incl. the DC bin
+
+
+def test_superdirective_plan_look_off_lock_then_commit_publishes():
+    """plan_look does the heavy per-bin solve WITHOUT mutating shared state (so the owner can call
+    it outside _beam_lock); commit_look installs it by a single atomic publish."""
+    geom = cc.sensibel_8(radius_m=0.040)
+    beam = pb._FreqDomainBeam(geom, 44100.0, C)
+    beam.set_look(0.0)
+    w0 = beam._W
+    plan = beam.plan_look(90.0)                                 # computed off-lock — no mutation yet
+    assert beam._W is w0                                        # _W untouched until commit
+    beam.commit_look(plan)
+    assert beam._W is plan and not np.allclose(w0, beam._W)     # atomic publish of the new weights
 
 
 # --------------------------------------------------------------------------- #
