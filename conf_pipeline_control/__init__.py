@@ -103,6 +103,7 @@ from .doa import (  # noqa: F401
 )
 from .autosteer import AutoSteerController, SectorConfig  # noqa: F401
 from .polaris_beamformer import DeviceConfigError, DoaReading, PolarisBeamformer  # noqa: F401
+from .virtual_mic_grid import VirtualMicGrid  # noqa: F401  (optional module — safe to delete)
 
 
 def controls_available() -> bool:
@@ -128,6 +129,7 @@ __all__ = [
     "DEFAULT_F_LO_HZ", "DEFAULT_F_HI_HZ",
     "AutoSteerController", "SectorConfig",
     "PolarisBeamformer", "DoaReading", "DeviceConfigError",
+    "VirtualMicGrid",
     "MicController", "MicState", "SimulatedMicController",
     "DEFAULT_DESIGN_FREQ_HZ", "DEFAULT_TARGET_ELEVATION_M", "RESPONSE_FLOOR_DB",
     "SPEECH_BAND_LO_HZ", "SPEECH_BAND_HI_HZ", "SPEECH_OCTAVE_CENTERS_HZ",
