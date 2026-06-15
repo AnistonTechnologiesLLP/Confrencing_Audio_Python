@@ -40,8 +40,9 @@ Array facts and honest caveats (encoded below, not hidden):
   (:class:`_FracDelaySumBeam`), tightening off-axis nulls for a flat ~(taps-1)/2-sample of
   common latency. ``mode="superdirective"`` switches to a frequency-domain diffuse-noise MVDR
   beam (:class:`_FreqDomainBeam`) that rejects isotropic background far better than
-  delay-and-sum. Data-adaptive MVDR (measured covariance) is the next documented seam, on the
-  same STFT plumbing (:class:`BeamStrategy`).
+  delay-and-sum; ``mode="mvdr"`` makes that beam **data-adaptive** — it overlays a *measured*
+  noise covariance (accumulated on noise-only frames, gated by :attr:`noise_only`) on the band
+  bins to null the actual interferers, falling back to the analytic Γ out of band / cold start.
 * **Dead capsule.** The real POLARIS eval board's capsule 5 (index 4) is dead.
   By product decision this module **defaults to all 8 active**; pass
   ``dead_capsule=5`` or an explicit ``active_mask`` to exclude it on the real board.
@@ -94,7 +95,9 @@ DEFAULT_SUPERDIRECTIVE_LOADING = 0.05   # diagonal loading for the superdirectiv
 MODE_DELAYSUM = "delaysum"        # integer-sample time-domain delay-and-sum (default)
 MODE_FRACDELAY = "fracdelay"      # sub-sample (fractional) delay-and-sum via windowed-sinc FIR
 MODE_SUPERDIRECTIVE = "superdirective"  # frequency-domain diffuse-noise MVDR (fixed analytic Γ)
-_BEAM_MODES = (MODE_DELAYSUM, MODE_FRACDELAY, MODE_SUPERDIRECTIVE)
+MODE_MVDR = "mvdr"                # frequency-domain data-adaptive MVDR (measured noise covariance)
+_BEAM_MODES = (MODE_DELAYSUM, MODE_FRACDELAY, MODE_SUPERDIRECTIVE, MODE_MVDR)
+_NOISE_WARMUP_FRAMES = 16         # gated noise frames before the measured covariance feeds the MVDR solve
 
 
 class DeviceConfigError(ValueError):
@@ -258,13 +261,12 @@ class BeamStrategy:
     * :class:`_DelaySumBeam` — time-domain, **integer-sample** delays (``mode="delaysum"``).
     * :class:`_FracDelaySumBeam` — time-domain, **sub-sample** delays via a windowed-sinc
       fractional-delay FIR (``mode="fracdelay"``), removing the integer-rounding pointing error.
-    * :class:`_FreqDomainBeam` — frequency-domain **superdirective** (diffuse-noise MVDR)
-      per-FFT-bin weights (``mode="superdirective"``), rejecting isotropic background far better
-      than delay-and-sum.
+    * :class:`_FreqDomainBeam` — frequency-domain per-FFT-bin MVDR weights, in two flavours: fixed
+      **superdirective** against the analytic diffuse-field Γ (``mode="superdirective"``), and
+      **data-adaptive** against a *measured* noise covariance gated on
+      :attr:`PolarisBeamformer.noise_only` (``mode="mvdr"``) — the latter nulls the actual interferers.
 
-    The next seam is **data-adaptive MVDR** — the same :class:`_FreqDomainBeam` STFT/atomic-swap
-    plumbing fed a *measured* covariance (gated on :attr:`PolarisBeamformer.noise_only`) instead of
-    the fixed analytic Γ.
+    The next seam is **room-aware** steering (constrain the look to known seat coordinates).
 
     **Re-steer is split into ``plan_look`` + ``commit_look``** so the owner can do the heavy work
     OFF the audio-lock critical section: ``plan_look`` computes a steering plan from immutable state
@@ -443,9 +445,11 @@ class _FreqDomainBeam(BeamStrategy):
     solution ``w = R⁻¹a / (aᴴR⁻¹a)`` with ``R = Γ(f) + loading·I`` and ``Γ_ij = sinc(k·d_ij)`` — the
     isotropic-noise coherence a small array minimises against, so it rejects room/background noise far
     better than delay-and-sum (this mirrors
-    :func:`conf_pipeline_control.beamformer.superdirective_weights`, vectorised over bins). It is
-    a **fixed analytic** design (no measured covariance) — the data-adaptive MVDR tier reuses this
-    same STFT/atomic-swap plumbing with a measured ``R``.
+    :func:`conf_pipeline_control.beamformer.superdirective_weights`, vectorised over bins). With
+    ``noise_cov_provider=None`` it is a **fixed analytic** superdirective design
+    (``mode="superdirective"``); given a provider it becomes **data-adaptive MVDR** (``mode="mvdr"``),
+    overlaying a *measured* noise covariance on the DOA-band bins so it nulls the actual interferers
+    (and falling back to the analytic Γ out of band and during cold start).
 
     **Realtime split:** the per-bin matrix solves (several milliseconds over 513 bins) run only in
     :meth:`plan_look`, which the owner calls **off the audio lock**; :meth:`commit_look` then publishes
@@ -458,14 +462,23 @@ class _FreqDomainBeam(BeamStrategy):
 
     def __init__(self, geom: ArrayGeometry, sample_rate: float, speed_of_sound: float,
                  *, loading: float = DEFAULT_SUPERDIRECTIVE_LOADING,
-                 off_nadir_deg: float = DEFAULT_OFF_NADIR_DEG):
+                 off_nadir_deg: float = DEFAULT_OFF_NADIR_DEG,
+                 frame: int = _STFT_FRAME,
+                 noise_cov_provider: Optional[Callable[[], Any]] = None):
         self._geom = geom
         self._sr = float(sample_rate)
         self._c = float(speed_of_sound)
+        # The STFT frame MUST match the owner's DOA covariance nfft so a measured R's band indices map
+        # to the beam's rfft bins (the owner passes frame=self.nfft); HOP = FRAME/2 keeps Hann near-COLA.
+        self._F = int(frame)
+        self._H = self._F // 2
         # Floor the loading: at exactly 0.0 the DC bin's Γ is the rank-1 all-ones matrix and the
         # solve is singular; 1e-9 is numerically ≈ "no loading" (max directivity) but stays solvable.
         self._loading = max(1e-9, float(loading))
         self._off = float(off_nadir_deg)
+        # mode="mvdr": a callable returning ``(noise_cov (n_band, M, M), band_indices)`` or ``None``
+        # (cold start). ``None`` provider ⇒ fixed superdirective (mode="superdirective").
+        self._noise_cov_provider = noise_cov_provider
         self._W: Any = None            # (nbins, M) complex — published atomically, read by process()
         self._init_state()
         self.set_look(0.0, off_nadir_deg)
@@ -474,12 +487,12 @@ class _FreqDomainBeam(BeamStrategy):
         import numpy as np
 
         M = self._geom.n_channels
-        self._win = np.hanning(_STFT_FRAME).astype(float)
-        self._inbuf = np.zeros((_STFT_FRAME, M), dtype=float)        # sliding STFT input frame
-        self._ola = np.zeros(_STFT_FRAME, dtype=float)               # overlap-add accumulator
+        self._win = np.hanning(self._F).astype(float)
+        self._inbuf = np.zeros((self._F, M), dtype=float)            # sliding STFT input frame
+        self._ola = np.zeros(self._F, dtype=float)                   # overlap-add accumulator
         self._inq = np.zeros((0, M), dtype=float)                    # pending input samples (FIFO)
-        self._outq = np.zeros(_STFT_FRAME, dtype=float)              # primed with FRAME zeros = framing latency
-        self._freqs = np.fft.rfftfreq(_STFT_FRAME, d=1.0 / self._sr)
+        self._outq = np.zeros(self._F, dtype=float)                  # primed with FRAME zeros = framing latency
+        self._freqs = np.fft.rfftfreq(self._F, d=1.0 / self._sr)
 
     def reset(self) -> None:
         self._init_state()             # drop streaming history; weights (_W) stay valid
@@ -491,7 +504,13 @@ class _FreqDomainBeam(BeamStrategy):
         self._W = plan                                              # atomic publish (single assignment)
 
     def _compute_weights(self, azimuth_deg: float, off_nadir_deg: float) -> Any:
-        """Per-bin superdirective weights, vectorised over rfft bins (the multi-ms work; off-lock)."""
+        """Per-bin MVDR weights ``w = R⁻¹a / (aᴴR⁻¹a)``, vectorised over rfft bins (multi-ms; off-lock).
+
+        ``R`` is the analytic diffuse-field coherence ``Γ(f) + loading·I`` (superdirective) for every
+        bin. In ``mode="mvdr"`` the injected ``noise_cov_provider`` supplies a *measured* noise
+        covariance for the DOA band bins, which **overlays** the analytic ``R`` there — so the beam
+        nulls the actual interferers while bins outside the band (and the whole cold-start period,
+        provider → ``None``) gracefully fall back to fixed superdirective."""
         import numpy as np
 
         geom = self._geom
@@ -509,6 +528,15 @@ class _FreqDomainBeam(BeamStrategy):
         nz = arg != 0.0
         gamma[nz] = np.sin(arg[nz]) / arg[nz]                               # Γ_ij = sinc(k·d_ij) (unnormalised sinc)
         R = gamma.astype(complex) + self._loading * np.eye(na)[None, :, :]  # diagonal-loaded; DC → solvable
+
+        snap = self._noise_cov_provider() if self._noise_cov_provider is not None else None
+        if snap is not None:                                                # mvdr: overlay measured R on band bins
+            noise_cov, band_idx = snap
+            rn = np.asarray(noise_cov)[:, idx][:, :, idx]                   # (n_band, na, na) active submatrix
+            tr = np.maximum(np.einsum("bii->b", rn).real / na, 1e-20)       # per-bin mean diagonal power
+            rn = rn + (self._loading * tr)[:, None, None] * np.eye(na)[None, :, :]   # trace-relative loading
+            R[np.asarray(band_idx)] = rn                                    # measured R where we have it
+
         rinv_a = np.linalg.solve(R, a[:, :, None])[:, :, 0]                 # (nb, na) = R⁻¹a
         denom = np.sum(np.conj(a) * rinv_a, axis=1)                         # (nb,) = aᴴR⁻¹a
         w_active = rinv_a / denom[:, None]                                  # (nb, na) MVDR weights
@@ -522,7 +550,7 @@ class _FreqDomainBeam(BeamStrategy):
         x = np.asarray(block, dtype=float)
         n = x.shape[0]
         W = self._W                                                        # atomic snapshot for this block
-        F, H = _STFT_FRAME, _STFT_HOP
+        F, H = self._F, self._H
         self._inq = np.concatenate([self._inq, x], axis=0)
         while self._inq.shape[0] >= H:
             hop_in = self._inq[:H]
@@ -642,6 +670,12 @@ class PolarisBeamformer(MicController):
             )
         self.mode = mode
         self.superdirective_loading = float(superdirective_loading)
+        # mode="mvdr": gated noise covariance (allocated in _setup_runtime), set up here so the
+        # provider injected into the strategy at _make_beam() can read them safely at construction.
+        self._noise_cov: Any = None          # (n_band, M, M) EMA, gated on noise-only frames
+        self._noise_frames = 0               # gated frames accumulated (warmup gate)
+        self._noise_gate = True              # latest "noise-only" flag (DOA thread writes; audio reads)
+        self._noise_cov_alpha = 0.05
 
         self.device = device
         self.sample_rate = float(sample_rate)
@@ -710,12 +744,27 @@ class PolarisBeamformer(MicController):
 
     def _make_beam(self, geom: ArrayGeometry) -> BeamStrategy:
         """Build the steering strategy for the configured ``mode``."""
-        if self.mode == MODE_SUPERDIRECTIVE:
+        if self.mode in (MODE_SUPERDIRECTIVE, MODE_MVDR):
+            provider = self._noise_cov_snapshot if self.mode == MODE_MVDR else None
             return _FreqDomainBeam(geom, self.sample_rate, self.speed_of_sound,
-                                   loading=self.superdirective_loading, off_nadir_deg=self.off_nadir_deg)
+                                   loading=self.superdirective_loading, off_nadir_deg=self.off_nadir_deg,
+                                   frame=self.nfft,   # share the DOA covariance bin grid (mvdr overlay alignment)
+                                   noise_cov_provider=provider)
         if self.mode == MODE_FRACDELAY:
             return _FracDelaySumBeam(geom, self.sample_rate, self.speed_of_sound)
         return _DelaySumBeam(geom, self.sample_rate, self.speed_of_sound)
+
+    def _noise_cov_snapshot(self) -> Any:
+        """Provider for the MVDR strategy: a thread-safe ``(noise_cov, band_indices)`` snapshot, or
+        ``None`` until the gated noise covariance has warmed up (cold start → analytic fallback)."""
+        # Lock-free fast-out: these attrs exist before _cov_lock (set early in __init__ so the
+        # provider is safe at construction, before _setup_runtime). Take the lock only to copy.
+        if self._noise_cov is None or self._noise_frames < _NOISE_WARMUP_FRAMES:
+            return None
+        with self._cov_lock:
+            if self._noise_cov is None:                  # re-check: a concurrent reset may have cleared it
+                return None
+            return self._noise_cov.copy(), self._cov_band
 
     # ---- public API ----
     def start(self) -> None:
@@ -777,8 +826,9 @@ class PolarisBeamformer(MicController):
     @property
     def noise_only(self) -> bool:
         """"Nobody is talking" flag — the inverse of the latest DOA-cycle SRP VAD
-        (:attr:`DoaReading.active`), exposed for parity with the grid back-end so a downstream
-        adaptive beamformer (MVDR, item 2) can gate its noise-covariance update on clean frames.
+        (:attr:`DoaReading.active`). In ``mode="mvdr"`` this gates the noise-covariance EMA (via the
+        internal ``_noise_gate`` cache) so the measured ``R`` captures the noise/interference field,
+        not the talker; also exposed for parity with the grid back-end.
         Note: updated at the DOA rate (~10 Hz), not per audio block."""
         with self._state_lock:
             return not self._reading.active
@@ -845,12 +895,16 @@ class PolarisBeamformer(MicController):
         with self._state_lock:
             self._reading = reading
             self._detections = dets
-        if self.steer_to_doa and reading.azimuth_deg is not None \
-                and reading.azimuth_deg != self._steered_az:
-            plan = self._beam.plan_look(reading.azimuth_deg, self.off_nadir_deg)   # heavy work off the lock
+        self._noise_gate = not reading.active     # gate the MVDR noise covariance (audio thread reads this)
+        # Re-steer when the talker moves; in mvdr also re-solve every tick so the null tracks the
+        # evolving (gated) noise field even when the committed look angle is unchanged.
+        target_az = reading.azimuth_deg if (self.steer_to_doa and reading.azimuth_deg is not None) \
+            else self._steered_az
+        if target_az is not None and (target_az != self._steered_az or self.mode == MODE_MVDR):
+            plan = self._beam.plan_look(target_az, self.off_nadir_deg)   # heavy work off the lock
             with self._beam_lock:
                 self._beam.commit_look(plan)
-                self._steered_az = reading.azimuth_deg
+                self._steered_az = target_az
 
     def _snapshot_covariance(self):
         with self._cov_lock:
@@ -926,6 +980,9 @@ class PolarisBeamformer(MicController):
         self._cov_freqs = freqs_full[self._cov_band]
         with self._cov_lock:
             self._cov = np.zeros((len(self._cov_band), self.n_channels, self.n_channels), dtype=complex)
+            if self.mode == MODE_MVDR:                          # gated noise covariance for the MVDR solve
+                self._noise_cov = np.zeros_like(self._cov)
+        self._noise_frames = 0
         if self.beam_bandlimit_hz:
             # Anti-alias the beam output: a Hann-windowed-sinc low-pass at the band-limit
             # (default = the array's ~5.6 kHz spatial-aliasing cutoff). Dependency-free
@@ -979,6 +1036,7 @@ class PolarisBeamformer(MicController):
             self._doa_thread = None
         with self._cov_lock:
             self._cov = None
+            self._noise_cov = None
         self._stftbuf = None
         self._level = 0.0
         self._streaming = False
@@ -995,6 +1053,10 @@ class PolarisBeamformer(MicController):
         with self._cov_lock:
             if self._cov is not None:
                 self._cov[...] = 0.0
+            if self._noise_cov is not None:
+                self._noise_cov[...] = 0.0
+        self._noise_frames = 0
+        self._noise_gate = True
         if self._stftbuf is not None and self._np is not None:
             self._stftbuf = self._np.zeros((0, self.n_channels), dtype=float)
         with self._state_lock:
@@ -1122,6 +1184,7 @@ class PolarisBeamformer(MicController):
         self._last_block_monotonic = None
         with self._cov_lock:
             self._cov = None              # don't let stale covariance drive DOA after a drop
+            self._noise_cov = None
 
     def _raw_level(self) -> float:
         return self._level
@@ -1147,9 +1210,16 @@ class PolarisBeamformer(MicController):
             xb = X[self._cov_band, :]                                # (n_band, M)
             inst = xb[:, :, None] * np.conj(xb[:, None, :])          # (n_band, M, M)
             a = self._cov_alpha
-            with self._cov_lock:
-                self._cov *= (1.0 - a)
-                self._cov += a * inst
+            gate = self._noise_gate                                  # mvdr: update noise R on noise-only frames
+            with self._cov_lock:                                     # re-check under the lock: a concurrent
+                if self._cov is not None:                            # release_external/drop may have nulled either
+                    self._cov *= (1.0 - a)
+                    self._cov += a * inst
+                if gate and self._noise_cov is not None:
+                    an = self._noise_cov_alpha
+                    self._noise_cov *= (1.0 - an)
+                    self._noise_cov += an * inst
+                    self._noise_frames += 1
             self._stftbuf = self._stftbuf[self.hop:]
 
     def _emit(self, mono: Any) -> None:
@@ -1202,7 +1272,7 @@ def _demo(argv: Optional[Sequence[str]] = None) -> int:
     )
     ap.add_argument("--device", type=int, default=None, help="input device index (omit to list devices)")
     ap.add_argument("--mode", choices=_BEAM_MODES, default=MODE_DELAYSUM,
-                    help="beam strategy: delaysum (integer) | fracdelay (sub-sample) | superdirective (freq-domain MVDR)")
+                    help="beam strategy: delaysum | fracdelay | superdirective (fixed MVDR) | mvdr (adaptive MVDR)")
     ap.add_argument("--loading", type=float, default=DEFAULT_SUPERDIRECTIVE_LOADING,
                     help="superdirective diagonal loading (higher = more robust, lower DI)")
     ap.add_argument("--radius", type=float, default=POLARIS_RADIUS_M, help="capsule-circle radius m (POLARIS=0.040)")
@@ -1254,6 +1324,7 @@ def _demo(argv: Optional[Sequence[str]] = None) -> int:
         MODE_DELAYSUM: "integer-sample delay-and-sum",
         MODE_FRACDELAY: "sub-sample windowed-sinc delay-and-sum",
         MODE_SUPERDIRECTIVE: f"frequency-domain superdirective (diffuse-noise MVDR, loading={bf.superdirective_loading})",
+        MODE_MVDR: f"frequency-domain data-adaptive MVDR (measured noise cov, loading={bf.superdirective_loading})",
     }
     print(f"Beam strategy: {bf.mode}  ({_mode_desc.get(bf.mode, '')})")
     if args.wait:

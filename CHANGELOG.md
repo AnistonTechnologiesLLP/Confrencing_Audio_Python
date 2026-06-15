@@ -10,6 +10,20 @@ the TS sibling is at matching v4 parity. The desktop app is presented as
 ## [Unreleased]
 
 ### Added
+- **Data-adaptive MVDR beamforming** (`mode="mvdr"`) — the flagship beam tier, reusing the
+  superdirective STFT / `plan_look`-`commit_look` plumbing unchanged but feeding the per-bin solve a
+  **measured** noise covariance instead of the fixed analytic Γ. A gated EMA (`_noise_cov`,
+  `noise_only`-gated so it captures the noise/interference field, not the talker) is overlaid on the
+  DOA-band bins with trace-relative loading; bins outside the band — and the whole cold-start period,
+  before the warmup gate — fall back to the analytic superdirective design, so the beam degrades
+  gracefully. The result **nulls the actual dominant interferer** rather than just isotropic
+  background (verified: against a measured interferer the MVDR null is ≥2× deeper than the fixed
+  superdirective, while staying exactly distortionless — unit gain — at the look). The DOA worker
+  re-solves the weights every tick so the null tracks the evolving noise field even when the talker
+  is stationary; the heavy solve stays off the audio lock (`plan_look`), and the gated EMA reuses the
+  existing `_cov_lock` so the audio callback gains no new lock. `--mode mvdr` on the demo. Next:
+  room-aware steering. (`conf_pipeline_control/polaris_beamformer.py`; +4 hardware-free tests:
+  measured-interferer nulling, cold-start == superdirective, noise-gating, warmup/reset.)
 - **Superdirective beamforming** (`mode="superdirective"`) — a third `PolarisBeamformer`
   tier and the first frequency-domain one: a windowed overlap-add STFT (1024/512 Hann, ~0.1%
   COLA ripple) with a per-FFT-bin **diffuse-noise MVDR** weight vector `w = R⁻¹a / (aᴴR⁻¹a)`,

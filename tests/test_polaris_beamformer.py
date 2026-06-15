@@ -86,6 +86,20 @@ def _run_blocks(beam, sig, block):
     return np.concatenate(outs)
 
 
+def _interferer_noise_cov(geom, az_n, band_idx, freqs_full, power=1000.0, noise=1.0):
+    """Synthesize a per-band noise covariance R(f) = P·aₙaₙᴴ + σ²I from a strong plane-wave
+    interferer at `az_n` plus white noise — the shape the MVDR provider feeds in."""
+    elems = np.array(geom.elements, dtype=float)                 # (M, 3) all capsules
+    proj = elems @ _unit(az_n)                                   # (M,)
+    M = geom.n_channels
+    R = np.zeros((len(band_idx), M, M), dtype=complex)
+    for i, bi in enumerate(band_idx):
+        k = 2.0 * np.pi * freqs_full[bi] / C
+        a = np.exp(1j * k * proj)                               # (M,) interferer manifold
+        R[i] = power * np.outer(a, np.conj(a)) + noise * np.eye(M, dtype=complex)
+    return R
+
+
 # --------------------------------------------------------------------------- #
 # SRP-PHAT DOA reuse
 # --------------------------------------------------------------------------- #
@@ -352,6 +366,100 @@ def test_superdirective_plan_look_off_lock_then_commit_publishes():
 
 
 # --------------------------------------------------------------------------- #
+# Data-adaptive MVDR (mode="mvdr") — measured noise covariance overlaid on the band
+# --------------------------------------------------------------------------- #
+def test_mvdr_nulls_measured_interferer():
+    """The flagship: given a measured noise covariance dominated by an interferer at az_n, the MVDR
+    weights null az_n far more than the fixed superdirective design while keeping unit gain at az_s."""
+    geom = cc.sensibel_8(radius_m=0.040)
+    fs = 44100.0
+    freqs_full = np.fft.rfftfreq(1024, d=1.0 / fs)
+    band = doa.band_indices(freqs_full, doa.DEFAULT_F_LO_HZ, doa.DEFAULT_F_HI_HZ)
+    az_s, az_n = 40.0, 120.0
+    Rn = _interferer_noise_cov(geom, az_n, band, freqs_full)
+    mvdr = pb._FreqDomainBeam(geom, fs, C, noise_cov_provider=lambda: (Rn, band))
+    mvdr.set_look(az_s)
+    analytic = pb._FreqDomainBeam(geom, fs, C)                  # no provider -> fixed superdirective
+    analytic.set_look(az_s)
+    bi = int(band[len(band) // 2])                             # a mid-speech-band bin (~2 kHz)
+    k = 2.0 * np.pi * freqs_full[bi] / C
+    elems = np.array(geom.elements, dtype=float)
+    a_s = np.exp(1j * k * (elems @ _unit(az_s)))
+    a_n = np.exp(1j * k * (elems @ _unit(az_n)))
+    resp = lambda W, a: abs(complex(np.sum(np.conj(W[bi]) * a)))
+    assert abs(resp(mvdr._W, a_s) - 1.0) < 1e-6                # distortionless: unit gain at the look
+    assert resp(mvdr._W, a_n) < 0.5 * resp(analytic._W, a_n)   # MVDR rejects the measured interferer
+    assert resp(mvdr._W, a_n) < 0.3                            # to a low absolute level
+
+
+def test_mode_mvdr_builds_and_cold_start_is_analytic():
+    bf = PolarisBeamformer(device=None, mode="mvdr")
+    assert bf.mode == "mvdr"
+    assert isinstance(bf._beam, pb._FreqDomainBeam)
+    assert bf._beam._noise_cov_provider is not None
+    bf._setup_runtime()
+    assert bf._noise_cov is not None                           # gated accumulator allocated for mvdr
+    # cold start (no warmed noise frames): the provider returns None, so weights equal the fixed
+    # superdirective design exactly -- graceful fallback.
+    superd = pb._FreqDomainBeam(bf.geometry, bf.sample_rate, bf.speed_of_sound,
+                                loading=bf.superdirective_loading)
+    superd.set_look(30.0)
+    bf._beam.set_look(30.0)
+    assert np.allclose(bf._beam._W, superd._W)
+    out = bf.process_block(_analytic_plane_wave(bf.geometry, 0.0, bf.sample_rate, bf.blocksize, 1500.0))
+    assert out.shape == (bf.blocksize,) and bool(np.all(np.isfinite(out)))
+
+
+def test_mvdr_noise_gate_accumulates_only_on_noise_frames():
+    bf = PolarisBeamformer(device=None, mode="mvdr")
+    bf._setup_runtime()
+    rng = np.random.RandomState(0)
+    blk = rng.standard_normal((bf.blocksize, 8)).astype(float)
+    bf._noise_gate = False                                     # "speech" present -> freeze the noise estimate
+    for _ in range(6):
+        bf._accumulate_covariance(blk)
+    assert bf._noise_frames == 0
+    bf._noise_gate = True                                      # "noise-only" -> accumulate
+    for _ in range(6):
+        bf._accumulate_covariance(blk)
+    assert bf._noise_frames > 0
+
+
+def test_mvdr_provider_warmup_then_reset():
+    bf = PolarisBeamformer(device=None, mode="mvdr")
+    bf._setup_runtime()
+    assert bf._noise_cov_snapshot() is None                    # cold: below the warmup gate
+    rng = np.random.RandomState(1)
+    blk = rng.standard_normal((bf.blocksize, 8)).astype(float)
+    bf._noise_gate = True
+    while bf._noise_frames < pb._NOISE_WARMUP_FRAMES:
+        bf._accumulate_covariance(blk)
+    snap = bf._noise_cov_snapshot()
+    assert snap is not None
+    R, band = snap
+    assert R.shape == (len(band), 8, 8)
+    bf.reset_transient()                                       # clears the gated noise state
+    assert bf._noise_frames == 0 and bf._noise_cov_snapshot() is None
+
+
+def test_mvdr_nondefault_nfft_aligns_bins():
+    """The beam STFT frame is tied to the DOA nfft, so the measured-R overlay lands on the right
+    bins at any nfft (regression: a hardcoded 1024 frame mis-mapped the cov or IndexError'd)."""
+    bf = PolarisBeamformer(device=None, mode="mvdr", nfft=2048)
+    assert bf._beam._F == 2048 and len(bf._beam._freqs) == 2048 // 2 + 1
+    bf._setup_runtime()
+    rng = np.random.RandomState(2)
+    blk = rng.standard_normal((bf.blocksize, 8)).astype(float)
+    bf._noise_gate = True
+    while bf._noise_frames < pb._NOISE_WARMUP_FRAMES:
+        bf._accumulate_covariance(blk)
+    snap = bf._noise_cov_snapshot()
+    assert snap is not None and int(np.max(snap[1])) < len(bf._beam._freqs)   # band indices in range
+    plan = bf._beam.plan_look(30.0)                            # overlays measured R — no IndexError
+    assert plan.shape[0] == 2048 // 2 + 1 and bool(np.all(np.isfinite(plan)))
+
+
+# --------------------------------------------------------------------------- #
 # Constructor / geometry / mask resolution
 # --------------------------------------------------------------------------- #
 def test_constructor_geometry_and_defaults():
@@ -378,7 +486,7 @@ def test_invalid_masks_and_mode_raise():
     with pytest.raises(ValueError):
         PolarisBeamformer(device=None, active_mask=[False] * 8)       # all off
     with pytest.raises(ValueError):
-        PolarisBeamformer(device=None, mode="mvdr")                   # not in v1
+        PolarisBeamformer(device=None, mode="lcmv")                   # unknown mode (not in _BEAM_MODES)
 
 
 # --------------------------------------------------------------------------- #
