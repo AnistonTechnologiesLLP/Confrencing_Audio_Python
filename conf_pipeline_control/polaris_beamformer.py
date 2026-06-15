@@ -588,16 +588,14 @@ class PolarisBeamformer(MicController):
             self.error = "input stream stalled; reconnecting"
             self._close_stream()
 
-    def _open_stream(self) -> None:
-        """Validate the device and open the input (+ optional monitor) stream, setting
-        :attr:`streaming`. Raises on any device/rate problem; the supervisor catches
-        and retries, strict mode lets it propagate."""
-        self._validate_input_device()
+    def _setup_runtime(self) -> None:
+        """Allocate the numpy DSP state (Hann window, STFT buffer, band covariance,
+        optional band-limit kernel) — **no device, no validation, no monitor**. Shared
+        by :meth:`_open_stream` (standalone) and :meth:`prepare_external` (the shared-
+        stream feed used by BeamEngine)."""
         import numpy as np
-        import sounddevice as sd
 
         self._np = np
-        self._sd = sd
         self._win = np.hanning(self.nfft).astype(float)
         self._stftbuf = np.zeros((0, self.n_channels), dtype=float)
         freqs_full = np.fft.rfftfreq(self.nfft, d=1.0 / self.sample_rate)
@@ -605,7 +603,6 @@ class PolarisBeamformer(MicController):
         self._cov_freqs = freqs_full[self._cov_band]
         with self._cov_lock:
             self._cov = np.zeros((len(self._cov_band), self.n_channels, self.n_channels), dtype=complex)
-
         if self.beam_bandlimit_hz:
             # Gentle, dependency-free anti-alias: an L-tap moving average whose first
             # null sits near the band-limit (L ≈ fs / fc). Not a brickwall — for a
@@ -613,6 +610,77 @@ class PolarisBeamformer(MicController):
             taps = max(2, int(round(self.sample_rate / float(self.beam_bandlimit_hz))))
             self._lp_kernel = np.ones(taps, dtype=float) / taps
             self._lp_tail = np.zeros(taps - 1, dtype=float)
+
+    # ---- external-feed seam (BeamEngine drives the DSP from a shared stream) ----
+    def process_block(self, block: Any) -> Any:
+        """Run one block of the steered DSP and **return** the mono (does not emit).
+
+        Updates the beam level and accumulates the DOA covariance (so the async DOA
+        thread keeps tracking). Used both by :meth:`_cb_input` (standalone) and by an
+        external owner (BeamEngine) feeding a shared input stream — see
+        :meth:`prepare_external`. Realtime-safe (no device, no allocation churn)."""
+        np = self._np
+        with self._beam_lock:
+            mono = self._beam.process(block)
+        if self._lp_kernel is not None:
+            mono = self._band_limit(mono)
+        rms = float(np.sqrt(np.mean(mono * mono))) if mono.size else 0.0
+        self._level = min(1.0, rms)
+        self._accumulate_covariance(block)
+        return mono
+
+    def prepare_external(self) -> None:
+        """Ready the DSP + DOA thread to be fed an external shared stream — **no
+        device opened**. Pair with :meth:`process_block` per block and
+        :meth:`release_external` to tear down. Do NOT also call :meth:`start`."""
+        if not controls_available():
+            raise RuntimeError(_install_hint())
+        self._setup_runtime()
+        self._stop.clear()
+        if self._doa_thread is None:
+            self._doa_thread = threading.Thread(target=self._doa_loop, name="polaris-doa", daemon=True)
+            self._doa_thread.start()
+        self._streaming = True
+
+    def release_external(self) -> None:
+        """Stop the DOA thread and free DSP state after external feeding (no device)."""
+        self._stop.set()
+        th = self._doa_thread
+        if th is not None:
+            th.join(timeout=2.0)
+            self._doa_thread = None
+        with self._cov_lock:
+            self._cov = None
+        self._stftbuf = None
+        self._level = 0.0
+        self._streaming = False
+
+    def reset_transient(self) -> None:
+        """Wipe per-mode transient state so a re-activated beam doesn't replay stale
+        audio/DOA (called on the newly-activated back-end by BeamEngine on switch)."""
+        self._tracker = _TalkerTracker(
+            hold_seconds=self._tracker.hold_seconds,
+            switch_margin_deg=self._tracker.switch_margin_deg,
+        )
+        with self._cov_lock:
+            if self._cov is not None:
+                self._cov[...] = 0.0
+        if self._stftbuf is not None and self._np is not None:
+            self._stftbuf = self._np.zeros((0, self.n_channels), dtype=float)
+        with self._state_lock:
+            self._reading = DoaReading(None, 0.0, False, False)
+        self._steered_az = None
+        with self._beam_lock:
+            self._beam._hist = None        # _DelaySumBeam history ring; rebuilt on next process
+
+    def _open_stream(self) -> None:
+        """Validate the device and open the input (+ optional monitor) stream, setting
+        :attr:`streaming`. Raises on any device/rate problem; the supervisor catches
+        and retries, strict mode lets it propagate."""
+        self._validate_input_device()
+        import sounddevice as sd
+        self._sd = sd
+        self._setup_runtime()
 
         # Monitoring uses two independent streams joined by a queue (a single duplex
         # stream needs both devices on one host API; we can't assume that). Mirrors
@@ -728,19 +796,8 @@ class PolarisBeamformer(MicController):
 
     # ---- audio thread ----
     def _cb_input(self, indata, frames, time_info, status):  # pragma: no cover (needs hardware)
-        np = self._np
         self._last_block_monotonic = time.monotonic()       # watchdog: stream is alive
-        # (a) BEAM PATH — time-domain delay-and-sum, FFT-free, low latency
-        with self._beam_lock:
-            mono = self._beam.process(indata)
-        if self._lp_kernel is not None:
-            mono = self._band_limit(mono)
-        rms = float(np.sqrt(np.mean(mono * mono))) if mono.size else 0.0
-        self._level = min(1.0, rms)
-        self._emit(mono)
-
-        # (b) DOA PATH — accumulate a band covariance from a sliding Hann STFT
-        self._accumulate_covariance(indata)
+        self._emit(self.process_block(indata))              # DSP (beam + DOA cov) → emit
 
     def _band_limit(self, mono: Any) -> Any:
         np = self._np

@@ -357,18 +357,16 @@ class VirtualMicGrid(MicController):
         w = w / (w.sum() + 1e-12)                       # NOTE: blending decorrelated points can
         return (w[:, None] * monos[top]).sum(axis=0).astype(np.float32)  # comb-filter — see caveats
 
-    # ---- lifecycle / backend hooks ----
-    def _open(self) -> None:
-        if not controls_available():
-            raise RuntimeError(_install_hint())
-        self._validate_input_device()
+    # ---- external-feed seam (BeamEngine drives the DSP from a shared stream) ----
+    def _setup_runtime(self) -> None:
+        """Allocate the numpy DSP state (cached focus delays, history ring, window,
+        score band) — **no device, no validation, no monitor**. Shared by :meth:`_open`
+        (standalone) and :meth:`prepare_external` (the shared-stream feed)."""
         import numpy as np
-        import sounddevice as sd
 
         self._np = np
-        self._sd = sd
-        # Precompute + cache the focus delays once (the grid is fixed).
         assert self.geometry is not None
+        # Precompute + cache the focus delays once (the grid is fixed).
         self._delays, self._maxd = build_grid_delays(
             self.geometry, self._points_xyz, self.sample_rate, self.speed_of_sound)
         assert self._maxd == int(self._delays.max())     # guards the gather index bounds
@@ -378,6 +376,58 @@ class VirtualMicGrid(MicController):
         freqs_full = np.fft.rfftfreq(self.nfft, d=1.0 / self.sample_rate)
         self._score_band_idx = doa.band_indices(freqs_full, self.score_band[0], self.score_band[1])
         self._score_ema = None
+
+    def process_block(self, block: Any) -> Any:
+        """Run one block of the grid DSP and **return** the mono (does not emit).
+
+        Updates the selection (and `selected_xy`/`scores()`) and level. Used both by
+        :meth:`_cb_input` (standalone) and by an external owner (BeamEngine) feeding a
+        shared input stream — see :meth:`prepare_external`."""
+        np = self._np
+        x = np.asarray(block, dtype=float)                   # (B, M)
+        B = x.shape[0]
+        ext = np.concatenate([self._hist, x], axis=0) if self._maxd else x
+        monos = delay_and_sum_grid(ext, self._delays, self._active_cols, self._maxd, B)
+        if self._maxd:
+            self._hist = ext[-self._maxd:, :].copy()
+        score = score_grid(monos, self._win, self._score_band_idx, self.nfft)
+        _selected, order, ema = self._update_selection(score)
+        mono = self._mix_output(monos, order, ema)
+        rms = float(np.sqrt(np.mean(mono * mono))) if mono.size else 0.0
+        self._level = min(1.0, rms)
+        return mono
+
+    def prepare_external(self) -> None:
+        """Ready the DSP to be fed an external shared stream — **no device opened**.
+        Pair with :meth:`process_block` per block. Do NOT also call :meth:`start`."""
+        if not controls_available():
+            raise RuntimeError(_install_hint())
+        self._setup_runtime()
+        self._streaming = True
+
+    def release_external(self) -> None:
+        """Tear down after external feeding (no device, no thread)."""
+        self._level = 0.0
+        self._streaming = False
+
+    def reset_transient(self) -> None:
+        """Wipe per-mode transient state so a re-activated grid doesn't carry a stale
+        selection/EMA (called on the newly-activated back-end by BeamEngine on switch)."""
+        with self._state_lock:
+            self._score_ema = None
+            self._selected = None
+            self._scores = None
+        if self._hist is not None:
+            self._hist[...] = 0.0
+
+    # ---- lifecycle / backend hooks ----
+    def _open(self) -> None:
+        if not controls_available():
+            raise RuntimeError(_install_hint())
+        self._validate_input_device()
+        import sounddevice as sd
+        self._sd = sd
+        self._setup_runtime()
 
         if self.monitor:
             out_ch = 2
@@ -465,19 +515,7 @@ class VirtualMicGrid(MicController):
 
     # ---- audio thread ----
     def _cb_input(self, indata, frames, time_info, status):  # pragma: no cover (needs hardware)
-        np = self._np
-        x = np.asarray(indata, dtype=float)                  # (B, M)
-        B = x.shape[0]
-        ext = np.concatenate([self._hist, x], axis=0) if self._maxd else x
-        monos = delay_and_sum_grid(ext, self._delays, self._active_cols, self._maxd, B)
-        if self._maxd:
-            self._hist = ext[-self._maxd:, :].copy()
-        score = score_grid(monos, self._win, self._score_band_idx, self.nfft)
-        _selected, order, ema = self._update_selection(score)
-        mono = self._mix_output(monos, order, ema)
-        rms = float(np.sqrt(np.mean(mono * mono))) if mono.size else 0.0
-        self._level = min(1.0, rms)
-        self._emit(mono)
+        self._emit(self.process_block(indata))
 
     def _emit(self, mono: Any) -> None:
         """Deliver a mono block: drop-oldest into the host queue, the optional realtime
