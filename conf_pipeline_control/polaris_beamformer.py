@@ -505,6 +505,15 @@ class PolarisBeamformer(MicController):
         with self._state_lock:
             return self._reading
 
+    @property
+    def noise_only(self) -> bool:
+        """"Nobody is talking" flag — the inverse of the latest DOA-cycle SRP VAD
+        (:attr:`DoaReading.active`), exposed for parity with the grid back-end so a downstream
+        adaptive beamformer (MVDR, item 2) can gate its noise-covariance update on clean frames.
+        Note: updated at the DOA rate (~10 Hz), not per audio block."""
+        with self._state_lock:
+            return not self._reading.active
+
     def detections(self) -> list:
         """Copy of the latest raw SRP detections (parity with AutoSteerController)."""
         with self._state_lock:
@@ -665,7 +674,8 @@ class PolarisBeamformer(MicController):
         Updates the beam level and accumulates the DOA covariance (so the async DOA
         thread keeps tracking). Used both by :meth:`_cb_input` (standalone) and by an
         external owner (BeamEngine) feeding a shared input stream — see
-        :meth:`prepare_external`. Realtime-safe (no device, no allocation churn)."""
+        :meth:`prepare_external`. Realtime-safe: no device, no thread joins, and only bounded
+        per-block numpy work (a few small array allocations, like the rest of the DSP path)."""
         np = self._np
         with self._beam_lock:
             mono = self._beam.process(block)
@@ -705,7 +715,12 @@ class PolarisBeamformer(MicController):
     def reset_transient(self) -> None:
         """Wipe per-mode transient state so a re-activated beam doesn't replay stale
         audio/DOA (called on the newly-activated back-end by BeamEngine on switch)."""
-        self._tracker.reset()                   # Tracker lifecycle (keeps its hold/margin config)
+        # Rebind a fresh tracker (atomic ref swap) rather than _tracker.reset() in place: the DOA
+        # thread mutates _tracker lock-free in _doa_tick, so an in-place wipe here would race it.
+        self._tracker = _TalkerTracker(
+            hold_seconds=self._tracker.hold_seconds,
+            switch_margin_deg=self._tracker.switch_margin_deg,
+        )
         with self._cov_lock:
             if self._cov is not None:
                 self._cov[...] = 0.0

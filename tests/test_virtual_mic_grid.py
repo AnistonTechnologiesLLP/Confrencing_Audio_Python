@@ -191,6 +191,77 @@ def test_grid_output_bandlimit_attenuates_high_band():
 
 
 # --------------------------------------------------------------------------- #
+# Selection VAD — hold the seat through silence (+ noise-only flag for MVDR)
+# --------------------------------------------------------------------------- #
+def test_is_active_peak_vs_flat_and_disable():
+    vmg = VirtualMicGrid(device=None, grid_cols=2, grid_rows=2)        # default floor 3 dB
+    vmg._setup_runtime()
+    assert vmg._is_active(np.array([1.0, 1.0, 100.0, 1.0])) is True    # 20 dB peak → talker
+    assert vmg._is_active(np.array([1.0, 1.0, 1.0, 1.0])) is False     # flat (0 dB) → silence
+    assert vmg._is_active(np.zeros(4)) is False                        # no in-band energy → silence
+    off = VirtualMicGrid(device=None, grid_cols=2, grid_rows=2, vad_floor_db=0.0)
+    off._setup_runtime()
+    assert off._is_active(np.array([1.0, 1.0, 1.0, 1.0])) is True      # gate disabled → always active
+
+
+def test_process_block_holds_selection_through_silence():
+    # Floor set absurdly high → VAD never fires, so after the first acquire the seat must FREEZE
+    # regardless of input (proves hold; without it, random blocks would re-select).
+    vmg = VirtualMicGrid(device=None, grid_cols=4, grid_rows=1, vad_floor_db=1000.0)
+    vmg._setup_runtime()
+    rng = np.random.default_rng(1)
+    vmg.process_block(rng.standard_normal((vmg.blocksize, 8)))         # first block acquires
+    first = vmg._selected
+    assert first is not None
+    assert vmg.speech_active is False and vmg.noise_only is True       # held, not live
+    for _ in range(6):
+        vmg.process_block(rng.standard_normal((vmg.blocksize, 8)))
+        assert vmg._selected == first                                  # frozen on the held seat
+
+
+def test_vad_gate_controls_reselection_frequency():
+    # Deterministic: count smoother updates instead of relying on random selection variety.
+    from conf_pipeline_control.tracking import ValueSmoother
+
+    class _Count(ValueSmoother):
+        def __init__(self):
+            self.n = 0
+        def update(self, value, t=None):
+            self.n += 1
+            return value
+        def reset(self):
+            pass
+
+    rng = np.random.default_rng(2)
+    off = VirtualMicGrid(device=None, grid_cols=4, grid_rows=1, vad_floor_db=0.0, tracker=_Count())
+    off._setup_runtime()
+    for _ in range(5):
+        off.process_block(rng.standard_normal((off.blocksize, 8)))
+        assert off.speech_active is True                              # gate disabled → always active
+    assert off._selection_tracker.n == 5                             # re-selects EVERY block
+
+    on = VirtualMicGrid(device=None, grid_cols=4, grid_rows=1, vad_floor_db=1000.0, tracker=_Count())
+    on._setup_runtime()
+    for _ in range(5):
+        on.process_block(rng.standard_normal((on.blocksize, 8)))
+    assert on._selection_tracker.n == 1                             # acquires once, then HOLDS
+
+
+def test_grid_hold_path_survives_nulled_last_order():
+    # Models the reset_transient/process_block race: _selected set but _last_* nulled mid-flight.
+    # The None-guard must re-select instead of crashing on _mix_output(monos, None, None).
+    vmg = VirtualMicGrid(device=None, grid_cols=4, grid_rows=1, vad_floor_db=1000.0)  # always "silent"
+    vmg._setup_runtime()
+    rng = np.random.default_rng(3)
+    vmg.process_block(rng.standard_normal((vmg.blocksize, 8)))      # acquire a selection
+    assert vmg._selected is not None
+    vmg._last_order = None                                          # race: hold-state cleared
+    vmg._last_smoothed = None
+    mono = vmg.process_block(rng.standard_normal((vmg.blocksize, 8)))   # must NOT crash on None order
+    assert mono.shape == (vmg.blocksize,) and vmg._last_order is not None   # re-selected instead
+
+
+# --------------------------------------------------------------------------- #
 # Constructor / geometry / mask
 # --------------------------------------------------------------------------- #
 def test_constructor_geometry_and_mask():

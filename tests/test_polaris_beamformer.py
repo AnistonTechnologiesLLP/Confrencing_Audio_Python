@@ -19,6 +19,7 @@ import conf_pipeline_control.polaris_beamformer as pb
 from conf_pipeline_control.polaris_beamformer import (
     DEFAULT_BEAM_BANDLIMIT_HZ,
     DeviceConfigError,
+    DoaReading,
     PolarisBeamformer,
     _TalkerTracker,
     _lowpass_kernel,
@@ -134,6 +135,14 @@ def test_talker_tracker_reset_lifecycle():
     tk.reset()                                           # wiped; config (hold/margin) preserved
     assert tk.current() is None and tk.hold_seconds == 0.4
     assert tk.update(200.0, 7.0, t=1.0).azimuth_deg == 200.0   # re-acquires fresh, no hold of 90
+
+
+def test_steered_noise_only_reflects_vad():
+    bf = PolarisBeamformer(device=None)
+    bf._reading = DoaReading(90.0, 6.0, held=False, active=True)
+    assert bf.noise_only is False                        # someone talking
+    bf._reading = DoaReading(None, 0.0, held=False, active=False)
+    assert bf.noise_only is True                         # VAD silent → noise-only frame
 
 
 # --------------------------------------------------------------------------- #

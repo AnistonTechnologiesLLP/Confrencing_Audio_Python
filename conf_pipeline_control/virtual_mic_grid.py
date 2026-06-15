@@ -69,6 +69,11 @@ ALIAS_CUTOFF_HZ = SOUND_SPEED_MPS / (2.0 * 2.0 * POLARIS_RADIUS_M * 0.3826834323
 # the selected output is low-passed at the aliasing cutoff (~5.6 kHz) by default.
 DEFAULT_BEAM_BANDLIMIT_HZ = ALIAS_CUTOFF_HZ
 DEFAULT_BANDLIMIT_TAPS = 63         # Hann-windowed-sinc FIR length (forced odd → linear phase)
+# Selection VAD: a focused talker lifts its virtual mic well above the grid's median energy;
+# diffuse noise/silence leaves the map flat (~0 dB peak-over-median). Gate re-selection on this
+# so the grid HOLDS the last seat through silence instead of chasing HVAC/keyboard noise. Mirrors
+# the steered path's doa.detect vad_floor_db. Set None/≤0 to disable (always re-select).
+DEFAULT_VAD_FLOOR_DB = 3.0
 
 
 # --------------------------------------------------------------------------- #
@@ -237,6 +242,7 @@ class VirtualMicGrid(MicController):
         top_k: int = 1,
         selection_smoothing: float = 0.5,
         tracker: Optional[ValueSmoother] = None,   # swap the selection smoother (default: EMA)
+        vad_floor_db: Optional[float] = DEFAULT_VAD_FLOOR_DB,   # hold seat through silence; None/≤0 off
         beam_bandlimit_hz: Optional[float] = DEFAULT_BEAM_BANDLIMIT_HZ,   # None/0 disables
         output_callback: Optional[Callable[[Any], None]] = None,
         output_queue_size: int = 8,
@@ -270,6 +276,7 @@ class VirtualMicGrid(MicController):
         # ValueSmoother (e.g. tracking.AlphaBetaTracker) via tracker=; default is the EMA used
         # inline before.
         self._selection_tracker: ValueSmoother = tracker or ExponentialTracker(self.selection_smoothing)
+        self.vad_floor_db = vad_floor_db
         self.beam_bandlimit_hz = beam_bandlimit_hz
         self.output_device = output_device
         self.monitor = monitor
@@ -289,6 +296,9 @@ class VirtualMicGrid(MicController):
         self._state_lock = threading.Lock()
         self._selected: Optional[int] = None
         self._scores: Any = None                # latest smoothed per-vmic energies (N,)
+        self._active = False                    # VAD: is a talker focused this block?
+        self._last_order: Any = None            # held selection order (reused while not active)
+        self._last_smoothed: Any = None
         self.error = ""
 
         # lazily bound in _open() (numpy / sounddevice) — Any so the module imports + type-checks
@@ -325,6 +335,21 @@ class VirtualMicGrid(MicController):
         return self._streaming
 
     @property
+    def speech_active(self) -> bool:
+        """Selection VAD for the latest block: True if a talker was localized, False on a flat
+        (silence/diffuse-noise) energy map. False means the selection is being **held**."""
+        with self._state_lock:
+            return self._active
+
+    @property
+    def noise_only(self) -> bool:
+        """Inverse of :attr:`speech_active` — a per-block "nobody is talking" flag a downstream
+        adaptive beamformer (MVDR, item 2) can use to update its noise covariance on clean
+        noise-only frames."""
+        with self._state_lock:
+            return not self._active
+
+    @property
     def selected_xy(self) -> Optional[Tuple[float, float]]:
         """``(x, y)`` of the currently selected virtual mic, or ``None`` before the first block.
         For the host to overlay on its room/seating map."""
@@ -353,16 +378,33 @@ class VirtualMicGrid(MicController):
         return len(self._points_xy)
 
     # ---- selection (pure-ish; testable without a stream) ----
+    def _is_active(self, score: Any) -> bool:
+        """Selection VAD: True if the per-vmic energy map has a localized peak (a talker),
+        False on a flat map (silence / diffuse noise). Peak-over-median in dB vs
+        ``vad_floor_db`` — the grid analogue of the steered path's SRP peak/median gate.
+        ``vad_floor_db`` None or ≤ 0 disables the gate (always active → always re-select)."""
+        if self.vad_floor_db is None or self.vad_floor_db <= 0.0:
+            return True
+        np = self._np
+        med = float(np.median(score))
+        peak = float(np.max(score))
+        if peak <= 0.0 or med <= 0.0:
+            return False                                  # no in-band energy → treat as silence
+        return (10.0 * float(np.log10(peak / med))) >= self.vad_floor_db
+
     def _update_selection(self, score: Any):
-        """Fold a raw per-vmic score into the smoothed selection: push it through the
-        selection :class:`~conf_pipeline_control.tracking.Tracker` (default a one-pole EMA),
-        then select ``argmax``. Returns ``(selected, order, smoothed)``."""
+        """Fold a raw per-vmic score into the smoothed selection: push it through the selection
+        :class:`~conf_pipeline_control.tracking.ValueSmoother` (default a one-pole EMA), then
+        select ``argmax``. Returns ``(selected, order, smoothed)``. The smoother update + state
+        writes run under ``_state_lock`` so a host-thread :meth:`reset_transient` (a BeamEngine
+        mode switch) can't race the audio thread's smoother state. The argsort is light
+        bookkeeping, not the heavy DSP (which ran lock-free before this)."""
         import numpy as np
 
-        smoothed = self._selection_tracker.update(score)
-        order = np.argsort(smoothed)[::-1]
-        selected = int(order[0])
         with self._state_lock:
+            smoothed = self._selection_tracker.update(score)
+            order = np.argsort(smoothed)[::-1]
+            selected = int(order[0])
             self._scores = smoothed
             self._selected = selected
         return selected, order, smoothed
@@ -420,7 +462,19 @@ class VirtualMicGrid(MicController):
         if self._maxd:
             self._hist = ext[-self._maxd:, :].copy()
         score = score_grid(monos, self._win, self._score_band_idx, self.nfft)
-        _selected, order, ema = self._update_selection(score)
+        active = self._is_active(score)
+        # Snapshot the hold-state atomically — a host-thread reset_transient (BeamEngine switch)
+        # can null _last_* mid-block; the None-guard below then re-selects instead of crashing.
+        with self._state_lock:
+            self._active = active
+            held_order, held_ema = self._last_order, self._last_smoothed
+            have_selection = self._selected is not None
+        if active or not have_selection or held_order is None:   # speak / first block / no held seat
+            _selected, order, ema = self._update_selection(score)
+            with self._state_lock:
+                self._last_order, self._last_smoothed = order, ema
+        else:                                                    # silence/noise → HOLD the last seat
+            order, ema = held_order, held_ema
         mono = self._mix_output(monos, order, ema)
         if self._lp_kernel is not None:
             mono = self._band_limit(mono)
@@ -450,16 +504,24 @@ class VirtualMicGrid(MicController):
         self._streaming = False
 
     def reset_transient(self) -> None:
-        """Wipe per-mode transient state so a re-activated grid doesn't carry a stale
-        selection (called on the newly-activated back-end by BeamEngine on switch)."""
-        self._selection_tracker.reset()
+        """Wipe per-mode transient state so a re-activated grid doesn't carry a stale selection
+        (called on the newly-activated back-end by BeamEngine on switch). The smoother + selection
+        + hold state are reset under ``_state_lock`` so this host-thread call can't race the audio
+        thread's :meth:`process_block` / :meth:`_update_selection`."""
         with self._state_lock:
+            self._selection_tracker.reset()
             self._selected = None
             self._scores = None
+            self._active = False
+            self._last_order = None
+            self._last_smoothed = None
         if self._hist is not None:
             self._hist[...] = 0.0
         if self._lp_kernel is not None and self._np is not None:
-            self._lp_tail = self._np.zeros(len(self._lp_kernel) - 1, dtype=float)  # flush FIR state
+            # FIR flush races _band_limit on the audio thread, but benignly: both the old and new
+            # tails are valid length-(L-1) arrays, and the BeamEngine crossfade masks a one-block
+            # flush miss. (Can't lock _band_limit — that would hold a lock across the convolution.)
+            self._lp_tail = self._np.zeros(len(self._lp_kernel) - 1, dtype=float)
 
     # ---- lifecycle / backend hooks ----
     def _open(self) -> None:
@@ -621,6 +683,8 @@ def _demo(argv: Optional[Sequence[str]] = None) -> int:
     ap.add_argument("--score-hi", type=float, default=DEFAULT_SCORE_HI_HZ, help="score band high, Hz")
     ap.add_argument("--top-k", type=int, default=1, help="blend the top-k virtual mics (1 = pure select)")
     ap.add_argument("--smoothing", type=float, default=0.5, help="selection EMA factor (0..1)")
+    ap.add_argument("--vad-floor", type=float, default=DEFAULT_VAD_FLOOR_DB,
+                    help="selection VAD peak/median floor dB; hold seat through silence (0=disable)")
     ap.add_argument("--no-bandlimit", action="store_true",
                     help="disable the output band-limit (default: on at the array aliasing cutoff)")
     ap.add_argument("--monitor", action="store_true", help="play the selected mono (use HEADPHONES)")
@@ -646,7 +710,8 @@ def _demo(argv: Optional[Sequence[str]] = None) -> int:
         dead_capsule=dead, room_width_m=args.room_width, room_depth_m=args.room_depth,
         grid_cols=args.cols, grid_rows=args.rows, focus_height_m=args.focus_height,
         score_band=(args.score_lo, args.score_hi), top_k=args.top_k,
-        selection_smoothing=args.smoothing, monitor=args.monitor, output_device=args.output_device,
+        selection_smoothing=args.smoothing, vad_floor_db=args.vad_floor,
+        monitor=args.monitor, output_device=args.output_device,
         **bl_kw,
     )
     assert vmg.geometry is not None
@@ -664,8 +729,9 @@ def _demo(argv: Optional[Sequence[str]] = None) -> int:
             time.sleep(0.1)
             xy = vmg.selected_xy
             sel = "  --  " if xy is None else f"({xy[0]:+5.2f}, {xy[1]:+5.2f}) m"
+            tag = "LIVE" if vmg.speech_active else "HOLD"      # HOLD = VAD silence, seat frozen
             err = f"  !{vmg.error}" if vmg.error else ""
-            print(f"\rselected {sel}  | lvl {vmg.read_level():4.2f}{err}    ", end="", flush=True)
+            print(f"\r[{tag}] selected {sel}  | lvl {vmg.read_level():4.2f}{err}    ", end="", flush=True)
     except KeyboardInterrupt:
         print("\nStopping ...")
     finally:
