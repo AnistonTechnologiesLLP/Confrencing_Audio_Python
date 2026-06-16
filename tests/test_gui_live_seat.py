@@ -113,6 +113,27 @@ def test_live_overlay_with_seat_paints(win):
     assert win.canvas.grab().width() > 0          # 3D falls back to the hint, no crash
 
 
+def test_beameng_monitor_mute_gain_route_to_engine(win):
+    """With the A/B engine active, _active_ctl resolves to it and the LIVE Mute/Gain controls route to
+    the engine's monitor trim (so monitoring is mute/gain-controllable)."""
+    import conf_pipeline_control as cc
+    st = win.state
+    st.set_config(_config_with_array_and_seats(bearing=0.0))
+    panel = win.panels["live"]
+    eng = cc.BeamEngine(device=None, mode="steered", monitor=True)
+    panel._beam_engine = eng
+    assert panel._active_ctl() is eng                              # engine is the active control surface
+    panel.live_mute.setChecked(True)
+    panel._live_toggle_mute()
+    assert eng.muted is True                                       # Mute routes to the engine
+    panel.live_mute.setChecked(False)
+    panel._live_toggle_mute()
+    assert eng.muted is False
+    panel.live_gain.setValue(-6)
+    panel._live_gain_changed(-6)
+    assert eng.gain_db == -6.0                                     # Gain routes to the engine
+
+
 def test_beameng_seat_nulling_pushes_other_seats(win):
     """The A/B-engine 'Null the other seats' path: with a matched target seat, push the OTHER seats'
     bearings to the steered back-end via the engine; clear when disabled."""

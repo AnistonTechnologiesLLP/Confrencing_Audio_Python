@@ -10,6 +10,16 @@ the TS sibling is at matching v5 parity. The desktop app is presented as
 ## [Unreleased]
 
 ### Added
+- **Live monitoring for the A/B beam engine** (`BeamEngine`, `conf_pipeline_control/beam_engine.py`) —
+  the POLARIS steered↔grid A/B engine can now **play its output on headphones** so you can *hear* the
+  beamformed / NR'd result, not just watch the meter. Opt-in `monitor=True` + `output_device` open a
+  second (output) stream — two independent streams joined by a drop-oldest queue (no duplex assumption),
+  mirroring the back-ends — and fan the mono to all output channels. New `set_mute`/`set_gain_db` +
+  `muted`/`gain_db` trim the **monitor playback** (and the meter, which is now post-gain/mute) while the
+  host `output_queue` stays raw. In the LIVE panel the existing **Monitor**/output-device controls now
+  feed the A/B engine, and **Mute/Gain are enabled** during an A/B session when monitoring is on (they
+  route to the engine via `_active_ctl`). Use headphones — monitoring through room speakers feeds back
+  into the array. (+3 tests.)
 - **Post-beam noise suppression** (`PolarisBeamformer`, `conf_pipeline_control/polaris_beamformer.py`) —
   opt-in `post_nr=True` runs a light single-channel **spectral-gate** on the beamformed mono output, a
   **local fallback** for when the OCTOVOX cloud cleaning path (`/api/clean`) isn't running. A pure-numpy

@@ -452,7 +452,11 @@ class LivePanel(PanelBase):
                 or self._autosteer is not None or self._beam_engine is not None)
 
     def _active_ctl(self):
-        """The underlying MicController in use (auto-steer wraps one), or None."""
+        """The active session's mute/gain control surface — the A/B engine (duck-typed:
+        ``set_mute``/``set_gain_db``/``read_level``), the auto-steer controller, or the live zone
+        controller; ``None`` if none is connected. Sessions are mutually exclusive."""
+        if self._beam_engine is not None:
+            return self._beam_engine
         if self._autosteer is not None:
             return self._autosteer.ctrl
         return self._live_ctl
@@ -906,6 +910,7 @@ class LivePanel(PanelBase):
         steered_cfg = dict(cfg)
         if self.live_beameng_nullseats.isChecked():
             steered_cfg["mode"] = cc.MODE_SUPERDIRECTIVE   # nulls need a frequency-domain steered beam
+        monitor_on = self.live_monitor.isChecked()
         try:
             eng = cc.BeamEngine(
                 device=self.live_device.currentData(),
@@ -914,6 +919,8 @@ class LivePanel(PanelBase):
                 steered_cfg=steered_cfg,
                 grid_cfg=dict(cfg),
                 assumed_range_m=2.0,                 # gives steered mode an (x, y) too, for parity
+                monitor=monitor_on,                  # play the A/B output on headphones (if ticked)
+                output_device=self.live_out_device.currentData(),
             )
             eng.start()
         except Exception as exc:                     # hardware/open failure → report, stay disconnected
@@ -923,11 +930,16 @@ class LivePanel(PanelBase):
         self._beameng_loc = None
         self._session_array_id = self._live_array_id()
         self.live_connect.setText("Disconnect")
-        self.live_mute.setEnabled(False)             # no monitoring path on the engine yet, so
-        self.live_gain.setEnabled(False)             # mute/gain are inert — disable to avoid confusion
+        # Mute/Gain trim the monitor playback — only usable when monitoring is on.
+        self.live_mute.setEnabled(monitor_on)
+        self.live_gain.setEnabled(monitor_on)
+        if monitor_on:                               # apply the current control state to the new engine
+            eng.set_gain_db(float(self.live_gain.value()))
+            eng.set_mute(self.live_mute.isChecked())
         self.live_beameng_nullseats.setEnabled(False)   # the steered beam mode is fixed at Connect
+        mon = "monitoring (headphones)" if monitor_on else "no monitor"
         self.live_status.setText(
-            f"A/B engine live · {self._beameng_mode()} · switch strategy from the picker (no monitor)."
+            f"A/B engine live · {self._beameng_mode()} · switch strategy from the picker ({mon})."
         )
         self._notify_session_changed()
 
