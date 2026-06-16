@@ -10,6 +10,16 @@ the TS sibling is at matching v5 parity. The desktop app is presented as
 ## [Unreleased]
 
 ### Added
+- **Snap-steer / "Lock to seat"** (`conf_pipeline.seat_azimuth_for_array`, `BeamEngine.set_steering`,
+  LIVE panel) — pin the steered POLARIS beam to a **chosen room seat** instead of following the loudest
+  talker. New pure helper `seat_azimuth_for_array(config, array_id, seat_id)` returns a specific seat's
+  **array-relative** azimuth (the inverse room rotation, shared with `seat_null_azimuths`); new
+  `BeamEngine.set_steering(azimuth_deg)` forwards it to the steered back-end (`None` resumes DOA-follow).
+  In the LIVE A/B card a **"Lock to seat"** picker lists the room's seats (+ "Follow talker") and pins /
+  unpins the look live; when locked, **seat-nulling keeps the locked seat** (nulls the others) and the
+  readout shows `locked → seat …`. The lock lives on the steered back-end, so it persists across
+  steered↔grid switches. The room-aware coverage story completes: listen to one seat, null the rest.
+  (+5 tests.)
 - **Live monitoring for the A/B beam engine** (`BeamEngine`, `conf_pipeline_control/beam_engine.py`) —
   the POLARIS steered↔grid A/B engine can now **play its output on headphones** so you can *hear* the
   beamformed / NR'd result, not just watch the meter. Opt-in `monitor=True` + `output_device` open a

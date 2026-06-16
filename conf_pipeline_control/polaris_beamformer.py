@@ -1014,6 +1014,10 @@ class PolarisBeamformer(MicController):
         self._tracker = _TalkerTracker(hold_seconds=hold_seconds, switch_margin_deg=switch_margin_deg)
         self._beam = self._make_beam(geom)
         self._steered_az: Optional[float] = None
+        # Steering generation: bumped under _beam_lock whenever the steering INTENT changes (set_steering).
+        # _doa_tick snapshots it before its off-lock solve and only commits if it's unchanged — so a stale
+        # DOA-tick commit can't clobber a concurrently-applied seat lock (lost-update guard).
+        self._steer_gen = 0
         if fixed_azimuth_deg is not None:
             self._beam.set_look(fixed_azimuth_deg, self.off_nadir_deg)
             self._steered_az = float(fixed_azimuth_deg)
@@ -1157,14 +1161,18 @@ class PolarisBeamformer(MicController):
 
     def set_steering(self, azimuth_deg: Optional[float] = None) -> None:
         """Pin the beam to ``azimuth_deg`` (disables DOA-follow), or resume
-        following the tracked talker when ``None``."""
+        following the tracked talker when ``None``. Bumps the steering generation under ``_beam_lock`` so
+        an in-flight DOA tick's stale commit can't clobber this (lost-update guard)."""
         if azimuth_deg is None:
             self.steer_to_doa = True
+            with self._beam_lock:
+                self._steer_gen += 1          # invalidate any in-flight DOA-tick commit built for the lock
             return
         self.steer_to_doa = False
         nulls = self._compose_nulls([], float(azimuth_deg))            # caller-supplied seat/manual nulls
         plan = self._beam.plan_look(float(azimuth_deg), self.off_nadir_deg, nulls)   # off the lock
         with self._beam_lock:
+            self._steer_gen += 1              # this is the newest steering intent — DOA ticks must yield
             self._beam.commit_look(plan)
             self._steered_az = float(azimuth_deg)
         self._publish_active_nulls(nulls, float(azimuth_deg))          # telemetry = nulls actually applied
@@ -1269,6 +1277,7 @@ class PolarisBeamformer(MicController):
         # Re-steer when the talker moves; in mvdr, or whenever nulls are engaged, re-solve EVERY tick so
         # the null tracks the evolving noise field / appearing-or-clearing interferers even when the
         # committed look angle is unchanged. The heavy solve stays off the audio lock.
+        gen0 = self._steer_gen                          # snapshot steering intent before the off-lock solve
         target_az = reading.azimuth_deg if (self.steer_to_doa and reading.azimuth_deg is not None) \
             else self._steered_az
         nulls = self._compose_nulls(dets, target_az) if target_az is not None else []
@@ -1276,8 +1285,9 @@ class PolarisBeamformer(MicController):
                 target_az != self._steered_az or self.mode == MODE_MVDR or self._nulls_engaged()):
             plan = self._beam.plan_look(target_az, self.off_nadir_deg, nulls)   # heavy work off the lock
             with self._beam_lock:
-                self._beam.commit_look(plan)
-                self._steered_az = target_az
+                if self._steer_gen == gen0:             # no set_steering interleaved → safe to commit
+                    self._beam.commit_look(plan)
+                    self._steered_az = target_az
         self._publish_active_nulls(nulls, target_az)   # telemetry = the nulls actually applied
 
     def _snapshot_covariance(self):

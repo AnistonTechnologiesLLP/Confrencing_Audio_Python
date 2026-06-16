@@ -217,6 +217,14 @@ class BeamEngine:
         :meth:`conf_pipeline_control.polaris_beamformer.PolarisBeamformer.set_nulls`."""
         self._steered.set_nulls(bearings)
 
+    def set_steering(self, azimuth_deg: Optional[float] = None) -> None:
+        """Pin the steered beam to a fixed ``azimuth_deg`` (array-relative deg — e.g. a room seat's
+        bearing, "lock to seat"), disabling DOA-follow; ``None`` resumes following the tracked talker.
+        Forwarded to the steered back-end (the grid back-end has no steering). The lock persists across
+        steered↔grid A/B switches (it lives on the steered back-end). See
+        :meth:`conf_pipeline_control.polaris_beamformer.PolarisBeamformer.set_steering`."""
+        self._steered.set_steering(azimuth_deg)
+
     @property
     def active_nulls(self) -> list:
         """The null bearings the steered back-end is **actually** applying this tick (after the M−1

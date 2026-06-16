@@ -89,6 +89,8 @@ class LivePanel(PanelBase):
         self._beameng_loc = None         # last BeamEngine current_location (for the overlay tick)
         self._session_array_id = None    # the array the running session was started with
         self._live_seat = None           # SeatMatch for the dominant talker (room-aware readout)
+        self._beameng_locked_seat = None  # seat_id the steered beam is pinned to (snap-steer), or None
+        self._beameng_locked_az = None    # the array-relative azimuth currently pinned (re-pushed if pose moves)
 
         root = QVBoxLayout(self)
         root.setContentsMargins(10, 8, 10, 8)
@@ -341,6 +343,16 @@ class LivePanel(PanelBase):
         )
         self.live_beameng_nullseats.setEnabled(False)        # enabled when the engine is ticked
         ef.addRow("Seat nulling", self.live_beameng_nullseats)
+        self.live_beameng_lockseat = QComboBox()
+        self.live_beameng_lockseat.addItem("Follow talker (DOA)", None)
+        self.live_beameng_lockseat.setToolTip(
+            "Pin the steered beam to a chosen seat instead of following the loudest talker (snap-steer). "
+            "Needs the array's room bearing set (Design → array); re-select 'Follow talker' to resume DOA."
+        )
+        self.live_beameng_lockseat.setEnabled(False)         # enabled while a connected steered engine runs
+        self.live_beameng_lockseat.currentIndexChanged.connect(
+            lambda *_a: None if self._refreshing else self._on_beameng_lockseat_changed())
+        ef.addRow("Lock to seat", self.live_beameng_lockseat)
         self.live_beameng_view = QLabel("Connect with the A/B engine to compare steered vs grid live.")
         self.live_beameng_view.setWordWrap(True)
         self.live_beameng_view.setFont(QFont("Consolas", 9))
@@ -490,6 +502,8 @@ class LivePanel(PanelBase):
         if e is not None:
             try:
                 e.set_mode(self._beameng_mode())
+                if self._beameng_mode() == "steered" and self._beameng_locked_seat is not None:
+                    self._on_beameng_lockseat_changed()   # re-pin: set_mode's reset_transient cleared _steered_az
             except Exception as exc:
                 self.live_status.setText(f"A/B switch failed: {exc}")
 
@@ -937,6 +951,8 @@ class LivePanel(PanelBase):
             eng.set_gain_db(float(self.live_gain.value()))
             eng.set_mute(self.live_mute.isChecked())
         self.live_beameng_nullseats.setEnabled(False)   # the steered beam mode is fixed at Connect
+        self._refresh_beameng_lockseat()                # populate the seat list for snap-steer
+        self.live_beameng_lockseat.setEnabled(self.live_beameng_lockseat.count() > 1)   # only if seats exist
         mon = "monitoring (headphones)" if monitor_on else "no monitor"
         self.live_status.setText(
             f"A/B engine live · {self._beameng_mode()} · switch strategy from the picker ({mon})."
@@ -950,19 +966,81 @@ class LivePanel(PanelBase):
             return ""
         return f"   ·   seat {m.seat_id} ({m.separation_deg:.0f}° off)"
 
+    def _refresh_beameng_lockseat(self):
+        """Rebuild the Lock-to-seat combo from the current room's seats (preserving the 'Follow talker'
+        head). Resets the lock to follow. Signals are blocked so this never auto-steers."""
+        c = self.live_beameng_lockseat
+        c.blockSignals(True)
+        c.clear()
+        c.addItem("Follow talker (DOA)", None)
+        try:
+            seats = cp.room_seats(self.state.config)
+        except Exception:
+            seats = []
+        for seat_id, _anchor in seats:
+            c.addItem(f"Seat {seat_id}", seat_id)
+        c.blockSignals(False)
+        self._beameng_locked_seat = None
+
+    def _on_beameng_lockseat_changed(self):
+        """Pin the steered beam to the chosen seat (snap-steer), or resume DOA-follow on 'Follow talker'."""
+        e = self._beam_engine
+        if e is None:
+            return
+        seat_id = self.live_beameng_lockseat.currentData()
+        az = None
+        if seat_id is not None and self._session_array_id:
+            try:
+                az = cp.seat_azimuth_for_array(self.state.config, self._session_array_id, seat_id)
+            except Exception:
+                az = None
+        if seat_id is not None and az is None:                # seat has no resolvable bearing → can't lock
+            self.live_status.setText("Lock to seat needs the array's room bearing (Design → array).")
+            self._beameng_locked_seat = None
+            self._beameng_locked_az = None
+            try: e.set_steering(None)                          # stay following the talker
+            except Exception: pass
+            return
+        self._beameng_locked_seat = seat_id                   # None = follow, else the locked seat id
+        self._beameng_locked_az = az                          # tracked so _push_locked_steering re-pins on pose change
+        try:
+            e.set_steering(az)                                # az None → resume DOA-follow; else pin the look
+        except Exception:
+            pass
+
+    def _push_locked_steering(self):
+        """Snap-steer upkeep: while locked (steered), re-resolve the seat's azimuth from the CURRENT
+        config each tick and re-pin ONLY if it changed (e.g. the array's pose/bearing was edited in
+        Design mid-session) — keeping the look consistent with the live seat-null geometry. No-op unless
+        the angle actually moved (so no needless per-tick re-solve)."""
+        e = self._beam_engine
+        if (e is None or self._beameng_locked_seat is None or self._beameng_mode() != "steered"
+                or not self._session_array_id):
+            return
+        try:
+            az = cp.seat_azimuth_for_array(self.state.config, self._session_array_id, self._beameng_locked_seat)
+        except Exception:
+            az = None
+        if az is not None and az != self._beameng_locked_az:
+            self._beameng_locked_az = az
+            try: e.set_steering(az)
+            except Exception: pass
+
     def _push_seat_nulls(self) -> int:
-        """Room-aware seat nulling: while the engine follows the talker (steered) at a matched target
-        seat, push the OTHER seats' bearings to the steered beam as nulls. Returns the count pushed
-        (0 = none / cleared). The beam's null-budget composer handles dedupe + the M−1 budget."""
+        """Room-aware seat nulling: while the engine runs steered, push the OTHER seats' bearings to the
+        steered beam as nulls, keeping the TARGET seat (the locked seat if snap-steered, else the matched
+        talker's seat). Returns the count pushed (0 = none / cleared); the beam's null-budget composer
+        handles dedupe + the M−1 budget."""
         e = self._beam_engine
         if e is None:
             return 0
+        target = self._beameng_locked_seat or (self._live_seat.seat_id if self._live_seat is not None else None)
         az: list = []
         if (self.live_beameng_nullseats.isChecked() and self._beameng_mode() == "steered"
-                and self._live_seat is not None and self._session_array_id):
+                and target is not None and self._session_array_id):
             try:
                 az = cp.seat_null_azimuths(self.state.config, self._session_array_id,
-                                           exclude_seat_id=self._live_seat.seat_id)
+                                           exclude_seat_id=target)
             except Exception:
                 az = []
         try:
@@ -982,6 +1060,7 @@ class LivePanel(PanelBase):
         if loc.angle_deg is not None:                # room-aware: map the tracked bearing to a seat
             self._live_seat = _dominant_seat(self.state.config, self._session_array_id,
                                              [(loc.angle_deg, 1.0, True)])
+        self._push_locked_steering()                 # snap-steer: re-pin the locked seat if its bearing moved
         n_null = self._push_seat_nulls()             # room-aware: null the other seats (if enabled)
         if loc.angle_deg is None and loc.xy is None:
             self.live_beameng_view.setText(f"[{loc.mode}] · listening — no source localized ·")
@@ -989,8 +1068,9 @@ class LivePanel(PanelBase):
             ang = "  -- " if loc.angle_deg is None else f"{loc.angle_deg:5.0f}°"
             xy = "" if loc.xy is None else f"  ({loc.xy[0]:+.2f}, {loc.xy[1]:+.2f}) m"
             null_s = f"   ·   nulling {n_null} seat(s)" if n_null else ""
+            lock_s = f"   ·   locked → seat {self._beameng_locked_seat}" if self._beameng_locked_seat else ""
             self.live_beameng_view.setText(
-                f"[{loc.mode}] {ang}{xy}  ·  conf {loc.confidence:.0%}{self._seat_suffix()}{null_s}")
+                f"[{loc.mode}] {ang}{xy}  ·  conf {loc.confidence:.0%}{self._seat_suffix()}{lock_s}{null_s}")
         if e.error:
             self.live_status.setText(f"A/B engine: {e.error[:60]}")
 
@@ -1024,6 +1104,12 @@ class LivePanel(PanelBase):
             self.live_mute.setEnabled(True)
             self.live_gain.setEnabled(True)
             self.live_beameng_nullseats.setEnabled(self.live_beameng.isChecked())   # re-enable for next Connect
+            self.live_beameng_lockseat.setEnabled(False)        # snap-steer needs a running engine
+            self.live_beameng_lockseat.blockSignals(True)
+            self.live_beameng_lockseat.setCurrentIndex(0)       # back to "Follow talker"
+            self.live_beameng_lockseat.blockSignals(False)
+            self._beameng_locked_seat = None
+            self._beameng_locked_az = None
             self.live_beameng_view.setText("Connect with the A/B engine to compare steered vs grid live.")
         if self._autosteer is not None:
             try:

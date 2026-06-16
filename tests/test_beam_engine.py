@@ -238,6 +238,16 @@ def test_set_nulls_forwards_to_the_steered_backend():
     assert eng._steered._explicit_nulls == []                   # cleared
 
 
+def test_set_steering_forwards_to_the_steered_backend():
+    """Snap-steer: lock pins the steered back-end to a fixed azimuth (disables DOA-follow); None resumes."""
+    eng = BeamEngine(device=None, mode="steered", steered_cfg={"mode": "superdirective"})
+    assert eng._steered.steer_to_doa is True                    # default: follow the tracked talker
+    eng.set_steering(90.0)
+    assert eng._steered.steer_to_doa is False and eng._steered._steered_az == 90.0   # pinned to 90°
+    eng.set_steering(None)
+    assert eng._steered.steer_to_doa is True                    # resumed DOA-follow
+
+
 # --------------------------------------------------------------------------- #
 # Normalized location
 # --------------------------------------------------------------------------- #

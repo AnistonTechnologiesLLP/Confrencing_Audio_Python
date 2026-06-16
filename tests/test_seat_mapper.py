@@ -145,3 +145,30 @@ def test_seat_null_azimuths_none_cases():
     c = _config_with_array_and_seats()
     c = cp.add_device(c, cp.create_codec("C", "Codec", "dante"))
     assert cp.seat_null_azimuths(c, "C") == []                        # device is not a microphone array
+
+
+# --------------------------------------------------------------------------- #
+# seat_azimuth_for_array — array-relative bearing of ONE seat (snap-steer / lock-to-seat)
+# --------------------------------------------------------------------------- #
+def test_seat_azimuth_for_array_resolves_a_specific_seat():
+    c = _config_with_array_and_seats(bearing=0.0)
+    assert cp.seat_azimuth_for_array(c, "A", "sofa-seat1") == 0.0     # north → array frame 0 (bearing 0)
+    assert cp.seat_azimuth_for_array(c, "A", "sofa-seat2") == 90.0    # east → 90
+    # re-mounting the array (bearing 90) rotates each seat into the array frame by −90
+    c2 = _config_with_array_and_seats(bearing=90.0)
+    assert cp.seat_azimuth_for_array(c2, "A", "sofa-seat1") == 270.0  # north 0−90 → 270
+    # consistency: it equals the matching entry from seat_null_azimuths' enumeration
+    assert cp.seat_azimuth_for_array(c, "A", "sofa-seat2") == cp.seat_null_azimuths(
+        c, "A", exclude_seat_id="sofa-seat1")[0]
+
+
+def test_seat_azimuth_for_array_none_cases():
+    assert cp.seat_azimuth_for_array(_config_with_array_and_seats(), "A", "nope") is None     # unknown seat
+    assert cp.seat_azimuth_for_array(_config_with_array_and_seats(), "ZZ", "sofa-seat1") is None  # unknown array
+    assert cp.seat_azimuth_for_array(
+        _config_with_array_and_seats(bearing=None), "A", "sofa-seat1") is None                # no bearing
+    assert cp.seat_azimuth_for_array(
+        _config_with_array_and_seats(position=None), "A", "sofa-seat1") is None               # no position
+    c = _config_with_array_and_seats()
+    c = cp.add_device(c, cp.create_codec("C", "Codec", "dante"))
+    assert cp.seat_azimuth_for_array(c, "C", "sofa-seat1") is None                            # not a mic array

@@ -823,6 +823,28 @@ def test_agc_off_is_a_noop_and_reset_rebinds_gain():
     assert on._agc_gain is not None and on._agc_gain.value is None       # fresh, re-acquires on next block
 
 
+def test_doa_tick_yields_to_a_concurrent_set_steering(monkeypatch):
+    """Steering epoch (review HIGH fix): if a set_steering lands DURING a DOA tick's off-lock solve, the
+    tick's now-stale commit is skipped — it can't clobber the just-applied seat lock."""
+    bf = PolarisBeamformer(device=None, mode="superdirective")
+    bf._setup_runtime()
+    bf.steer_to_doa = True
+    for _ in range(8):                              # accumulate a covariance with a talker at ~100°
+        bf.process_block(_plane_wave_block(bf.geometry, 100.0, bf.sample_rate, bf.blocksize))
+    real_plan = bf._beam.plan_look
+
+    def racing_plan(az, off=90.0, nulls=()):
+        plan = real_plan(az, off, nulls)
+        with bf._beam_lock:                         # simulate a concurrent set_steering(45°) landing mid-solve
+            bf._steer_gen += 1
+            bf._steered_az = 45.0
+        return plan
+
+    monkeypatch.setattr(bf._beam, "plan_look", racing_plan)
+    bf._doa_tick()
+    assert bf._steered_az == 45.0                   # the lock survived; the stale DOA commit was dropped
+
+
 # --------------------------------------------------------------------------- #
 # Post-beam noise suppression (P3) — single-channel spectral gate on the mono output
 # --------------------------------------------------------------------------- #
