@@ -190,6 +190,14 @@ from .coverage_sim import (  # noqa: F401
     speaker_wedge,
 )
 
+# ---- room-aware seat mapping export ----
+from .seat_mapper import (  # noqa: F401
+    SeatMatch,
+    nearest_seat,
+    nearest_seat_for_array,
+    room_seats,
+)
+
 # ---- design report export ----
 from .report import design_report  # noqa: F401
 

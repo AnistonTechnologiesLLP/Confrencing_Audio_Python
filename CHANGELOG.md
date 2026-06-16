@@ -10,6 +10,16 @@ the TS sibling is at matching v5 parity. The desktop app is presented as
 ## [Unreleased]
 
 ### Added
+- **Room-aware seat mapping** (`conf_pipeline/seat_mapper.py`) — a pure-stdlib geometry layer
+  that turns a detected **array-relative azimuth** into the **nearest room seat**, building on the
+  v5 array `bearingDeg`. `nearest_seat(...)` rotates the azimuth into room coordinates by the
+  array's mounting bearing and picks the seat whose room-bearing-from-the-array is angularly
+  closest (returns `None` past a configurable `max_separation_deg` "between seats" gate);
+  `nearest_seat_for_array(config, array_id, azimuth_deg)` resolves the array pose + the room's seats
+  from a `SystemConfig`. It **composes over the DOA** — no new `BeamStrategy`, so it works with all
+  four beam modes — and reuses the engine's existing bearing helpers (`bearing_to_deg`,
+  `angular_separation_deg`) and the `coverage_sim` synthetic seat-ID convention
+  (`{furniture_id}-seat{index}`). The live GUI/API seat readout is a follow-up. (+9 tests.)
 - **Microphone-array mounting bearing** (schema **v4 → v5**) — `MicrophoneArray` gains an
   optional `bearingDeg` (compass heading of the array's 0° reference, 0° = +Y), so a
   detected array-relative azimuth can be mapped into room coordinates. It's the prerequisite
