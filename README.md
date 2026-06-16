@@ -38,6 +38,7 @@ conf_pipeline/        the engine (pure dataclasses + functions, no Qt)
   scheduler.py        scene scheduler (weekly "HH:MM" recalls; injectable clock)
   furniture.py        furniture catalog (kind → size / seat-capacity / absorption) + resolvers
   coverage_sim.py     geometric room coverage: mic sectors + camera FOV + occlusion → RoomCoverage
+  seat_mapper.py      DOA azimuth → nearest room seat (room-aware; reuses array bearingDeg)
   sim/                placement simulation (scoring, search, pluggable validation)
 conf_pipeline_gui/    the PySide6 app — "Stagebar" workflow-modes shell
   state.py            AppState (undo/redo, selection, tool, mode, camera, live overlay)
@@ -65,11 +66,11 @@ conf_pipeline_control/ host-side array-microphone control (optional [control] ex
   octovox_bridge.py   zones → azimuths + HTTP client to the OCTOVOX clean server
   octovox_monitor.py  near-live cleaned monitor (rolling chunk → clean → playback)
   ab_test.py          A/B harness: record → beamform N ways → WAVs + dB report
-  polaris_beamformer.py  real-time SRP-PHAT DOA + delay-and-sum steered beam (POLARIS 8-mic)
+  polaris_beamformer.py  real-time SRP-PHAT DOA + steered beam (4 modes, auto-null, AGC) (POLARIS 8-mic)
   virtual_mic_grid.py    Nureva-style fixed near-field virtual-mic grid, loudest selected
   beam_engine.py      A/B engine: steered + grid back-ends on one shared input stream
   tracking.py         swappable smoothers (EMA + constant-velocity/Kalman-family hook)
-tests/                pytest suite (469 tests; incl. headless GUI smoke)
+tests/                pytest suite (538 tests; incl. headless GUI smoke)
 run_gui.py            launcher
 ```
 
@@ -532,15 +533,20 @@ heading, 0° = +Y) — the prerequisite for mapping a detected array-relative az
 coordinates (room-aware steering). Additive and omit-when-absent, so v1–v4 configs still
 migrate byte-identically; set it with `cp.set_array_bearing(config, array_id, deg)`.
 
-## Real-time array beamforming (1.16.0)
+## Real-time array beamforming (1.17.0)
 
 The `[control]` extra gains a real-time beamforming suite for the physical **sensiBel
 POLARIS 8-mic** array (numpy + sounddevice), separate from the offline design layer
 above:
 
-- **Steered** — `cc.PolarisBeamformer` runs **SRP-PHAT** direction-finding and steers
-  a delay-and-sum beam at the dominant talker (active-speaker isolation), with
-  talker-hold smoothing and opt-in wait-for-device / auto-reconnect.
+- **Steered** — `cc.PolarisBeamformer` runs **SRP-PHAT** direction-finding and steers a
+  beam at the dominant talker (active-speaker isolation), with talker-hold smoothing and
+  opt-in wait-for-device / auto-reconnect. Four selectable strategies — `delaysum`,
+  sub-sample `fracdelay`, frequency-domain `superdirective`, and data-adaptive `mvdr`
+  (each behind a `plan_look`/`commit_look` contract so the heavy per-bin solve stays off
+  the audio callback). The frequency-domain modes place **exact LCMV nulls**:
+  `auto_null=True` follows the talker **and nulls the other detected interferers**, and
+  `set_nulls(...)` adds caller-supplied bearings — both within the `M−1` null budget.
 - **Selection** — `cc.VirtualMicGrid` is a Nureva-"Microphone-Mist"-style grid of
   fixed near-field virtual mics, all run per block, the loudest selected (no steering).
   It **holds the last seat through silence** (a peak/median VAD) instead of chasing
@@ -564,7 +570,17 @@ default (`beam_bandlimit_hz`), selection/steering smoothing is swappable behind 
 `polaris-beam-demo` / `polaris-vmic-demo` / `polaris-beam-engine-demo` are console
 entry points. The desktop app's **LIVE** mode also drives the engine directly — a
 steered ↔ grid picker that switches live, with the tracked direction drawn on the room
-map (no monitoring yet). **Caveat:** the ~cm aperture means coarse-zone selection, not
+map (no monitoring yet).
+
+**Room-aware** (built on the v5 array `bearingDeg`): `conf_pipeline.seat_mapper` turns a
+detected azimuth into the **nearest room seat**, surfaced live as a `· seat <id>` readout
+and a room-map highlight; the LIVE A/B card's **"Null the other (empty) seats"** feeds the
+non-target seat bearings to the steered beam, arbitrated against auto-null by a single
+**null-budget composer** (measured interferers win the budget; speculative seat nulls fill
+the remainder). An opt-in **target-loudness AGC** (`agc_target_db`) normalizes the mono
+output level — EMA-slewed, clamped to ±18 dB, and held through silence.
+
+**Caveat:** the ~cm aperture means coarse-zone selection, not
 MXA920/Nureva-scale pinpoint — these isolate a zone or A/B two strategies, they don't
 separate two people at one table.
 

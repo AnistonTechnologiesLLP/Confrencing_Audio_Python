@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "conferencing-audio-pipeline"
-version = "1.16.0"
+version = "1.17.0"
 description = "Configuration, routing, and validation control plane for a networked-conferencing audio system, with a PySide6 workflow-modes desktop app (2D/3D layout editor, live array operations view) and optional host-side array-microphone beamforming control. Not a real-time DSP engine at its core."
 readme = "README.md"
 requires-python = ">=3.10"

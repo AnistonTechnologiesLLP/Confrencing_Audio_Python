@@ -7,7 +7,19 @@ camelCase, currently `CONFIG_VERSION` = 5 (v1–v4 files migrate losslessly);
 the TS sibling is at matching v5 parity. The desktop app is presented as
 **Aniston Room Designer**.
 
-## [Unreleased]
+## [1.17.0] - 2026-06-16
+
+**Room-aware steering, steerable nulls + output AGC** — the steered POLARIS beam now
+follows the talker at the matched seat and actively shapes the rest of the field. The
+frequency-domain beam places **exact LCMV nulls** on known bearings; **detection-driven
+auto-null** rejects the other live talkers; **room-aware seat-nulling** nulls the empty
+seats (the system knows the layout) — the two null sources arbitrated within the M−1
+budget by a single deterministic **null-budget composer** (measured interferers win,
+speculative seat nulls fill the remainder). A live **room-aware seat readout** maps the
+tracked talker to the nearest room seat, and an opt-in **target-loudness AGC** normalizes
+the mono output. All built on the v5 microphone-array `bearingDeg` and the four beam modes
+(`delaysum` / `fracdelay` / `superdirective` / `mvdr`). Python-only live DSP + GUI — no
+schema change (stays v5, TS sibling already at parity).
 
 ### Added
 - **Target-loudness AGC on the beam output** (`PolarisBeamformer`, `conf_pipeline_control/
@@ -40,17 +52,6 @@ the TS sibling is at matching v5 parity. The desktop app is presented as
   `null_min_sep_deg`/`null_merge_sep_deg`/`seat_null_max_count` ctor params. The talker-exclusion
   margin is tied to the tracker's `switch_margin_deg`, so a tracked talker that drifts up to the switch
   margin from the committed look is never self-nulled. (+8 hardware-free tests.)
-
-### Fixed
-- **Calibrate-front now applies rear/left bearings instead of clamping.** The LIVE panel's
-  "Calibrate front" measured the talker's bearing but fed the raw 0–360° DOA into the −180…180°
-  Front-offset spin box, so any talker the array localized above 180° (common on the front/back-
-  ambiguous POLARIS ring) was silently clamped to 180° — the value never matched the heard
-  bearing and the pickup sector never centred on the talker. The measured azimuth is now wrapped
-  into (−180, 180] before it's applied (the sector gate is wrap-aware, so steering is identical),
-  and the status line shows both the heard bearing and the applied offset. (+8 headless tests.)
-
-### Added
 - **Auto-null on the steered beam** (`PolarisBeamformer(auto_null=True)`) — wires the LCMV nulls into
   the live DOA loop: the steered superdirective / mvdr beam now follows the dominant talker **and
   nulls the other detected sources** (interferers). `_doa_tick` raises the SRP-PHAT peak budget
@@ -151,6 +152,15 @@ the TS sibling is at matching v5 parity. The desktop app is presented as
   three session modes (A/B engine / auto-steer / OCTOVOX) are mutually exclusive;
   the engine has no playback path yet, so Mute / Gain are disabled during a
   BeamEngine session. (`conf_pipeline_gui/panels/live.py`; +1 headless GUI test.)
+
+### Fixed
+- **Calibrate-front now applies rear/left bearings instead of clamping.** The LIVE panel's
+  "Calibrate front" measured the talker's bearing but fed the raw 0–360° DOA into the −180…180°
+  Front-offset spin box, so any talker the array localized above 180° (common on the front/back-
+  ambiguous POLARIS ring) was silently clamped to 180° — the value never matched the heard
+  bearing and the pickup sector never centred on the talker. The measured azimuth is now wrapped
+  into (−180, 180] before it's applied (the sector gate is wrap-aware, so steering is identical),
+  and the status line shows both the heard bearing and the applied offset. (+8 headless tests.)
 
 ## [1.16.0] - 2026-06-15
 
