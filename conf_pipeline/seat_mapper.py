@@ -113,3 +113,34 @@ def nearest_seat_for_array(
         azimuth_deg, array.position, array.bearing_deg, room_seats(config),
         max_separation_deg=max_separation_deg,
     )
+
+
+def seat_null_azimuths(
+    config: SystemConfig,
+    array_id: str,
+    *,
+    exclude_seat_id: Optional[str] = None,
+) -> list[float]:
+    """**Array-relative** azimuths (deg, ``0°`` = +Y clockwise — the DOA / ``set_nulls`` frame) of every
+    room seat except ``exclude_seat_id`` — for nulling the non-target ("empty") seats while the beam
+    listens to the matched one. The inverse of the mapper's room rotation: each seat's world bearing
+    from the array, ``bearing_to_deg(array.position, seat.position)``, is rotated back into the array
+    frame by subtracting the mounting bearing (``room_az = azimuth + bearing_deg`` ⇒
+    ``azimuth = room_az − bearing_deg``).
+
+    Returns ``[]`` if ``array_id`` is unknown / not a microphone array / has no ``position`` or
+    ``bearing_deg``, or there are no other seats. De-duplication and the M−1 budget are the caller's
+    concern (the steered beam's null-budget composer) — this only enumerates the bearings, in
+    :func:`room_seats` order.
+    """
+    array = next((d for d in config.devices if d.id == array_id), None)
+    if not isinstance(array, MicrophoneArray):
+        return []
+    if array.position is None or array.bearing_deg is None:
+        return []
+    out: list[float] = []
+    for seat_id, anchor in room_seats(config):
+        if seat_id == exclude_seat_id:
+            continue
+        out.append(_norm_bearing(bearing_to_deg(array.position, anchor.position) - array.bearing_deg))
+    return out

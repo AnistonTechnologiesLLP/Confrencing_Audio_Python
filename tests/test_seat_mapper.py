@@ -119,3 +119,29 @@ def test_nearest_seat_for_array_no_room_or_no_seats_is_none():
     c.room = RoomLayout(vertices=[Point2D(0, 0), Point2D(2, 0), Point2D(2, 2), Point2D(0, 2)],
                         height=3.0, units="meters", objects=[])
     assert cp.nearest_seat_for_array(c, "A", 0.0) is None           # room, but no seats
+
+
+# --------------------------------------------------------------------------- #
+# seat_null_azimuths — array-relative bearings of the non-target seats (room-aware nulling)
+# --------------------------------------------------------------------------- #
+def _az(config, array_id, **kw):
+    return [round(a, 3) for a in cp.seat_null_azimuths(config, array_id, **kw)]
+
+
+def test_seat_null_azimuths_array_relative_and_exclusion():
+    # seats: sofa-seat1 at (0,3) → world bearing 0 (north); sofa-seat2 at (3,0) → world bearing 90 (east)
+    c = _config_with_array_and_seats(bearing=0.0)
+    assert _az(c, "A") == [0.0, 90.0]                                  # bearing 0 → array frame == world
+    assert _az(c, "A", exclude_seat_id="sofa-seat1") == [90.0]         # drop the seat being listened to
+    # re-mount the array (bearing 90): each seat rotates into the array frame by −90
+    c2 = _config_with_array_and_seats(bearing=90.0)
+    assert _az(c2, "A") == [270.0, 0.0]                               # north 0−90→270, east 90−90→0
+
+
+def test_seat_null_azimuths_none_cases():
+    assert cp.seat_null_azimuths(_config_with_array_and_seats(bearing=None), "A") == []   # no bearing
+    assert cp.seat_null_azimuths(_config_with_array_and_seats(position=None), "A") == []  # no position
+    assert cp.seat_null_azimuths(_config_with_array_and_seats(), "ZZ") == []              # unknown array
+    c = _config_with_array_and_seats()
+    c = cp.add_device(c, cp.create_codec("C", "Codec", "dante"))
+    assert cp.seat_null_azimuths(c, "C") == []                        # device is not a microphone array

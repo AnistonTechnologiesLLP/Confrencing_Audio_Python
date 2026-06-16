@@ -111,3 +111,25 @@ def test_live_overlay_with_seat_paints(win):
     assert win.canvas.grab().width() > 0          # 2D paints the wedge, ray and seat highlight
     st.view = "3d"
     assert win.canvas.grab().width() > 0          # 3D falls back to the hint, no crash
+
+
+def test_beameng_seat_nulling_pushes_other_seats(win):
+    """The A/B-engine 'Null the other seats' path: with a matched target seat, push the OTHER seats'
+    bearings to the steered back-end via the engine; clear when disabled."""
+    import conf_pipeline_control as cc
+    st = win.state
+    st.set_config(_config_with_array_and_seats(bearing=0.0))
+    panel = win.panels["live"]
+    panel._session_array_id = "A"
+    eng = cc.BeamEngine(device=None, mode="steered", steered_cfg={"mode": "superdirective"})
+    panel._beam_engine = eng
+    panel._live_seat = cp.nearest_seat_for_array(st.config, "A", 0.0)        # listening to sofa-seat1 (north)
+    assert panel._live_seat is not None and panel._live_seat.seat_id == "sofa-seat1"
+    panel.live_beameng_mode.setCurrentIndex(panel.live_beameng_mode.findData("steered"))
+    panel.live_beameng_nullseats.setChecked(True)
+    panel._push_seat_nulls()
+    # the one OTHER seat (sofa-seat2) is pushed to the steered back-end as a null
+    assert eng._steered._explicit_nulls == cp.seat_null_azimuths(st.config, "A", exclude_seat_id="sofa-seat1")
+    panel.live_beameng_nullseats.setChecked(False)                          # disabling clears the pushed nulls
+    panel._push_seat_nulls()
+    assert eng._steered._explicit_nulls == []

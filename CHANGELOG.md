@@ -10,6 +10,15 @@ the TS sibling is at matching v5 parity. The desktop app is presented as
 ## [Unreleased]
 
 ### Added
+- **Room-aware seat-nulling** — while the steered beam follows the talker at the matched seat, null the
+  **other (empty) seats**. New pure `conf_pipeline.seat_null_azimuths(config, array_id, *,
+  exclude_seat_id=None)` returns the non-target seats' **array-relative** azimuths (the inverse of the
+  seat-mapper's room rotation: `azimuth = bearing_to_deg(array, seat) − array.bearingDeg`); new
+  `BeamEngine.set_nulls(bearings)` forwards them to the steered back-end. In the LIVE panel's A/B-engine
+  card a "Null the other (empty) seats" checkbox builds a **superdirective** steered back-end at Connect
+  (so the nulls have an effect — the time-domain modes ignore them) and, each tick, pushes the empty
+  seats (excluding the matched one) through the null-budget composer; the readout shows "nulling N
+  seat(s)". The off-the-shelf-can't-do-this differentiator: the system knows the seat layout. (+5 tests.)
 - **Null-budget arbitration** (`compose_nulls`, `conf_pipeline_control/polaris_beamformer.py`) — a
   single deterministic composer that merges the two competing null sources on the steered beam within
   the M−1 LCMV budget: **detected interferers (auto-null) take priority; speculative empty-seat nulls

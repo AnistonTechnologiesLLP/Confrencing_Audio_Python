@@ -27,7 +27,7 @@ import math
 import queue
 import threading
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, Optional, Tuple
+from typing import Any, Callable, Dict, Optional, Sequence, Tuple
 
 from .audio import controls_available, list_input_devices
 from .polaris_beamformer import (
@@ -188,6 +188,20 @@ class BeamEngine:
         crossfades to it over the next few blocks."""
         with self._lock:
             return self._mode
+
+    def set_nulls(self, bearings: Optional[Sequence[float]] = None) -> None:
+        """Forward explicit interferer / room-aware-seat null bearings (array-relative deg) to the
+        steered back-end (applied on its next DOA tick; frequency-domain steered modes only — the grid
+        back-end has no nulls). ``None``/``[]`` clears them. See
+        :meth:`conf_pipeline_control.polaris_beamformer.PolarisBeamformer.set_nulls`."""
+        self._steered.set_nulls(bearings)
+
+    @property
+    def active_nulls(self) -> list:
+        """The null bearings the steered back-end is **actually** applying this tick (after the M−1
+        budget, the look-proximity filter, and the mode constraint — empty for a time-domain steered
+        beam). For an honest readout, not the raw requested set."""
+        return self._steered.active_nulls
 
     # ---- location ----
     @property

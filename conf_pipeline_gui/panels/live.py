@@ -333,6 +333,14 @@ class LivePanel(PanelBase):
         self.live_beameng_mode.currentIndexChanged.connect(
             lambda *_a: None if self._refreshing else self._on_beameng_mode_changed())
         ef.addRow("Strategy", self.live_beameng_mode)
+        self.live_beameng_nullseats = QCheckBox("Null the other (empty) seats")
+        self.live_beameng_nullseats.setToolTip(
+            "While following the talker (steered), actively null the seats you are NOT listening to "
+            "(the matched seat is kept). Needs the array's room bearing set (Design → array) and a "
+            "superdirective steered beam — which this enables, so tick it before Connect."
+        )
+        self.live_beameng_nullseats.setEnabled(False)        # enabled when the engine is ticked
+        ef.addRow("Seat nulling", self.live_beameng_nullseats)
         self.live_beameng_view = QLabel("Connect with the A/B engine to compare steered vs grid live.")
         self.live_beameng_view.setWordWrap(True)
         self.live_beameng_view.setFont(QFont("Consolas", 9))
@@ -466,6 +474,7 @@ class LivePanel(PanelBase):
         session modes mutually exclusive."""
         on = self.live_beameng.isChecked()
         self.live_beameng_mode.setEnabled(on)
+        self.live_beameng_nullseats.setEnabled(on)
         if on:
             self.live_autosteer.setChecked(False)
             self.live_octovox.setChecked(False)
@@ -891,15 +900,18 @@ class LivePanel(PanelBase):
             return
         rate = self.live_rate.currentData() or 44100
         mask = self._live_active_mask()
-        cfg = {"radius_m": float(self.live_radius.value())}
+        cfg: dict = {"radius_m": float(self.live_radius.value())}
         if any(mask) and not all(mask):
             cfg["active_mask"] = list(mask)          # exclude the dead capsule on both back-ends
+        steered_cfg = dict(cfg)
+        if self.live_beameng_nullseats.isChecked():
+            steered_cfg["mode"] = cc.MODE_SUPERDIRECTIVE   # nulls need a frequency-domain steered beam
         try:
             eng = cc.BeamEngine(
                 device=self.live_device.currentData(),
                 fs=float(rate),
                 mode=self._beameng_mode(),
-                steered_cfg=dict(cfg),
+                steered_cfg=steered_cfg,
                 grid_cfg=dict(cfg),
                 assumed_range_m=2.0,                 # gives steered mode an (x, y) too, for parity
             )
@@ -913,6 +925,7 @@ class LivePanel(PanelBase):
         self.live_connect.setText("Disconnect")
         self.live_mute.setEnabled(False)             # no monitoring path on the engine yet, so
         self.live_gain.setEnabled(False)             # mute/gain are inert — disable to avoid confusion
+        self.live_beameng_nullseats.setEnabled(False)   # the steered beam mode is fixed at Connect
         self.live_status.setText(
             f"A/B engine live · {self._beameng_mode()} · switch strategy from the picker (no monitor)."
         )
@@ -925,6 +938,27 @@ class LivePanel(PanelBase):
             return ""
         return f"   ·   seat {m.seat_id} ({m.separation_deg:.0f}° off)"
 
+    def _push_seat_nulls(self) -> int:
+        """Room-aware seat nulling: while the engine follows the talker (steered) at a matched target
+        seat, push the OTHER seats' bearings to the steered beam as nulls. Returns the count pushed
+        (0 = none / cleared). The beam's null-budget composer handles dedupe + the M−1 budget."""
+        e = self._beam_engine
+        if e is None:
+            return 0
+        az: list = []
+        if (self.live_beameng_nullseats.isChecked() and self._beameng_mode() == "steered"
+                and self._live_seat is not None and self._session_array_id):
+            try:
+                az = cp.seat_null_azimuths(self.state.config, self._session_array_id,
+                                           exclude_seat_id=self._live_seat.seat_id)
+            except Exception:
+                az = []
+        try:
+            e.set_nulls(az or None)
+            return len(e.active_nulls)   # the count ACTUALLY applied (budget/look-filtered; 0 if not freq-domain)
+        except Exception:
+            return 0
+
     def _tick_beameng(self):
         """Update the meter + the location readout while the A/B engine runs."""
         e = self._beam_engine
@@ -936,13 +970,15 @@ class LivePanel(PanelBase):
         if loc.angle_deg is not None:                # room-aware: map the tracked bearing to a seat
             self._live_seat = _dominant_seat(self.state.config, self._session_array_id,
                                              [(loc.angle_deg, 1.0, True)])
+        n_null = self._push_seat_nulls()             # room-aware: null the other seats (if enabled)
         if loc.angle_deg is None and loc.xy is None:
             self.live_beameng_view.setText(f"[{loc.mode}] · listening — no source localized ·")
         else:
             ang = "  -- " if loc.angle_deg is None else f"{loc.angle_deg:5.0f}°"
             xy = "" if loc.xy is None else f"  ({loc.xy[0]:+.2f}, {loc.xy[1]:+.2f}) m"
+            null_s = f"   ·   nulling {n_null} seat(s)" if n_null else ""
             self.live_beameng_view.setText(
-                f"[{loc.mode}] {ang}{xy}  ·  conf {loc.confidence:.0%}{self._seat_suffix()}")
+                f"[{loc.mode}] {ang}{xy}  ·  conf {loc.confidence:.0%}{self._seat_suffix()}{null_s}")
         if e.error:
             self.live_status.setText(f"A/B engine: {e.error[:60]}")
 
@@ -975,6 +1011,7 @@ class LivePanel(PanelBase):
                 self._beameng_loc = None
             self.live_mute.setEnabled(True)
             self.live_gain.setEnabled(True)
+            self.live_beameng_nullseats.setEnabled(self.live_beameng.isChecked())   # re-enable for next Connect
             self.live_beameng_view.setText("Connect with the A/B engine to compare steered vs grid live.")
         if self._autosteer is not None:
             try:

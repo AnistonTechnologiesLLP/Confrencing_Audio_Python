@@ -179,6 +179,18 @@ def test_engine_bandlimit_toggle_overrides_both():
     assert mixed._steered.beam_bandlimit_hz == 6000.0 and mixed._grid.beam_bandlimit_hz == 4000.0
 
 
+def test_set_nulls_forwards_to_the_steered_backend():
+    """The engine forwards room-aware / explicit nulls to the steered back-end (the grid has none).
+    auto_null threads through steered_cfg unchanged (the _clean_cfg blacklist drops only shared keys)."""
+    eng = BeamEngine(device=None, mode="steered", steered_cfg={"mode": "superdirective", "auto_null": True})
+    assert eng._steered.auto_null is True                       # steered_cfg threaded auto_null through
+    eng.set_nulls([90.0, 200.0])
+    assert eng._steered._explicit_nulls == [90.0, 200.0]        # forwarded to the steered back-end
+    assert eng.active_nulls == eng._steered.active_nulls        # applied-null telemetry forwards too
+    eng.set_nulls(None)
+    assert eng._steered._explicit_nulls == []                   # cleared
+
+
 # --------------------------------------------------------------------------- #
 # Normalized location
 # --------------------------------------------------------------------------- #
