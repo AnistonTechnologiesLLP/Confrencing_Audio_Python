@@ -548,34 +548,85 @@ def test_time_domain_modes_ignore_nulls():
 
 
 # --------------------------------------------------------------------------- #
+# Null-budget arbitration: detected interferers win, seats fill the remainder (P2a.1)
+# --------------------------------------------------------------------------- #
+def test_compose_nulls_budget_cap_detected_win_seats_fill():
+    det = [10.0, 40.0, 70.0]
+    seats = [100.0, 130.0, 160.0, 190.0, 220.0, 250.0]
+    final = pb.compose_nulls(det, seats, 0.0, 7)
+    assert len(final) == 7
+    assert all(d in final for d in det)                  # every detected null kept
+    assert sum(1 for s in seats if s in final) == 4      # exactly 4 of 6 seats fill the remainder
+
+
+def test_compose_nulls_detected_never_displaced_by_seats():
+    det = [10.0, 40.0, 70.0, 100.0, 130.0, 160.0, 190.0]   # 7 = the full M−1 budget
+    final = pb.compose_nulls(det, [220.0, 250.0], 0.0, 7)
+    assert final == det                                  # all detected, zero seats, none dropped
+
+
+def test_compose_nulls_drops_nulls_near_the_look_from_both_lists():
+    final = pb.compose_nulls([5.0, 120.0], [3.0, 200.0], 0.0, 7, min_sep_deg=8.0)
+    assert 5.0 not in final and 3.0 not in final         # within 8° of the 0° look → dropped
+    assert final == [120.0, 200.0]                       # budget not consumed by the dropped ones
+
+
+def test_compose_nulls_cross_source_dedupe():
+    final = pb.compose_nulls([120.0], [122.0, 200.0], 0.0, 7, merge_sep_deg=4.0)
+    assert 122.0 not in final                            # ~coincident with the detected 120° → dropped
+    assert final == [120.0, 200.0]                       # one constraint for that null, not two
+
+
+def test_compose_nulls_seat_self_cap_reserves_headroom():
+    final = pb.compose_nulls([120.0], [40.0, 70.0, 100.0, 160.0, 200.0], 0.0, 7, seat_null_max_count=2)
+    assert final[0] == 120.0 and len(final) == 3         # 1 detected + 2 seats (nearest-to-look)
+    assert final[1:] == [40.0, 70.0]
+
+
+def test_compose_nulls_degenerate_paths():
+    assert pb.compose_nulls([], [], 0.0, 7) == []
+    assert pb.compose_nulls([40.0, 120.0], [], 0.0, 7) == [40.0, 120.0]   # seats=[] → #13-only behaviour
+    assert pb.compose_nulls([], [200.0, 40.0], 0.0, 7) == [40.0, 200.0]   # seats ordered nearest-to-look
+
+
+def test_compose_nulls_is_deterministic():
+    det, seats = [10.0, 250.0], [100.0, 40.0, 160.0]
+    assert pb.compose_nulls(det, seats, 0.0, 7) == pb.compose_nulls(det, seats, 0.0, 7)
+
+
+# --------------------------------------------------------------------------- #
 # Auto-null wiring on the steered path (#13-2: detection → null hand-off)
 # --------------------------------------------------------------------------- #
-def test_current_nulls_time_domain_is_noop_freq_domain_flows():
-    """Explicit set_nulls flow into the freq-domain modes only; the time-domain tiers have no null
-    DOF, so _current_nulls is empty and _nulls_engaged is False there."""
+def test_compose_nulls_method_time_domain_empty_freq_domain_composes():
+    """The PolarisBeamformer wrapper: time-domain modes have no null DOF (empty); the freq-domain modes
+    route detected + seat nulls through the compose_nulls arbiter (detected win the budget, the seat
+    null fills after them, and the look's own detected source is dropped near the look)."""
     ds = PolarisBeamformer(device=None, mode="delaysum", auto_null=True)
     ds.set_nulls([90.0, 200.0])
-    assert ds._current_nulls([SimpleNamespace(azimuth_deg=120.0, salience_db=9.0)], 30.0) == []
+    assert ds._compose_nulls([SimpleNamespace(azimuth_deg=120.0, salience_db=9.0)], 30.0) == []
     assert ds._nulls_engaged() is False
-    sd = PolarisBeamformer(device=None, mode="superdirective")
-    sd.set_nulls([90.0, 200.0])
-    assert sd._current_nulls([], 30.0) == [90.0, 200.0]
+    sd = PolarisBeamformer(device=None, mode="superdirective", auto_null=True)
+    sd.set_nulls([300.0])                                      # a seat / manual null
+    dets = [SimpleNamespace(azimuth_deg=30.0, salience_db=20.0),   # the look's source → dropped near-look
+            SimpleNamespace(azimuth_deg=120.0, salience_db=10.0),  # detected interferer (priority)
+            SimpleNamespace(azimuth_deg=210.0, salience_db=6.0)]   # detected interferer (priority)
+    assert sd._compose_nulls(dets, 30.0) == [120.0, 210.0, 300.0]  # detected first, the seat fills after
     assert sd._nulls_engaged() is True
-    sd.set_nulls(None)                                         # clear
-    assert sd._current_nulls([], 30.0) == [] and sd._nulls_engaged() is False
+    sd.auto_null = False
+    sd.set_nulls(None)
+    assert sd._compose_nulls(dets, 30.0) == [] and sd._nulls_engaged() is False
 
 
-def test_current_nulls_auto_null_nulls_non_look_detections():
-    """auto_null adds every detected source EXCEPT the one being looked at (within min_sep/2)."""
-    bf = PolarisBeamformer(device=None, mode="superdirective", auto_null=True)
-    dets = [SimpleNamespace(azimuth_deg=30.0, salience_db=20.0),   # the look's own source → kept
-            SimpleNamespace(azimuth_deg=35.0, salience_db=8.0),    # within 20° of look → kept
-            SimpleNamespace(azimuth_deg=120.0, salience_db=10.0),  # interferer → nulled
-            SimpleNamespace(azimuth_deg=210.0, salience_db=6.0)]   # interferer → nulled
-    nulls = bf._current_nulls(dets, 30.0)
-    assert nulls == [120.0, 210.0]
-    bf.set_nulls([300.0])                                      # explicit nulls union with the auto ones
-    assert bf._current_nulls(dets, 30.0) == [300.0, 120.0, 210.0]
+def test_compose_nulls_excludes_the_drifted_tracked_talker():
+    """Regression: the tracked talker's raw detection can drift up to switch_margin (20°) from the
+    COMMITTED look before the tracker re-steers — it must NOT be nulled. Only sources past the switch
+    margin are interferers (a real interferer is ≥ min_separation_deg=40 away, so it survives)."""
+    bf = PolarisBeamformer(device=None, mode="superdirective", auto_null=True)   # default switch_margin 20
+    dets = [SimpleNamespace(azimuth_deg=15.0, salience_db=20.0),    # tracked talker drifted 15° from look 0
+            SimpleNamespace(azimuth_deg=135.0, salience_db=10.0)]   # a real interferer
+    assert bf._compose_nulls(dets, 0.0) == [135.0]                  # talker (15°) excluded, interferer nulled
+    # the switch margin (not the small conditioning margin) is what bounds the talker exclusion:
+    assert pb._az_sep(15.0, 0.0) < bf._switch_margin_deg and pb._az_sep(135.0, 0.0) >= bf._switch_margin_deg
 
 
 def test_detect_dominant_max_talkers_scales_with_auto_null(monkeypatch):

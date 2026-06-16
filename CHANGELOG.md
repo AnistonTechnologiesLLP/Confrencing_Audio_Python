@@ -9,6 +9,18 @@ the TS sibling is at matching v5 parity. The desktop app is presented as
 
 ## [Unreleased]
 
+### Added
+- **Null-budget arbitration** (`compose_nulls`, `conf_pipeline_control/polaris_beamformer.py`) — a
+  single deterministic composer that merges the two competing null sources on the steered beam within
+  the M−1 LCMV budget: **detected interferers (auto-null) take priority; speculative empty-seat nulls
+  fill only what remains** ("adaptive evidence beats static geometry"). It drops nulls near the look
+  from both lists before budgeting, de-dupes across sources, orders seats nearest-to-look, and accepts
+  a `seat_null_max_count` self-cap to reserve headroom for live talkers. `PolarisBeamformer._doa_tick`
+  /`set_steering` now route both sources through it (replacing the old order-based merge), with
+  `null_min_sep_deg`/`null_merge_sep_deg`/`seat_null_max_count` ctor params. The talker-exclusion
+  margin is tied to the tracker's `switch_margin_deg`, so a tracked talker that drifts up to the switch
+  margin from the committed look is never self-nulled. (+8 hardware-free tests.)
+
 ### Fixed
 - **Calibrate-front now applies rear/left bearings instead of clamping.** The LIVE panel's
   "Calibrate front" measured the talker's bearing but fed the raw 0–360° DOA into the −180…180°

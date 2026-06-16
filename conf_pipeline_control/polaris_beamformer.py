@@ -475,6 +475,66 @@ def _acceptable_nulls(nulls: Any, look_deg: float, max_count: int) -> list:
     return out
 
 
+# Null-budget arbitration defaults. The look-free margin is conditioning-driven, not cosmetic: a few
+# degrees is not enough on a 40 mm planar ring (front/back-ambiguous, coarse), so keep a generous
+# margin around the look; the merge width is ~the beam's null width (coincident constraints are one null).
+DEFAULT_NULL_MIN_SEP_DEG = 8.0
+DEFAULT_NULL_MERGE_SEP_DEG = 6.0   # >= the beam's _NULL_LOOK_GUARD_DEG so the composed set survives it intact
+
+
+def _near_any(x: float, items: Sequence[float], sep: float) -> bool:
+    return any(_az_sep(x, q) < sep for q in items)
+
+
+def _dedupe_az(items: Sequence[float], sep: float) -> list:
+    """Drop near-duplicate bearings (within ``sep``), keeping the first occurrence (input order)."""
+    out: list = []
+    for x in items:
+        if not _near_any(x, out, sep):
+            out.append(x)
+    return out
+
+
+def compose_nulls(
+    detected: Sequence[float],
+    seats: Sequence[float],
+    target_az: float,
+    budget: int,
+    *,
+    min_sep_deg: float = DEFAULT_NULL_MIN_SEP_DEG,
+    merge_sep_deg: float = DEFAULT_NULL_MERGE_SEP_DEG,
+    seat_null_max_count: Optional[int] = None,
+) -> list:
+    """Merge two competing null sources into one budgeted, deterministic null list for the steered beam.
+
+    ``detected`` are interferer bearings the DOA layer is seeing *right now* (#13 auto-null); ``seats``
+    are *speculative* empty-seat bearings (room-aware). **Adaptive evidence beats static geometry:**
+    detected nulls fill the ``budget`` (= M−1) first, seat nulls fill only what remains — a measured
+    interferer is never crowded out by a speculative seat null. All bearings are array-relative
+    azimuths (deg). The single owner of the final null set: both callers feed lists in here, neither
+    pushes to the beam directly. Steps: (1) drop nulls within ``min_sep_deg`` of the look from BOTH
+    lists *before* budgeting (so a near-look null can't consume budget — and would otherwise make the
+    LCMV constraint matrix singular); (2) drop a seat within ``merge_sep_deg`` of a detected null
+    (same null, one constraint); (3) fill detected (capped at budget), then seats — ordered
+    nearest-to-look first (an empty seat acoustically close to the talker leaks most), optionally
+    self-capped by ``seat_null_max_count`` to reserve headroom for live talkers."""
+    if budget <= 0:
+        return []
+    det = _dedupe_az([float(d) for d in detected if _az_sep(float(d), target_az) >= min_sep_deg], merge_sep_deg)
+    seat = [float(s) for s in seats if _az_sep(float(s), target_az) >= min_sep_deg]
+    seat = [s for s in seat if not _near_any(s, det, merge_sep_deg)]    # cross-source dedupe
+    seat = _dedupe_az(seat, merge_sep_deg)
+    seat.sort(key=lambda s: _az_sep(s, target_az))                     # deterministic: nearest-to-look first
+    if seat_null_max_count is not None:
+        seat = seat[:max(0, int(seat_null_max_count))]
+    final = list(det[:budget])                                        # detected win the budget
+    for s in seat:
+        if len(final) >= budget:
+            break
+        final.append(s)
+    return final
+
+
 class _FreqDomainBeam(BeamStrategy):
     """Frequency-domain **superdirective** (diffuse-noise MVDR) beamformer.
 
@@ -713,6 +773,9 @@ class PolarisBeamformer(MicController):
         steer_to_doa: bool = True,
         auto_null: bool = False,                   # null detected interferers (freq-domain modes only)
         auto_null_max: int = 2,                    # max auto-derived interferer nulls per tick
+        null_min_sep_deg: float = DEFAULT_NULL_MIN_SEP_DEG,      # arbitration: look-free margin
+        null_merge_sep_deg: float = DEFAULT_NULL_MERGE_SEP_DEG,  # arbitration: cross-source dedupe width
+        seat_null_max_count: Optional[int] = None,              # cap seat nulls (reserve detected headroom)
         fixed_azimuth_deg: Optional[float] = None,
         beam_bandlimit_hz: Optional[float] = DEFAULT_BEAM_BANDLIMIT_HZ,   # None/0 disables
         output_callback: Optional[Callable[[Any], None]] = None,
@@ -761,7 +824,11 @@ class PolarisBeamformer(MicController):
         # to the freq-domain beam as LCMV nulls. No-op for the time-domain modes (no null DOF).
         self.auto_null = bool(auto_null)
         self.auto_null_max = max(0, int(auto_null_max))
-        self._explicit_nulls: list = []      # caller-supplied bearings (set_nulls); DOA thread reads
+        self.null_min_sep_deg = float(null_min_sep_deg)
+        self.null_merge_sep_deg = float(null_merge_sep_deg)
+        self.seat_null_max_count = seat_null_max_count
+        self._switch_margin_deg = float(switch_margin_deg)   # tracker hysteresis; bounds talker-exclusion
+        self._explicit_nulls: list = []      # caller-supplied seat/manual bearings (set_nulls); DOA reads
         self._active_nulls: list = []        # bearings actually nulled this tick (telemetry)
         self.beam_bandlimit_hz = beam_bandlimit_hz
         self.output_device = output_device
@@ -923,7 +990,7 @@ class PolarisBeamformer(MicController):
             self.steer_to_doa = True
             return
         self.steer_to_doa = False
-        nulls = self._current_nulls([], float(azimuth_deg))            # caller-supplied nulls, if any
+        nulls = self._compose_nulls([], float(azimuth_deg))            # caller-supplied seat/manual nulls
         plan = self._beam.plan_look(float(azimuth_deg), self.off_nadir_deg, nulls)   # off the lock
         with self._beam_lock:
             self._beam.commit_look(plan)
@@ -950,17 +1017,29 @@ class PolarisBeamformer(MicController):
         """True when nulls can change tick-to-tick, so the look must be re-planned every tick."""
         return self._freq_domain() and (self.auto_null or bool(self._explicit_nulls))
 
-    def _current_nulls(self, dets: list, look_az: float) -> list:
-        """Interferer bearings to null this tick (frequency-domain modes only, else empty): the
-        caller-supplied ``set_nulls`` bearings + — when ``auto_null`` — every detected source that is
-        not the one being looked at (the beam additionally drops any null within 5° of the look)."""
-        if not self._freq_domain():
+    def _compose_nulls(self, dets: list, look_az: Optional[float]) -> list:
+        """Final null set for this look (frequency-domain modes only, else empty). Routes BOTH null
+        sources through the single :func:`compose_nulls` arbiter: detected interferers (``auto_null``)
+        take priority for the M−1 budget; the caller-supplied seat/manual ``set_nulls`` bearings fill
+        what remains. All dedupe / budget / ordering happens once, in the composer.
+
+        Detected sources are pre-filtered to **exclude the tracked talker**: its raw SRP detection can
+        sit up to ``switch_margin_deg`` from the COMMITTED look (the tracker holds the look until a move
+        exceeds that margin), so drop detections within ``max(null_min_sep_deg, switch_margin)`` of the
+        look — otherwise the beam would null the very source it is following. A genuine interferer is
+        ``>= min_separation_deg`` away, so it survives. (Seats use the smaller ``null_min_sep_deg``
+        conditioning margin in the composer; a non-target seat near the look is not the talker.)"""
+        if not self._freq_domain() or look_az is None or self.geometry is None:
             return []
-        nulls = list(self._explicit_nulls)
-        if self.auto_null and dets:
-            keep = max(self.min_separation_deg / 2.0, _NULL_LOOK_GUARD_DEG)   # the look's own source
-            nulls.extend(d.azimuth_deg for d in dets if _az_sep(d.azimuth_deg, look_az) >= keep)
-        return nulls
+        detected: list = []
+        if self.auto_null:
+            talker_guard = max(self.null_min_sep_deg, self._switch_margin_deg)
+            detected = [d.azimuth_deg for d in dets if _az_sep(d.azimuth_deg, look_az) >= talker_guard]
+        return compose_nulls(
+            detected, list(self._explicit_nulls), look_az, self.geometry.n_active - 1,
+            min_sep_deg=self.null_min_sep_deg, merge_sep_deg=self.null_merge_sep_deg,
+            seat_null_max_count=self.seat_null_max_count,
+        )
 
     def _publish_active_nulls(self, nulls: list, look_az: Optional[float]) -> None:
         """Record the nulls the beam ACTUALLY applies (telemetry). Runs the *same* `_acceptable_nulls`
@@ -1020,7 +1099,7 @@ class PolarisBeamformer(MicController):
         # committed look angle is unchanged. The heavy solve stays off the audio lock.
         target_az = reading.azimuth_deg if (self.steer_to_doa and reading.azimuth_deg is not None) \
             else self._steered_az
-        nulls = self._current_nulls(dets, target_az) if target_az is not None else []
+        nulls = self._compose_nulls(dets, target_az) if target_az is not None else []
         if target_az is not None and (
                 target_az != self._steered_az or self.mode == MODE_MVDR or self._nulls_engaged()):
             plan = self._beam.plan_look(target_az, self.off_nadir_deg, nulls)   # heavy work off the lock
