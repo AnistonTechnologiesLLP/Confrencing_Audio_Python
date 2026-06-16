@@ -30,6 +30,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+import conf_pipeline as cp
 import conf_pipeline_control as cc
 
 from .common import (
@@ -41,6 +42,32 @@ from .common import (
     _CalibWorker,
     _ProbeWorker,
 )
+
+
+def _dominant_seat(config, array_id, detections):
+    """Map the dominant live detection to a room seat (or ``None``).
+
+    ``detections`` is an iterable of ``(azimuth_deg, salience_db, in_sector)`` in
+    the array's own frame — the DOA frame ``current_doa_deg`` reports, exactly what
+    :func:`conf_pipeline.nearest_seat_for_array` consumes. Prefers the loudest
+    *in-sector* detection (the talker actually being followed); falls back to the
+    loudest detection overall if none are flagged in-sector. Returns ``None`` when
+    there are no detections, no session array, or the array has no room pose
+    (``position`` + ``bearing_deg``) / no seat is close enough.
+    """
+    if array_id is None:
+        return None
+    pool = [d for d in detections if d[2]] or list(detections)
+    loudest = None
+    for az, sal, _in in pool:
+        if az is not None and (loudest is None or sal > loudest[1]):
+            loudest = (az, sal)
+    if loudest is None:
+        return None
+    try:
+        return cp.nearest_seat_for_array(config, array_id, loudest[0])
+    except Exception:
+        return None
 
 
 class LivePanel(PanelBase):
@@ -61,6 +88,7 @@ class LivePanel(PanelBase):
         self._beam_engine = None         # BeamEngine while running the steered/grid A/B
         self._beameng_loc = None         # last BeamEngine current_location (for the overlay tick)
         self._session_array_id = None    # the array the running session was started with
+        self._live_seat = None           # SeatMatch for the dominant talker (room-aware readout)
 
         root = QVBoxLayout(self)
         root.setContentsMargins(10, 8, 10, 8)
@@ -884,6 +912,13 @@ class LivePanel(PanelBase):
         )
         self._notify_session_changed()
 
+    def _seat_suffix(self):
+        """Trailing '· seat <id> (<sep>° off)' for the readouts, or '' if unmapped."""
+        m = self._live_seat
+        if m is None:
+            return ""
+        return f"   ·   seat {m.seat_id} ({m.separation_deg:.0f}° off)"
+
     def _tick_beameng(self):
         """Update the meter + the location readout while the A/B engine runs."""
         e = self._beam_engine
@@ -892,12 +927,16 @@ class LivePanel(PanelBase):
         self.live_meter.setValue(pct)
         loc = e.current_location
         self._beameng_loc = loc                      # cached for _publish_overlay
+        if loc.angle_deg is not None:                # room-aware: map the tracked bearing to a seat
+            self._live_seat = _dominant_seat(self.state.config, self._session_array_id,
+                                             [(loc.angle_deg, 1.0, True)])
         if loc.angle_deg is None and loc.xy is None:
             self.live_beameng_view.setText(f"[{loc.mode}] · listening — no source localized ·")
         else:
             ang = "  -- " if loc.angle_deg is None else f"{loc.angle_deg:5.0f}°"
             xy = "" if loc.xy is None else f"  ({loc.xy[0]:+.2f}, {loc.xy[1]:+.2f}) m"
-            self.live_beameng_view.setText(f"[{loc.mode}] {ang}{xy}  ·  conf {loc.confidence:.0%}")
+            self.live_beameng_view.setText(
+                f"[{loc.mode}] {ang}{xy}  ·  conf {loc.confidence:.0%}{self._seat_suffix()}")
         if e.error:
             self.live_status.setText(f"A/B engine: {e.error[:60]}")
 
@@ -908,12 +947,16 @@ class LivePanel(PanelBase):
         pct = 0 if lvl <= 1e-6 else int(max(0.0, min(100.0, (20.0 * math.log10(lvl) + 60.0) / 60.0 * 100.0)))
         self.live_meter.setValue(pct)
         dets = a.detections()
+        self._live_seat = _dominant_seat(
+            self.state.config, self._session_array_id,
+            [(d.azimuth_deg, d.salience_db, d.in_sector) for d in dets],
+        )
         if not dets:
             self.live_autosteer_view.setText("· listening — no talker detected ·")
         else:
             parts = [f"{'IN ' if d.in_sector else 'out'} {d.azimuth_deg:.0f}° ({d.salience_db:.0f}dB)" for d in dets]
             n_in = sum(1 for d in dets if d.in_sector)
-            self.live_autosteer_view.setText(f"{n_in} in-area  |  " + "   ".join(parts))
+            self.live_autosteer_view.setText(f"{n_in} in-area  |  " + "   ".join(parts) + self._seat_suffix())
         if a.error:
             self.live_status.setText(f"Auto-steer: {a.error[:60]}")
 
@@ -945,6 +988,7 @@ class LivePanel(PanelBase):
             finally:
                 self._live_ctl = None
         self._session_array_id = None
+        self._live_seat = None
         self.live_connect.setText("Connect")
         self.live_meter.setValue(0)
         self.live_status.setText("Disconnected.")
@@ -991,11 +1035,20 @@ class LivePanel(PanelBase):
             loc = self._beameng_loc
             if loc.angle_deg is not None:
                 detections = [(loc.angle_deg, max(0.0, loc.confidence) * 12.0, True)]
+        m = self._live_seat                          # resolved by the DOA ticks above
+        seat = None if m is None else {"id": m.seat_id, "x": m.anchor.position.x, "y": m.anchor.position.y}
+        # the array's room mounting heading: rotates the whole overlay (rays + sector) out of
+        # the array's own frame into room coordinates, so the DOA rays agree with the seat ring
+        # (and the seat dots on the map). 0 when unset → the overlay renders exactly as before.
+        arr = next((d for d in self.state.config.devices if d.id == self._session_array_id), None)
+        bearing = getattr(arr, "bearing_deg", None) or 0.0
         self.state.set_live_overlay({
             # pinned at connect — the combo may show another room's arrays
             "array_id": self._session_array_id,
             "sector": sector,
             "detections": detections,
+            "seat": seat,
+            "bearing": bearing,
             "level": self.live_meter.value() / 100.0,
             "connected": True,
         })
@@ -1004,6 +1057,7 @@ class LivePanel(PanelBase):
         """Update the level meter on a dB scale (−60 dB → 0 %, 0 dB → 100 %), so
         normal speech picked up by a ceiling array is clearly visible rather than
         a sliver on a linear scale."""
+        self._live_seat = None               # only the DOA paths below re-resolve a seat
         if self._beam_engine is not None:
             self._tick_beameng()
             self._publish_overlay()

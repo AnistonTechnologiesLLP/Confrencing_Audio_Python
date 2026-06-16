@@ -10,6 +10,15 @@ the TS sibling is at matching v5 parity. The desktop app is presented as
 ## [Unreleased]
 
 ### Added
+- **Live room-aware seat readout** (LIVE panel + room-map canvas) — while a DOA session runs
+  (auto-steer or the POLARIS A/B engine), the dominant detected talker is mapped through
+  `nearest_seat_for_array` to the **nearest room seat** and surfaced two ways: a `· seat <id>
+  (<n>° off)` suffix on the panel readout, and a highlighted ring + label on the matched seat on
+  the room map. Pure GUI-side wiring — the control layer (`conf_pipeline_control`) is untouched, the
+  seat is resolved from the array's room pose (`position` + v5 `bearingDeg`), and the highlight is
+  drawn at the seat's **true world position** (independent of the auto-steer front-offset ray frame).
+  Prefers the loudest in-sector talker (the one actually followed), falling back to the loudest
+  overall. (`conf_pipeline_gui/panels/live.py`, `canvas.py`; +6 headless tests.)
 - **Room-aware seat mapping** (`conf_pipeline/seat_mapper.py`) — a pure-stdlib geometry layer
   that turns a detected **array-relative azimuth** into the **nearest room seat**, building on the
   v5 array `bearingDeg`. `nearest_seat(...)` rotates the azimuth into room coordinates by the

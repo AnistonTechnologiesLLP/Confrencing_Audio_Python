@@ -973,9 +973,13 @@ class Canvas(QWidget):
         p.setPen(Qt.NoPen)
         p.setBrush(_qc("#ff6b81", 26 + int(lvl * 60)))
         p.drawEllipse(c, 16 + lvl * 26, 16 + lvl * 26)
-        # steering sector (auto-steer): drawn relative to the room's +Y "front" —
-        # detections are shown front-relative (bearing − front_offset), matching
-        # the sector-gate convention in conf_pipeline_control.doa
+        # The whole overlay is rotated out of the array's own frame into room coordinates by the
+        # array's mounting `bearing` (0 when unset → unchanged). This keeps the sector wedge and the
+        # DOA rays mutually consistent (both rotated alike) AND makes them agree with the seat ring /
+        # seat dots, which live in true room coordinates.
+        bearing = float(ov.get("bearing") or 0.0)
+        # steering sector (auto-steer): centre ± half-width, in the sector-gate convention of
+        # conf_pipeline_control.doa, lifted into room coordinates by the array bearing.
         sector = ov.get("sector")
         front = sector[2] if sector else 0.0
         if sector:
@@ -985,7 +989,7 @@ class Canvas(QWidget):
             steps = 24
             for i in range(steps + 1):
                 b = center_deg - half_deg + (2 * half_deg) * i / steps
-                dx, dy = self._bearing_dir(b)
+                dx, dy = self._bearing_dir(b + bearing)
                 path.lineTo(self.w2s(Point2D(pos.x + dx * radius_m, pos.y + dy * radius_m), v))
             path.closeSubpath()
             p.setBrush(_qc("#6d8bff", 34))
@@ -995,7 +999,7 @@ class Canvas(QWidget):
             p.drawPath(path)
         # DOA rays: green = in-sector (followed), red = outside (nulled)
         for az, sal, in_sector in ov.get("detections") or []:
-            dx, dy = self._bearing_dir(az - front)
+            dx, dy = self._bearing_dir(az - front + bearing)
             ray_m = 3.5
             tip = self.w2s(Point2D(pos.x + dx * ray_m, pos.y + dy * ray_m), v)
             color = "#3ddc97" if in_sector else "#ff6b81"
@@ -1003,6 +1007,15 @@ class Canvas(QWidget):
             p.setPen(QPen(_qc(color, alpha), 2.4))
             p.drawLine(c, tip)
             self._label(p, tip.x() + 4, tip.y(), f"{az:.0f}° · {sal:.0f} dB", color)
+        # room-aware: ring + label the seat the dominant talker maps to, at the seat's true world
+        # position. With the rays now in room coordinates too, ray and ring point the same way.
+        seat = ov.get("seat")
+        if seat:
+            sp = self.w2s(Point2D(seat["x"], seat["y"]), v)
+            p.setBrush(_qc(FURNITURE_SEAT_COLOR, 70))
+            p.setPen(QPen(_qc(FURNITURE_SEAT_COLOR, 235), 2.2))
+            p.drawEllipse(sp, 9, 9)
+            self._label(p, sp.x() + 11, sp.y() + 4, f"▶ {seat['id']}", FURNITURE_SEAT_COLOR)
 
     def _arrowhead(self, p, A, B, color):
         ang = math.atan2(B.y() - A.y(), B.x() - A.x())

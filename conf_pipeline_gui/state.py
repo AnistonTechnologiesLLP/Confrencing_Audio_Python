@@ -56,8 +56,10 @@ class AppState(QObject):
         # ---- live-session overlay (transient view state; never in history) ----
         # dict published by the Live panel while a session runs:
         # {"array_id", "sector": (center, half_width, front_offset) | None,
-        #  "detections": [(azimuth_deg, salience_db, in_sector)], "level": 0..1,
-        #  "connected": bool}  — or None when idle.
+        #  "detections": [(azimuth_deg, salience_db, in_sector)],
+        #  "seat": {"id", "x", "y"} | None,   # room seat the dominant talker maps to
+        #  "bearing": deg,                    # array mounting heading; rotates rays+sector to room
+        #  "level": 0..1, "connected": bool}  — or None when idle.
         self.live_overlay = None
 
     # ---- mode ----
