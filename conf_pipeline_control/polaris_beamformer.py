@@ -277,17 +277,23 @@ class BeamStrategy:
     (construction, tests, ``fixed_azimuth_deg``) where there is no concurrent ``process``.
     """
 
-    def plan_look(self, azimuth_deg: float, off_nadir_deg: float = DEFAULT_OFF_NADIR_DEG) -> Any:
-        """Compute a steering plan (pure; reads only immutable state). Safe to call un-locked."""
+    def plan_look(self, azimuth_deg: float, off_nadir_deg: float = DEFAULT_OFF_NADIR_DEG,
+                  nulls: Any = ()) -> Any:
+        """Compute a steering plan (pure; reads only immutable state). Safe to call un-locked.
+
+        ``nulls`` is an optional iterable of interferer azimuths (deg) to place spatial nulls on.
+        Only the frequency-domain tiers honour it (LCMV constraints); the time-domain delay-sum tiers
+        have no null degrees of freedom and ignore it."""
         raise NotImplementedError
 
     def commit_look(self, plan: Any) -> None:
         """Install a plan from :meth:`plan_look` (cheap; serialise against :meth:`process`)."""
         raise NotImplementedError
 
-    def set_look(self, azimuth_deg: float, off_nadir_deg: float = DEFAULT_OFF_NADIR_DEG) -> None:
+    def set_look(self, azimuth_deg: float, off_nadir_deg: float = DEFAULT_OFF_NADIR_DEG,
+                 nulls: Any = ()) -> None:
         """Plan + commit in one call — for synchronous callers with no concurrent :meth:`process`."""
-        self.commit_look(self.plan_look(azimuth_deg, off_nadir_deg))
+        self.commit_look(self.plan_look(azimuth_deg, off_nadir_deg, nulls))
 
     def process(self, block: Any) -> Any:
         raise NotImplementedError
@@ -316,8 +322,9 @@ class _DelaySumBeam(BeamStrategy):
         self._hist: Any = None
         self.set_look(0.0)
 
-    def plan_look(self, azimuth_deg: float, off_nadir_deg: float = DEFAULT_OFF_NADIR_DEG) -> Any:
-        return _steer_delays(self._geom, azimuth_deg, off_nadir_deg, self._sr, self._c)
+    def plan_look(self, azimuth_deg: float, off_nadir_deg: float = DEFAULT_OFF_NADIR_DEG,
+                  nulls: Any = ()) -> Any:
+        return _steer_delays(self._geom, azimuth_deg, off_nadir_deg, self._sr, self._c)  # nulls: no DOF
 
     def commit_look(self, plan: Any) -> None:
         self._idx, self._delays, self._maxd = plan
@@ -392,7 +399,8 @@ class _FracDelaySumBeam(BeamStrategy):
         self._frac_tail: Any = None     # FIR continuity tail (L-1, M)
         self.set_look(0.0)
 
-    def plan_look(self, azimuth_deg: float, off_nadir_deg: float = DEFAULT_OFF_NADIR_DEG) -> Any:
+    def plan_look(self, azimuth_deg: float, off_nadir_deg: float = DEFAULT_OFF_NADIR_DEG,
+                  nulls: Any = ()) -> Any:                                    # nulls: no DOF in delay-sum
         import numpy as np
 
         idx, real = _steer_real_delays(self._geom, azimuth_deg, off_nadir_deg, self._sr, self._c)
@@ -434,6 +442,37 @@ class _FracDelaySumBeam(BeamStrategy):
         if D:
             self._hist = ext[-D:, :].copy()
         return out.astype(np.float32)
+
+
+# Nulls within this of the look (or of an already-accepted null) are dropped: an LCMV constraint
+# coincident with the look would null the target, and near-duplicate constraints make the (small)
+# CᴴR⁻¹C system singular. The 40 mm array can't resolve finer than this anyway.
+_NULL_LOOK_GUARD_DEG = 5.0
+
+
+def _az_sep(a: float, b: float) -> float:
+    """Wrap-aware absolute azimuth separation in [0, 180] degrees."""
+    return abs((a - b + 180.0) % 360.0 - 180.0)
+
+
+def _acceptable_nulls(nulls: Any, look_deg: float, max_count: int) -> list:
+    """Filter requested null azimuths for a well-posed LCMV solve: drop any within
+    ``_NULL_LOOK_GUARD_DEG`` of the look (would null the target) or of an already-accepted null
+    (near-duplicate constraint), then cap to the ``M−1`` null budget. Returns a list of azimuths (deg),
+    in request order."""
+    if max_count <= 0:
+        return []
+    out: list = []
+    for phi in nulls:
+        phi = float(phi)
+        if _az_sep(phi, look_deg) < _NULL_LOOK_GUARD_DEG:
+            continue
+        if any(_az_sep(phi, q) < _NULL_LOOK_GUARD_DEG for q in out):
+            continue
+        out.append(phi)
+        if len(out) >= max_count:
+            break
+    return out
 
 
 class _FreqDomainBeam(BeamStrategy):
@@ -497,32 +536,42 @@ class _FreqDomainBeam(BeamStrategy):
     def reset(self) -> None:
         self._init_state()             # drop streaming history; weights (_W) stay valid
 
-    def plan_look(self, azimuth_deg: float, off_nadir_deg: float = DEFAULT_OFF_NADIR_DEG) -> Any:
-        return self._compute_weights(azimuth_deg, off_nadir_deg)     # heavy solve — call OFF the audio lock
+    def plan_look(self, azimuth_deg: float, off_nadir_deg: float = DEFAULT_OFF_NADIR_DEG,
+                  nulls: Any = ()) -> Any:
+        return self._compute_weights(azimuth_deg, off_nadir_deg, nulls)   # heavy solve — call OFF the lock
 
     def commit_look(self, plan: Any) -> None:
         self._W = plan                                              # atomic publish (single assignment)
 
-    def _compute_weights(self, azimuth_deg: float, off_nadir_deg: float) -> Any:
+    def _compute_weights(self, azimuth_deg: float, off_nadir_deg: float, nulls: Any = ()) -> Any:
         """Per-bin MVDR weights ``w = R⁻¹a / (aᴴR⁻¹a)``, vectorised over rfft bins (multi-ms; off-lock).
 
         ``R`` is the analytic diffuse-field coherence ``Γ(f) + loading·I`` (superdirective) for every
         bin. In ``mode="mvdr"`` the injected ``noise_cov_provider`` supplies a *measured* noise
         covariance for the DOA band bins, which **overlays** the analytic ``R`` there — so the beam
         nulls the actual interferers while bins outside the band (and the whole cold-start period,
-        provider → ``None``) gracefully fall back to fixed superdirective."""
+        provider → ``None``) gracefully fall back to fixed superdirective.
+
+        ``nulls`` (azimuths, deg) adds **explicit** spatial nulls on known interferers: the per-bin
+        solve becomes LCMV (`w = R⁻¹C (CᴴR⁻¹C)⁻¹ g`, `C = [a(look), a(φ₁)…]`, `g = [1,0,…]`) — unit
+        gain at the look, exact zeros at each φ. With no nulls it is the plain MVDR above (the K=0
+        special case — bit-identical). The nulls compose with the measured-R overlay, so ``mode="mvdr"``
+        can null both the measured interferer field *and* the supplied bearings at once."""
         import numpy as np
 
         geom = self._geom
         idx = list(geom.active_indices())
         na = len(idx)
         elems = np.array([geom.elements[i] for i in idx], dtype=float)        # (na, 3)
-        u = np.array(_unit_from_az_offnadir(azimuth_deg, off_nadir_deg), dtype=float)
-        proj = elems @ u                                                      # (na,) along-look projection
         diff = elems[:, None, :] - elems[None, :, :]
         d = np.sqrt(np.sum(diff * diff, axis=2))                             # (na, na) pairwise distances
         k = 2.0 * np.pi * self._freqs / self._c                             # (nb,) wavenumbers
-        a = np.exp(1j * k[:, None] * proj[None, :])                          # (nb, na) manifold a(f) = exp(+jk·proj)
+
+        def manifold(az: float) -> Any:
+            u = np.array(_unit_from_az_offnadir(az, off_nadir_deg), dtype=float)
+            return np.exp(1j * k[:, None] * (elems @ u)[None, :])            # (nb, na) a(f) = exp(+jk·proj)
+
+        a = manifold(azimuth_deg)                                            # (nb, na) look manifold
         arg = k[:, None, None] * d[None, :, :]                              # (nb, na, na)
         gamma = np.ones_like(arg)
         nz = arg != 0.0
@@ -537,9 +586,25 @@ class _FreqDomainBeam(BeamStrategy):
             rn = rn + (self._loading * tr)[:, None, None] * np.eye(na)[None, :, :]   # trace-relative loading
             R[np.asarray(band_idx)] = rn                                    # measured R where we have it
 
-        rinv_a = np.linalg.solve(R, a[:, :, None])[:, :, 0]                 # (nb, na) = R⁻¹a
-        denom = np.sum(np.conj(a) * rinv_a, axis=1)                         # (nb,) = aᴴR⁻¹a
-        w_active = rinv_a / denom[:, None]                                  # (nb, na) MVDR weights
+        phis = _acceptable_nulls(nulls, azimuth_deg, na - 1)
+        if not phis:                                                        # K=0: plain MVDR (unchanged path)
+            rinv_a = np.linalg.solve(R, a[:, :, None])[:, :, 0]            # (nb, na) = R⁻¹a
+            denom = np.sum(np.conj(a) * rinv_a, axis=1)                     # (nb,) = aᴴR⁻¹a
+            w_active = rinv_a / denom[:, None]                             # (nb, na) MVDR weights
+        else:                                                              # K>0: LCMV — unit gain at look, null φ
+            C = np.stack([a] + [manifold(p) for p in phis], axis=2)        # (nb, na, 1+K) constraints
+            g = np.zeros((C.shape[0], C.shape[2]), dtype=complex)
+            g[:, 0] = 1.0                                                  # gain 1 at look, 0 at each null
+            rinv_C = np.linalg.solve(R, C)                                # (nb, na, 1+K) = R⁻¹C
+            small = np.conj(np.transpose(C, (0, 2, 1))) @ rinv_C          # (nb, 1+K, 1+K) = CᴴR⁻¹C
+            # At DC / very low frequency the manifolds collapse (k→0 ⇒ a(any dir)→all-ones), so C goes
+            # rank-1 and CᴴR⁻¹C is singular — you cannot null where the array has no phase difference.
+            # A tiny trace-relative ridge (diagonally-loaded LCMV) regularises those bins to finite
+            # weights; it is negligible in-band, so the null stays exact where it is physically possible.
+            ridge = 1e-10 * np.maximum(np.einsum("bii->b", small).real, 1e-30)   # (nb,)
+            small = small + ridge[:, None, None] * np.eye(C.shape[2])[None, :, :]
+            y = np.linalg.solve(small, g[:, :, None])[:, :, 0]            # (nb, 1+K); column-RHS form
+            w_active = np.einsum("bak,bk->ba", rinv_C, y)                 # (nb, na) LCMV weights
         W = np.zeros((len(self._freqs), geom.n_channels), dtype=complex)
         W[:, idx] = w_active                                               # scatter; inactive capsules stay 0
         return W

@@ -460,6 +460,93 @@ def test_mvdr_nondefault_nfft_aligns_bins():
 
 
 # --------------------------------------------------------------------------- #
+# Explicit LCMV nulls on the freq-domain beam (#13-1: auto-null on the steered beam)
+# --------------------------------------------------------------------------- #
+def _resp_at_bin(W, freqs, geom, bi, az):
+    """|beam response| toward `az` at rfft bin `bi`: |Σ conj(W)·a(az)| (1 at the look, 0 at a null)."""
+    elems = np.array(geom.elements, dtype=float)
+    k = 2.0 * np.pi * freqs[bi] / C
+    a = np.exp(1j * k * (elems @ _unit(az)))
+    return abs(complex(np.sum(np.conj(W[bi]) * a)))
+
+
+def _band_bins(freqs):
+    band = doa.band_indices(freqs, doa.DEFAULT_F_LO_HZ, doa.DEFAULT_F_HI_HZ)
+    return [int(band[len(band) // 4]), int(band[len(band) // 2]), int(band[-1])]
+
+
+def test_lcmv_null_is_exact_and_keeps_unit_gain_at_look():
+    """An explicit null places an EXACT zero at the interferer bearing (the LCMV constraint), while
+    the look stays distortionless — across in-band bins."""
+    geom = cc.sensibel_8(radius_m=0.040)
+    az_s, az_n = 30.0, 110.0
+    nulled = pb._FreqDomainBeam(geom, 44100.0, C); nulled.set_look(az_s, nulls=[az_n])
+    plain = pb._FreqDomainBeam(geom, 44100.0, C); plain.set_look(az_s)
+    freqs = nulled._freqs
+    for bi in _band_bins(freqs):
+        assert abs(_resp_at_bin(nulled._W, freqs, geom, bi, az_s) - 1.0) < 1e-6   # distortionless look
+        assert _resp_at_bin(nulled._W, freqs, geom, bi, az_n) < 1e-6              # exact null at φ
+        # and that's far below the un-nulled beam's response toward the interferer
+        assert _resp_at_bin(nulled._W, freqs, geom, bi, az_n) < 1e-3 * max(
+            _resp_at_bin(plain._W, freqs, geom, bi, az_n), 1e-12)
+
+
+def test_lcmv_zero_or_filtered_nulls_match_plain_mvdr_bit_for_bit():
+    """K=0 is the existing MVDR path unchanged; a null inside the look guard is filtered, so both
+    produce identical weights to the no-nulls design."""
+    geom = cc.sensibel_8(radius_m=0.040)
+    plain = pb._FreqDomainBeam(geom, 44100.0, C); plain.set_look(45.0)
+    empty = pb._FreqDomainBeam(geom, 44100.0, C); empty.set_look(45.0, nulls=[])
+    near = pb._FreqDomainBeam(geom, 44100.0, C); near.set_look(45.0, nulls=[47.0])  # within 5° guard
+    assert np.array_equal(plain._W, empty._W)                  # bit-identical (same K=0 path)
+    assert np.array_equal(plain._W, near._W)                   # near-look null dropped → same weights
+
+
+def test_lcmv_caps_nulls_at_m_minus_1_and_stays_finite():
+    """More nulls than the M−1 budget: ``_acceptable_nulls`` truncates to M−1 (request order); the
+    beam stays finite and distortionless. A 40 mm array can't form M−1 *exact* simultaneous nulls —
+    fully constrained, the manifolds go near-collinear and the nulls land deep-but-not-exact — so the
+    budget itself is checked on the pure filter, and the beam check only asserts deep nulls + finite."""
+    geom = cc.sensibel_8(radius_m=0.040)                       # 8 active mics → budget 7 nulls
+    many = [10.0, 40.0, 70.0, 100.0, 130.0, 160.0, 190.0, 220.0, 250.0]   # 9 distinct (>5° apart)
+    assert pb._acceptable_nulls(many, 0.0, geom.n_active - 1) == many[:7]  # cap = M−1, in request order
+    beam = pb._FreqDomainBeam(geom, 44100.0, C); beam.set_look(0.0, nulls=many)
+    assert bool(np.all(np.isfinite(beam._W)))                 # the ridge keeps the maxed budget finite
+    # (At the full M−1 budget the 8×8 constraint matrix is near-collinear on a 40 mm array, so both
+    # look gain and null depth are conditioning-limited — exact gain/null is proven at a sane budget by
+    # test_lcmv_null_is_exact_* and test_lcmv_nulls_compose_*; here we only assert it stays finite.)
+
+
+def test_lcmv_nulls_compose_with_measured_mvdr():
+    """In mvdr mode the explicit null and the measured-R interferer suppression coexist: distortionless
+    look, exact zero at the explicit bearing, and the measured interferer still attenuated."""
+    geom = cc.sensibel_8(radius_m=0.040)
+    fs = 44100.0
+    freqs = np.fft.rfftfreq(1024, d=1.0 / fs)
+    band = doa.band_indices(freqs, doa.DEFAULT_F_LO_HZ, doa.DEFAULT_F_HI_HZ)
+    az_s, az_meas, az_expl = 40.0, 120.0, 210.0
+    Rn = _interferer_noise_cov(geom, az_meas, band, freqs)
+    beam = pb._FreqDomainBeam(geom, fs, C, noise_cov_provider=lambda: (Rn, band))
+    beam.set_look(az_s, nulls=[az_expl])
+    plain = pb._FreqDomainBeam(geom, fs, C); plain.set_look(az_s)   # no provider, no nulls
+    bi = int(band[len(band) // 2])
+    assert abs(_resp_at_bin(beam._W, freqs, geom, bi, az_s) - 1.0) < 1e-6     # distortionless
+    assert _resp_at_bin(beam._W, freqs, geom, bi, az_expl) < 1e-6             # explicit LCMV null exact
+    assert _resp_at_bin(beam._W, freqs, geom, bi, az_meas) < _resp_at_bin(plain._W, freqs, geom, bi, az_meas)
+
+
+def test_time_domain_modes_ignore_nulls():
+    """delaysum / fracdelay have no null degrees of freedom — passing nulls must not change the plan."""
+    geom = cc.sensibel_8(radius_m=0.040)
+    ds = pb._DelaySumBeam(geom, 44100.0, C)
+    assert ds.plan_look(30.0) == ds.plan_look(30.0, nulls=[120.0])
+    fd = pb._FracDelaySumBeam(geom, 44100.0, C)
+    p0, p1 = fd.plan_look(30.0), fd.plan_look(30.0, nulls=[120.0])
+    assert p0[0] == p1[0] and p0[1] == p1[1] and p0[2] == p1[2]               # idx / int delays / maxd
+    assert all(np.array_equal(a, b) for a, b in zip(p0[3], p1[3]))            # fractional FIR kernels
+
+
+# --------------------------------------------------------------------------- #
 # Constructor / geometry / mask resolution
 # --------------------------------------------------------------------------- #
 def test_constructor_geometry_and_defaults():

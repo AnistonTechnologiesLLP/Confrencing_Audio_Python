@@ -19,6 +19,18 @@ the TS sibling is at matching v5 parity. The desktop app is presented as
   and the status line shows both the heard bearing and the applied offset. (+8 headless tests.)
 
 ### Added
+- **Explicit LCMV nulls on the steered frequency-domain beam** (`_FreqDomainBeam`, `mode` =
+  `superdirective` / `mvdr`) — the per-bin solve generalises from plain MVDR
+  (`w = R⁻¹a / aᴴR⁻¹a`) to LCMV (`w = R⁻¹C (CᴴR⁻¹C)⁻¹ g`, `C = [a(look), a(φ₁)…]`, `g = [1,0,…]`),
+  so the beam can place **exact spatial nulls on known interferer bearings** while staying
+  distortionless at the look. Exposed via an optional `nulls=()` on `BeamStrategy.plan_look`/`set_look`
+  (the time-domain `delaysum`/`fracdelay` tiers have no null degrees of freedom and ignore it); nulls
+  are filtered (drop within 5° of the look or each other) and capped to the `M−1` budget, and a tiny
+  trace-relative ridge regularises the DC/low-frequency bins where the manifolds collapse. The nulls
+  **compose with** the measured-noise MVDR overlay (null a supplied bearing *and* the measured
+  interferer field at once). The heavy solve stays in `plan_look` (off the audio lock); the callback
+  is unchanged pure MAC. This is the DSP core for detection-driven auto-null (the wiring follows).
+  (`conf_pipeline_control/polaris_beamformer.py`; +5 hardware-free tests — verified on the live array.)
 - **Live room-aware seat readout** (LIVE panel + room-map canvas) — while a DOA session runs
   (auto-steer or the POLARIS A/B engine), the dominant detected talker is mapped through
   `nearest_seat_for_array` to the **nearest room seat** and surfaced two ways: a `· seat <id>
