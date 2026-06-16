@@ -7,6 +7,23 @@ camelCase, currently `CONFIG_VERSION` = 5 (v1–v4 files migrate losslessly);
 the TS sibling is at matching v5 parity. The desktop app is presented as
 **Aniston Room Designer**.
 
+## [Unreleased]
+
+### Added
+- **Post-beam noise suppression** (`PolarisBeamformer`, `conf_pipeline_control/polaris_beamformer.py`) —
+  opt-in `post_nr=True` runs a light single-channel **spectral-gate** on the beamformed mono output, a
+  **local fallback** for when the OCTOVOX cloud cleaning path (`/api/clean`) isn't running. A pure-numpy
+  windowed-OLA STFT (`_PostNoiseSuppressor`) learns a per-bin noise floor **only on noise-only frames**
+  (the SRP VAD's `noise_gate`, mirroring the MVDR cov gate) and applies a **gentle single-pole Wiener**
+  gain `G = g_floor + (1−g_floor)·P/(P + oversub·N²)` — smooth, bounded in `[g_floor, 1]` so it never
+  hard-mutes (no musical noise), with a 3-tap frequency smooth and a per-bin temporal one-pole. It's
+  **byte-identical during warmup** (the gate is bypassed until `post_nr_warmup_frames` gated frames are
+  seen) and off by default; tuning via `post_nr_floor_db` (-15), `post_nr_oversub` (1.5),
+  `post_nr_gain_alpha` (0.5), `post_nr_frame` (512). Threads through `BeamEngine`
+  (`steered_cfg={"post_nr": True}`) and the `polaris-beam-demo --post-nr` flag; reset on
+  `reset_transient`. Adds STFT latency once engaged (~12 ms at frame 512; stacks on the freq-domain
+  beam's ~35 ms) — acceptable for a cleaning fallback. (+10 hardware-free tests.)
+
 ## [1.17.0] - 2026-06-16
 
 **Room-aware steering, steerable nulls + output AGC** — the steered POLARIS beam now

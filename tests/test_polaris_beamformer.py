@@ -824,6 +824,179 @@ def test_agc_off_is_a_noop_and_reset_rebinds_gain():
 
 
 # --------------------------------------------------------------------------- #
+# Post-beam noise suppression (P3) — single-channel spectral gate on the mono output
+# --------------------------------------------------------------------------- #
+_NR_FLOOR = 10.0 ** (-15.0 / 20.0)        # default post_nr_floor_db = -15 dB → linear floor
+
+
+def _nr_rms(x):
+    return float(np.sqrt(np.mean(x * x))) if x.size else 0.0
+
+
+def test_post_nr_builds_runs_shape_finite():
+    bf = PolarisBeamformer(device=None, post_nr=True, post_nr_warmup_frames=2)
+    assert bf.post_nr is True
+    bf._setup_runtime()
+    assert isinstance(bf._post_nr, pb._PostNoiseSuppressor)
+    out = bf.process_block(_analytic_plane_wave(bf.geometry, 0.0, bf.sample_rate, bf.blocksize, 2000.0))
+    assert out.shape == (bf.blocksize,) and bool(np.all(np.isfinite(out)))
+
+
+def test_post_nr_off_is_a_noop():
+    fs = 44100.0
+    base = 0.2 * _plane_wave_block(PolarisBeamformer(device=None).geometry, 0.0, fs, 1411)
+    off = PolarisBeamformer(device=None, beam_bandlimit_hz=None)            # post_nr defaults False
+    ref = PolarisBeamformer(device=None, beam_bandlimit_hz=None)
+    on = PolarisBeamformer(device=None, beam_bandlimit_hz=None, post_nr=True, post_nr_warmup_frames=2)
+    for bf in (off, ref, on):
+        bf._setup_runtime()
+    on._noise_gate = True                                                  # simulate DOA-confirmed noise (no thread here)
+    assert off._post_nr is None and on._post_nr is not None
+    o = r = n = None
+    for _ in range(8):                                                      # let `on` engage and diverge
+        o, r, n = off.process_block(base), ref.process_block(base), on.process_block(base)
+    assert np.array_equal(o, r)                                            # off path is the unchanged beam
+    assert not np.allclose(o, n)                                           # NR engaged and changed the output
+
+
+def test_post_nr_warmup_passthrough_is_byte_identical():
+    fs = 44100.0
+    base = 0.2 * _plane_wave_block(PolarisBeamformer(device=None).geometry, 0.0, fs, 1411)
+    ref = PolarisBeamformer(device=None, beam_bandlimit_hz=None)                      # no NR
+    warm = PolarisBeamformer(device=None, beam_bandlimit_hz=None, post_nr=True,
+                             post_nr_warmup_frames=10_000)                            # never engages here
+    ref._setup_runtime()
+    warm._setup_runtime()
+    for _ in range(6):
+        assert np.array_equal(ref.process_block(base), warm.process_block(base))      # bypass = byte-identical
+    assert warm._post_nr._engaged is False
+
+
+def test_post_nr_attenuates_noise_after_warmup():
+    rng = np.random.default_rng(0)
+    nr = pb._PostNoiseSuppressor(44100.0, frame=512, floor_db=-15.0, oversub=1.5, warmup_frames=8)
+    for _ in range(40):
+        nr.process((0.05 * rng.standard_normal(1411)).astype(float), True)            # learn floor → engage
+    assert nr._engaged
+    blk = (0.05 * rng.standard_normal(4096)).astype(float)
+    out = np.concatenate([nr.process(blk[i:i + 512], True) for i in range(0, 4096, 512)])
+    rin, rout = _nr_rms(blk), _nr_rms(out)
+    assert 0.3 * rin < rout < 0.8 * rin              # meaningfully suppressed, but NOT hard-muted to silence
+
+
+def test_post_nr_preserves_above_floor_tone():
+    rng = np.random.default_rng(1)
+    nr = pb._PostNoiseSuppressor(44100.0, frame=512, floor_db=-15.0, oversub=1.5, warmup_frames=8)
+    for _ in range(40):
+        nr.process((0.03 * rng.standard_normal(1411)).astype(float), True)            # learn a LOW floor
+    assert nr._engaged
+    t = np.arange(8192) / 44100.0
+    tone = (0.4 * np.sin(2 * np.pi * 1200.0 * t)).astype(float)                        # well above the floor
+    out = np.concatenate([nr.process(tone[i:i + 512], False) for i in range(0, 8192, 512)])  # floor frozen
+    assert _nr_rms(out[1024:]) > 0.85 * _nr_rms(tone[1024:])    # near-distortionless (Wiener G≈1 when P≫N²)
+
+
+def test_post_nr_gain_is_bounded_by_the_floor():
+    """Gentle by construction: even against strong noise + heavy over-subtraction, no bin is ever
+    pushed below the floor (never hard-mutes → no musical noise)."""
+    rng = np.random.default_rng(2)
+    nr = pb._PostNoiseSuppressor(44100.0, frame=512, floor_db=-15.0, oversub=3.0, warmup_frames=4)
+    for _ in range(60):
+        nr.process((0.1 * rng.standard_normal(1411)).astype(float), True)
+    assert nr._engaged
+    assert float(np.min(nr._gain_prev)) >= _NR_FLOOR - 1e-9                            # bounded below by g_floor
+
+
+def test_post_nr_block_size_invariance():
+    """The FIFO frames at a fixed hop, so the suppressed stream is identical regardless of how the
+    caller chunks the input (warmup 0 so both engage on frame 1)."""
+    rng = np.random.default_rng(3)
+    sig = (0.05 * rng.standard_normal(8192)).astype(float)
+    a = pb._PostNoiseSuppressor(44100.0, frame=512, warmup_frames=0)
+    b = pb._PostNoiseSuppressor(44100.0, frame=512, warmup_frames=0)
+    out_a = np.concatenate([a.process(sig[i:i + 512], True) for i in range(0, 8192, 512)])
+    out_b = np.concatenate([b.process(sig[i:i + 1411], True) for i in range(0, 8192, 1411)])
+    L = min(len(out_a), len(out_b))
+    assert L > 4096
+    assert np.allclose(out_a[1024:L], out_b[1024:L], atol=1e-6)                        # chunk-size-agnostic
+
+
+def test_post_nr_process_reset_are_length_safe_under_concurrency():
+    """Review fix (HIGH): the suppressor's lock serializes process() (audio thread) vs reset() (control
+    thread, via BeamEngine set_mode→reset_transient), so process() always returns exactly n samples even
+    under a concurrent reset storm — a torn FIFO read would otherwise emit a wrong-length block and crash
+    the BeamEngine crossfade mix."""
+    import threading
+    nr = pb._PostNoiseSuppressor(44100.0, frame=512, warmup_frames=0)
+    rng = np.random.default_rng(11)
+    blocks = [(0.05 * rng.standard_normal(1411)).astype(float) for _ in range(160)]
+    stop = threading.Event()
+
+    def resetter():
+        while not stop.is_set():
+            nr.reset()
+
+    t = threading.Thread(target=resetter, daemon=True)
+    t.start()
+    try:
+        for b in blocks:
+            assert nr.process(b, True).shape == (1411,)       # exactly n — never a torn-FIFO wrong length
+    finally:
+        stop.set()
+        t.join(timeout=2.0)
+
+
+def test_post_nr_reset_transient_wipes_state():
+    bf = PolarisBeamformer(device=None, beam_bandlimit_hz=None, post_nr=True, post_nr_warmup_frames=2)
+    bf._setup_runtime()
+    bf._noise_gate = True                                                  # simulate DOA-confirmed noise (no thread here)
+    for _ in range(6):
+        bf.process_block(_plane_wave_block(bf.geometry, 0.0, bf.sample_rate, bf.blocksize))
+    nr = bf._post_nr
+    assert nr._engaged and nr._noise_frames > 0
+    bf.reset_transient()
+    assert bf._post_nr is nr                                                           # reset in place
+    assert (not nr._engaged) and nr._noise_frames == 0
+    assert float(np.max(np.abs(nr._noise_mag))) == 0.0
+    assert nr._inq.shape[0] == 0 and bool(np.all(nr._outq == 0.0))        # FIFO drained (primed zeros)
+    assert bool(np.all(nr._gain_prev == 1.0))
+
+
+def test_post_nr_does_not_train_on_speech_when_gate_is_false():
+    """Cold-start safety (review fix): `_noise_gate` starts False (unknown ⇒ don't train), so until the
+    DOA thread confirms a noise-only frame the NR never learns/engages — an active talker passes through
+    byte-identical and the floor can't train on speech."""
+    fs = 44100.0
+    tone = 0.3 * _plane_wave_block(PolarisBeamformer(device=None).geometry, 0.0, fs, 1411)
+    ref = PolarisBeamformer(device=None, beam_bandlimit_hz=None)                       # no NR
+    on = PolarisBeamformer(device=None, beam_bandlimit_hz=None, post_nr=True, post_nr_warmup_frames=2)
+    ref._setup_runtime()
+    on._setup_runtime()
+    assert on._noise_gate is False                                                     # default: unknown ⇒ don't train
+    for _ in range(8):
+        assert np.array_equal(ref.process_block(tone), on.process_block(tone))         # talker untouched
+    assert on._post_nr._engaged is False and float(np.max(on._post_nr._noise_mag)) == 0.0
+
+
+def test_post_nr_floor_db_positive_never_boosts():
+    """floor_db > 0 is clamped at construction so the floor can never exceed unity (a gate attenuates,
+    it must never amplify the noise)."""
+    rng = np.random.default_rng(7)
+    nr = pb._PostNoiseSuppressor(44100.0, frame=512, floor_db=6.0, oversub=1.5, warmup_frames=4)
+    assert nr._g_floor <= 1.0                                                          # clamped at construction
+    for _ in range(40):
+        nr.process((0.05 * rng.standard_normal(1411)).astype(float), True)
+    assert nr._engaged and float(np.max(nr._gain_prev)) <= 1.0 + 1e-9                  # no bin is boosted
+
+
+def test_post_nr_frame_param_plumbed():
+    bf = PolarisBeamformer(device=None, post_nr=True, post_nr_frame=1024)
+    bf._setup_runtime()
+    assert bf._post_nr._F == 1024 and len(bf._post_nr._freqs) == 1024 // 2 + 1
+    assert pb._PostNoiseSuppressor(44100.0, frame=513)._F == 512                       # odd frame floored to even (COLA)
+
+
+# --------------------------------------------------------------------------- #
 # Error handling (device validation, missing extra)
 # --------------------------------------------------------------------------- #
 def test_device_not_found_raises(monkeypatch):

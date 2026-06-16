@@ -179,6 +179,14 @@ def test_engine_bandlimit_toggle_overrides_both():
     assert mixed._steered.beam_bandlimit_hz == 6000.0 and mixed._grid.beam_bandlimit_hz == 4000.0
 
 
+def test_post_nr_threads_through_steered_cfg():
+    """The post-beam NR is a steered-back-end knob: it threads through steered_cfg untouched (not in
+    the _clean_cfg blacklist), and the grid back-end has no NR."""
+    eng = BeamEngine(device=None, mode="steered", steered_cfg={"post_nr": True, "post_nr_floor_db": -12.0})
+    assert eng._steered.post_nr is True and eng._steered._post_nr_floor_db == -12.0
+    assert not hasattr(eng._grid, "post_nr")                    # grid back-end has no NR
+
+
 def test_set_nulls_forwards_to_the_steered_backend():
     """The engine forwards room-aware / explicit nulls to the steered back-end (the grid has none).
     auto_null threads through steered_cfg unchanged (the _clean_cfg blacklist drops only shared keys)."""
