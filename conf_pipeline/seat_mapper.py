@@ -115,6 +115,13 @@ def nearest_seat_for_array(
     )
 
 
+def _array_relative_azimuth(array_position: Point2D, array_bearing_deg: float, anchor: SeatAnchor) -> float:
+    """A seat's azimuth in the **array** frame (``0°`` = +Y clockwise — the DOA / ``set_steering`` /
+    ``set_nulls`` frame): the inverse of the mapper's room rotation, ``azimuth =
+    bearing_to_deg(array, seat) − array_bearing_deg``."""
+    return _norm_bearing(bearing_to_deg(array_position, anchor.position) - array_bearing_deg)
+
+
 def seat_null_azimuths(
     config: SystemConfig,
     array_id: str,
@@ -123,10 +130,7 @@ def seat_null_azimuths(
 ) -> list[float]:
     """**Array-relative** azimuths (deg, ``0°`` = +Y clockwise — the DOA / ``set_nulls`` frame) of every
     room seat except ``exclude_seat_id`` — for nulling the non-target ("empty") seats while the beam
-    listens to the matched one. The inverse of the mapper's room rotation: each seat's world bearing
-    from the array, ``bearing_to_deg(array.position, seat.position)``, is rotated back into the array
-    frame by subtracting the mounting bearing (``room_az = azimuth + bearing_deg`` ⇒
-    ``azimuth = room_az − bearing_deg``).
+    listens to the matched one (see :func:`_array_relative_azimuth`).
 
     Returns ``[]`` if ``array_id`` is unknown / not a microphone array / has no ``position`` or
     ``bearing_deg``, or there are no other seats. De-duplication and the M−1 budget are the caller's
@@ -138,9 +142,27 @@ def seat_null_azimuths(
         return []
     if array.position is None or array.bearing_deg is None:
         return []
-    out: list[float] = []
-    for seat_id, anchor in room_seats(config):
-        if seat_id == exclude_seat_id:
-            continue
-        out.append(_norm_bearing(bearing_to_deg(array.position, anchor.position) - array.bearing_deg))
-    return out
+    return [
+        _array_relative_azimuth(array.position, array.bearing_deg, anchor)
+        for seat_id, anchor in room_seats(config)
+        if seat_id != exclude_seat_id
+    ]
+
+
+def seat_azimuth_for_array(config: SystemConfig, array_id: str, seat_id: str) -> Optional[float]:
+    """The **array-relative** azimuth (deg, ``0°`` = +Y clockwise — the ``set_steering`` / DOA frame) of
+    a SPECIFIC room seat, for pinning the steered beam to that seat ("lock to seat"). The inverse of the
+    mapper's room rotation (see :func:`_array_relative_azimuth`).
+
+    Returns ``None`` if ``array_id`` is unknown / not a microphone array / has no ``position`` or
+    ``bearing_deg``, or ``seat_id`` is not a seat in the room.
+    """
+    array = next((d for d in config.devices if d.id == array_id), None)
+    if not isinstance(array, MicrophoneArray):
+        return None
+    if array.position is None or array.bearing_deg is None:
+        return None
+    for sid, anchor in room_seats(config):
+        if sid == seat_id:
+            return _array_relative_azimuth(array.position, array.bearing_deg, anchor)
+    return None

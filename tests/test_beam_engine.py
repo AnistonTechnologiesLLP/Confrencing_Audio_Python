@@ -5,6 +5,7 @@ opened), the equal-power crossfade math + routing flip (fake back-ends), set_mod
 the normalized location struct, and device-validation errors. numpy required.
 """
 import math
+import queue
 
 import pytest
 
@@ -179,6 +180,52 @@ def test_engine_bandlimit_toggle_overrides_both():
     assert mixed._steered.beam_bandlimit_hz == 6000.0 and mixed._grid.beam_bandlimit_hz == 4000.0
 
 
+def test_post_nr_threads_through_steered_cfg():
+    """The post-beam NR is a steered-back-end knob: it threads through steered_cfg untouched (not in
+    the _clean_cfg blacklist), and the grid back-end has no NR."""
+    eng = BeamEngine(device=None, mode="steered", steered_cfg={"post_nr": True, "post_nr_floor_db": -12.0})
+    assert eng._steered.post_nr is True and eng._steered._post_nr_floor_db == -12.0
+    assert not hasattr(eng._grid, "post_nr")                    # grid back-end has no NR
+
+
+def test_beameng_monitor_mute_gain_state_and_meter():
+    """Monitor mute/gain: state stored, the meter (read_level) is post-gain/mute, gain clamps, and no
+    output stream opens without start()."""
+    eng = BeamEngine(device=None, mode="steered", monitor=True, output_device=3)
+    assert eng.monitor is True and eng.output_device == 3
+    assert eng._out_stream is None and eng._monitor_q is None        # nothing opened without start()
+    eng._level = 0.5
+    assert abs(eng.read_level() - 0.5) < 1e-9
+    eng.set_gain_db(-6.0)
+    assert eng.gain_db == -6.0 and abs(eng.read_level() - 0.5 * 10 ** (-6.0 / 20.0)) < 1e-9
+    eng.set_gain_db(999.0)
+    assert eng.gain_db == 24.0                                       # clamped to GAIN_MAX_DB
+    eng.set_gain_db(0.0)
+    eng.set_mute(True)
+    assert eng.muted is True and eng.read_level() == 0.0            # mute zeroes the meter
+    eng.set_mute(False)
+    assert eng.read_level() == 0.5
+
+
+def test_beameng_cb_applies_mute_gain_to_monitor_only():
+    """The audio callback feeds the MONITOR queue with mute/gain applied, while the host output_queue
+    stays raw (gain/mute is a monitor-only trim)."""
+    eng = BeamEngine(device=None, mode="steered")
+    eng._by_mode = {"steered": _FakeBackend(0.4), "grid": _FakeBackend(0.0)}
+    eng._active = eng._by_mode["steered"]
+    eng._steered._np = np
+    eng._monitor_q = queue.Queue(maxsize=8)                          # simulate an open monitor stream
+    x = np.zeros((8, 8), dtype=np.float32)
+    eng.set_gain_db(6.0)
+    eng._cb(x, 8, None, None)
+    assert np.allclose(eng._output_q.get_nowait(), 0.4)             # host queue: raw (ungained)
+    assert np.allclose(eng._monitor_q.get_nowait(), 0.4 * 10 ** (6.0 / 20.0))   # monitor: +6 dB applied
+    eng.set_mute(True)
+    eng._cb(x, 8, None, None)
+    assert np.allclose(eng._output_q.get_nowait(), 0.4)             # host queue: still raw
+    assert np.allclose(eng._monitor_q.get_nowait(), 0.0)           # monitor: silenced
+
+
 def test_set_nulls_forwards_to_the_steered_backend():
     """The engine forwards room-aware / explicit nulls to the steered back-end (the grid has none).
     auto_null threads through steered_cfg unchanged (the _clean_cfg blacklist drops only shared keys)."""
@@ -189,6 +236,16 @@ def test_set_nulls_forwards_to_the_steered_backend():
     assert eng.active_nulls == eng._steered.active_nulls        # applied-null telemetry forwards too
     eng.set_nulls(None)
     assert eng._steered._explicit_nulls == []                   # cleared
+
+
+def test_set_steering_forwards_to_the_steered_backend():
+    """Snap-steer: lock pins the steered back-end to a fixed azimuth (disables DOA-follow); None resumes."""
+    eng = BeamEngine(device=None, mode="steered", steered_cfg={"mode": "superdirective"})
+    assert eng._steered.steer_to_doa is True                    # default: follow the tracked talker
+    eng.set_steering(90.0)
+    assert eng._steered.steer_to_doa is False and eng._steered._steered_az == 90.0   # pinned to 90°
+    eng.set_steering(None)
+    assert eng._steered.steer_to_doa is True                    # resumed DOA-follow
 
 
 # --------------------------------------------------------------------------- #

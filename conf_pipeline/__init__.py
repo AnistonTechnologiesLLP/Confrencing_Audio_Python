@@ -196,6 +196,7 @@ from .seat_mapper import (  # noqa: F401
     nearest_seat,
     nearest_seat_for_array,
     room_seats,
+    seat_azimuth_for_array,
     seat_null_azimuths,
 )
 

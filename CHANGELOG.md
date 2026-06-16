@@ -7,6 +7,43 @@ camelCase, currently `CONFIG_VERSION` = 5 (v1–v4 files migrate losslessly);
 the TS sibling is at matching v5 parity. The desktop app is presented as
 **Aniston Room Designer**.
 
+## [Unreleased]
+
+### Added
+- **Snap-steer / "Lock to seat"** (`conf_pipeline.seat_azimuth_for_array`, `BeamEngine.set_steering`,
+  LIVE panel) — pin the steered POLARIS beam to a **chosen room seat** instead of following the loudest
+  talker. New pure helper `seat_azimuth_for_array(config, array_id, seat_id)` returns a specific seat's
+  **array-relative** azimuth (the inverse room rotation, shared with `seat_null_azimuths`); new
+  `BeamEngine.set_steering(azimuth_deg)` forwards it to the steered back-end (`None` resumes DOA-follow).
+  In the LIVE A/B card a **"Lock to seat"** picker lists the room's seats (+ "Follow talker") and pins /
+  unpins the look live; when locked, **seat-nulling keeps the locked seat** (nulls the others) and the
+  readout shows `locked → seat …`. The lock lives on the steered back-end, so it persists across
+  steered↔grid switches. The room-aware coverage story completes: listen to one seat, null the rest.
+  (+5 tests.)
+- **Live monitoring for the A/B beam engine** (`BeamEngine`, `conf_pipeline_control/beam_engine.py`) —
+  the POLARIS steered↔grid A/B engine can now **play its output on headphones** so you can *hear* the
+  beamformed / NR'd result, not just watch the meter. Opt-in `monitor=True` + `output_device` open a
+  second (output) stream — two independent streams joined by a drop-oldest queue (no duplex assumption),
+  mirroring the back-ends — and fan the mono to all output channels. New `set_mute`/`set_gain_db` +
+  `muted`/`gain_db` trim the **monitor playback** (and the meter, which is now post-gain/mute) while the
+  host `output_queue` stays raw. In the LIVE panel the existing **Monitor**/output-device controls now
+  feed the A/B engine, and **Mute/Gain are enabled** during an A/B session when monitoring is on (they
+  route to the engine via `_active_ctl`). Use headphones — monitoring through room speakers feeds back
+  into the array. (+3 tests.)
+- **Post-beam noise suppression** (`PolarisBeamformer`, `conf_pipeline_control/polaris_beamformer.py`) —
+  opt-in `post_nr=True` runs a light single-channel **spectral-gate** on the beamformed mono output, a
+  **local fallback** for when the OCTOVOX cloud cleaning path (`/api/clean`) isn't running. A pure-numpy
+  windowed-OLA STFT (`_PostNoiseSuppressor`) learns a per-bin noise floor **only on noise-only frames**
+  (the SRP VAD's `noise_gate`, mirroring the MVDR cov gate) and applies a **gentle single-pole Wiener**
+  gain `G = g_floor + (1−g_floor)·P/(P + oversub·N²)` — smooth, bounded in `[g_floor, 1]` so it never
+  hard-mutes (no musical noise), with a 3-tap frequency smooth and a per-bin temporal one-pole. It's
+  **byte-identical during warmup** (the gate is bypassed until `post_nr_warmup_frames` gated frames are
+  seen) and off by default; tuning via `post_nr_floor_db` (-15), `post_nr_oversub` (1.5),
+  `post_nr_gain_alpha` (0.5), `post_nr_frame` (512). Threads through `BeamEngine`
+  (`steered_cfg={"post_nr": True}`) and the `polaris-beam-demo --post-nr` flag; reset on
+  `reset_transient`. Adds STFT latency once engaged (~12 ms at frame 512; stacks on the freq-domain
+  beam's ~35 ms) — acceptable for a cleaning fallback. (+10 hardware-free tests.)
+
 ## [1.17.0] - 2026-06-16
 
 **Room-aware steering, steerable nulls + output AGC** — the steered POLARIS beam now

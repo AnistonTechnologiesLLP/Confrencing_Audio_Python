@@ -30,6 +30,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Dict, Optional, Sequence, Tuple
 
 from .audio import controls_available, list_input_devices
+from .control import GAIN_MAX_DB, GAIN_MIN_DB, _clamp
 from .polaris_beamformer import (
     DEFAULT_BLOCK_MS,
     POLARIS_N_MICS,
@@ -85,6 +86,8 @@ class BeamEngine:
         output_queue_size: int = 8,
         assumed_range_m: Optional[float] = None,
         beam_bandlimit_hz: Any = _AUTO,
+        monitor: bool = False,
+        output_device: Optional[int] = None,
     ):
         if mode not in _MODES:
             raise ValueError(f"unknown mode {mode!r}; expected one of {_MODES}")
@@ -124,6 +127,16 @@ class BeamEngine:
         self.error = ""
         self._sd: Any = None
         self._stream: Any = None
+        # optional live monitor: play the unified mono on a SECOND (output) stream so the operator can
+        # HEAR the A/B output. Two independent streams joined by a queue (can't assume a duplex device).
+        # Mute/gain trim the MONITOR playback (and the meter) only — the host output_queue stays raw.
+        self.monitor = bool(monitor)
+        self.output_device = output_device
+        self._muted = False
+        self._gain_db = 0.0
+        self._out_stream: Any = None
+        self._monitor_q: Any = None
+        self._out_channels = 0
 
     # ---- lifecycle ----
     def start(self) -> None:
@@ -144,12 +157,20 @@ class BeamEngine:
                 device=self.device, dtype="float32", callback=self._cb,
             )
             self._stream.start()
+            self._open_monitor_stream()         # optional second (output) stream for headphone monitoring
         except Exception:
             self.stop()
             raise
 
     def stop(self) -> None:
-        """Close the shared stream and release both back-ends (idempotent)."""
+        """Close the shared stream(s) and release both back-ends (idempotent)."""
+        if self._out_stream is not None:         # output-first teardown (mirror PolarisBeamformer)
+            try:
+                self._out_stream.stop()
+                self._out_stream.close()
+            finally:
+                self._out_stream = None
+        self._monitor_q = None
         if self._stream is not None:
             try:
                 self._stream.stop()
@@ -196,6 +217,14 @@ class BeamEngine:
         :meth:`conf_pipeline_control.polaris_beamformer.PolarisBeamformer.set_nulls`."""
         self._steered.set_nulls(bearings)
 
+    def set_steering(self, azimuth_deg: Optional[float] = None) -> None:
+        """Pin the steered beam to a fixed ``azimuth_deg`` (array-relative deg — e.g. a room seat's
+        bearing, "lock to seat"), disabling DOA-follow; ``None`` resumes following the tracked talker.
+        Forwarded to the steered back-end (the grid back-end has no steering). The lock persists across
+        steered↔grid A/B switches (it lives on the steered back-end). See
+        :meth:`conf_pipeline_control.polaris_beamformer.PolarisBeamformer.set_steering`."""
+        self._steered.set_steering(azimuth_deg)
+
     @property
     def active_nulls(self) -> list:
         """The null bearings the steered back-end is **actually** applying this tick (after the M−1
@@ -240,8 +269,27 @@ class BeamEngine:
         return self._output_q
 
     def read_level(self) -> float:
-        """Current unified output level 0..1."""
-        return self._level
+        """Current unified output level 0..1 — **post gain + mute**, so the meter matches the monitor."""
+        if self._muted:
+            return 0.0
+        return min(1.0, self._level * (10.0 ** (self._gain_db / 20.0)))
+
+    # ---- monitor mute / gain (trim the monitor playback + the meter; the host output_queue stays raw) ----
+    @property
+    def muted(self) -> bool:
+        return self._muted
+
+    @property
+    def gain_db(self) -> float:
+        return self._gain_db
+
+    def set_mute(self, muted: bool) -> None:
+        """Silence the monitor playback (and zero the meter). No effect on the host ``output_queue``."""
+        self._muted = bool(muted)
+
+    def set_gain_db(self, gain_db: float) -> None:
+        """Trim the monitor playback level (dB, clamped to the standard range). Host queue unaffected."""
+        self._gain_db = _clamp(float(gain_db), GAIN_MIN_DB, GAIN_MAX_DB)
 
     # ---- audio thread ----
     def _mix(self, mono_out: Any, mono_in: Any, step: int) -> Any:
@@ -274,12 +322,53 @@ class BeamEngine:
         mono = mono.astype(np.float32) if np is not None else mono
         rms = float(np.sqrt(np.mean(mono * mono))) if (np is not None and mono.size) else 0.0
         self._level = min(1.0, rms)
-        self._queue_put(self._output_q, mono)
+        self._queue_put(self._output_q, mono)             # host consumer: raw (ungained) mono
+        q = self._monitor_q                               # snapshot: stop() may null it mid-callback (TOCTOU)
+        if q is not None:                                 # monitor playback: mute/gain applied here only
+            if self._muted:
+                mon = np.zeros_like(mono)
+            elif self._gain_db != 0.0:
+                mon = (mono * (10.0 ** (self._gain_db / 20.0))).astype(np.float32)
+            else:
+                mon = mono
+            self._queue_put(q, mon)
         if self._output_cb is not None:
             try:
                 self._output_cb(mono)         # NOTE: realtime audio thread — keep it cheap
             except Exception as exc:
                 self.error = f"output_callback raised: {exc}"
+
+    def _open_monitor_stream(self) -> None:
+        """Open the monitor OUTPUT stream — a second, independent stream (we can't assume the input and
+        output share a duplex device). No-op unless ``monitor``. The mono is fanned to all output
+        channels in :meth:`_cb_output`. Use HEADPHONES — monitoring through room speakers feeds back into
+        the array and howls."""
+        if not self.monitor:
+            return
+        out_ch = 2
+        try:
+            info = self._sd.query_devices(self.output_device, "output")
+            out_ch = max(1, min(2, int(info.get("max_output_channels", 2))))
+        except Exception:
+            out_ch = 2
+        self._out_channels = out_ch
+        self._monitor_q = queue.Queue(maxsize=8)
+        self._out_stream = self._sd.OutputStream(
+            samplerate=self.fs, channels=self._out_channels, blocksize=self.blocksize,
+            device=self.output_device, dtype="float32", callback=self._cb_output,
+        )
+        self._out_stream.start()
+
+    def _cb_output(self, outdata, frames, time_info, status):  # pragma: no cover (needs hardware)
+        q = self._monitor_q
+        try:
+            blk = q.get_nowait() if q is not None else None
+        except queue.Empty:
+            blk = None
+        if blk is not None and blk.shape[0] == outdata.shape[0]:
+            outdata[:] = blk[:, None]         # mono → all output channels
+        else:
+            outdata.fill(0.0)                 # drop-oldest underflow → silence (no click)
 
     @staticmethod
     def _queue_put(q: "queue.Queue[Any]", item: Any) -> None:

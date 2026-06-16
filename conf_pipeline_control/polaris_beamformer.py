@@ -99,6 +99,16 @@ DEFAULT_AGC_MAX_GAIN_DB = 18.0    # clamp |applied gain| to ±this (no run-away 
 DEFAULT_AGC_SLEW_ALPHA = 0.15     # per-block EMA on the gain — slow enough not to pump speech (~0.2s @ 32ms)
 DEFAULT_AGC_SILENCE_DB = -55.0    # below this OUTPUT rms, HOLD the gain (don't ramp up near-silence)
 
+# --- post-beam noise suppression (P3; single-channel spectral gate on the mono output; OFF by default) ---
+# A LOCAL fallback for when the OCTOVOX cloud cleaning path isn't running: a gentle per-bin Wiener gate
+# that learns the noise floor on noise-only frames and attenuates stationary background. Pure numpy.
+DEFAULT_POST_NR_FRAME = 512        # STFT frame (hop = frame/2); 512 ≈ 12 ms added latency, decent freq res
+DEFAULT_POST_NR_FLOOR_DB = -15.0   # residual gain floor / max suppression depth (never hard-mutes → no musical noise)
+DEFAULT_POST_NR_OVERSUB = 1.5      # Wiener over-subtraction (1.0 = plain Wiener; >1 = stronger)
+DEFAULT_POST_NR_GAIN_ALPHA = 0.5   # per-bin temporal one-pole on the gain (musical-noise control)
+DEFAULT_POST_NR_WARMUP_FRAMES = 16 # gated noise frames before the gate engages (mirror _NOISE_WARMUP_FRAMES)
+DEFAULT_POST_NR_NOISE_ALPHA = 0.05 # per-bin noise-floor EMA rate (matches _noise_cov_alpha)
+
 MODE_DELAYSUM = "delaysum"        # integer-sample time-domain delay-and-sum (default)
 MODE_FRACDELAY = "fracdelay"      # sub-sample (fractional) delay-and-sum via windowed-sinc FIR
 MODE_SUPERDIRECTIVE = "superdirective"  # frequency-domain diffuse-noise MVDR (fixed analytic Γ)
@@ -721,6 +731,123 @@ def _lowpass_kernel(fc_hz: float, fs: float, numtaps: int = DEFAULT_BANDLIMIT_TA
     return (h / h.sum()).astype(float)                       # normalize to unity DC gain
 
 
+class _PostNoiseSuppressor:
+    """Light single-channel **post-beam** spectral-gate noise suppressor (pure numpy) — a local fallback
+    for when the OCTOVOX cloud cleaning path isn't running. Runs on the beamformed MONO output: a windowed
+    overlap-add STFT (Hann, 50% hop, COLA-exact) whose per-bin gain is a gentle **single-pole Wiener**
+    against a noise floor learned ONLY on noise-only frames (the SRP VAD's ``noise_gate``).
+
+    Gentle by construction — no musical noise: ``G = g_floor + (1−g_floor)·P/(P + oversub·N²)`` is
+    smooth and monotonic, bounded in ``[g_floor, 1]`` so it never hard-mutes; a 3-tap frequency smooth
+    plus a per-bin temporal one-pole on the gain kill bin flicker.
+
+    Warmup contract: until ``warmup_frames`` gated frames have been seen the floor isn't trusted, so the
+    gate is **bypassed** — :meth:`process` returns the input block **byte-identical** (the STFT/OLA is not
+    engaged, so there is no reconstruction ripple or latency during warmup). When it engages there is a
+    one-time ≈one-frame transition seam (during noise, harmless — documented, like the crossfade race).
+
+    Threading: :meth:`process` runs on the audio thread; :meth:`reset` on the control thread (a
+    BeamEngine ``set_mode`` → ``reset_transient`` can overlap an in-flight ``process`` of the same
+    steered back-end during a switch-back crossfade). The output LENGTH is derived from multiple reads of
+    the ``_outq`` FIFO, so — unlike the fixed-length ``_lp_tail`` — a torn read could emit a wrong-length
+    block (which would crash the BeamEngine crossfade mix). A small internal lock serializes ``process``
+    vs ``reset`` to make that safe. Adds ``frame``-ish samples of latency once engaged (~12 ms at frame
+    512); stacks on the freq-domain beam's ~35 ms. Knobs: ``floor_db`` (suppression depth, capped at 0 dB
+    so the floor never boosts), ``oversub`` (strength), ``gain_alpha`` (temporal smoothing),
+    ``warmup_frames``, ``noise_alpha`` (floor EMA rate)."""
+
+    def __init__(self, sample_rate: float, *, frame: int = DEFAULT_POST_NR_FRAME,
+                 floor_db: float = DEFAULT_POST_NR_FLOOR_DB, oversub: float = DEFAULT_POST_NR_OVERSUB,
+                 gain_alpha: float = DEFAULT_POST_NR_GAIN_ALPHA,
+                 warmup_frames: int = DEFAULT_POST_NR_WARMUP_FRAMES,
+                 noise_alpha: float = DEFAULT_POST_NR_NOISE_ALPHA):
+        self._sr = float(sample_rate)
+        self._F = max(2, (int(frame) // 2) * 2)                 # even ≥ 2 (Hann 50%-hop COLA needs even frame)
+        self._H = self._F // 2
+        self._g_floor = min(1.0, 10.0 ** (float(floor_db) / 20.0))   # ≤ 1: a floor caps suppression, never boosts
+        self._oversub = max(0.0, float(oversub))
+        self._gain_alpha = min(1.0, max(0.0, float(gain_alpha)))
+        self._warmup = max(0, int(warmup_frames))
+        self._noise_alpha = min(1.0, max(0.0, float(noise_alpha)))
+        self._lock = threading.Lock()          # serialize process() (audio thread) vs reset() (control thread)
+        self._init_state()
+
+    def _init_state(self) -> None:
+        import numpy as np
+
+        nb = self._F // 2 + 1
+        self._win = np.hanning(self._F).astype(float)
+        self._inbuf = np.zeros(self._F, dtype=float)            # sliding STFT analysis frame
+        self._ola = np.zeros(self._F, dtype=float)              # overlap-add synthesis accumulator
+        self._inq = np.zeros(0, dtype=float)                    # pending input samples (FIFO)
+        self._outq = np.zeros(self._F, dtype=float)             # synthesized output (FIFO; primed = fixed latency)
+        self._noise_mag = np.zeros(nb, dtype=float)            # per-bin noise-floor magnitude EMA
+        self._gain_prev = np.ones(nb, dtype=float)             # per-bin gain (temporal smoothing state)
+        self._freqs = np.fft.rfftfreq(self._F, d=1.0 / self._sr)
+        self._noise_frames = 0                                 # gated frames seen (warmup counter)
+        self._engaged = False                                  # True once the floor is trusted
+
+    def reset(self) -> None:
+        with self._lock:               # serialize vs an in-flight process() on the audio thread
+            self._init_state()         # drop streaming + floor history; re-warms on the next gated frames
+
+    def _gain(self, X: Any) -> Any:
+        """Per-bin Wiener gain lifted to the floor, frequency- then temporally-smoothed."""
+        import numpy as np
+
+        P = X.real * X.real + X.imag * X.imag                  # |X|² instantaneous power
+        n2 = self._noise_mag * self._noise_mag                 # noise power estimate
+        wiener = P / (P + self._oversub * n2 + 1e-20)          # smooth, monotonic, in (0,1]
+        g = self._g_floor + (1.0 - self._g_floor) * wiener     # lift to [g_floor, 1] — never hard-mutes
+        gs = g.copy()
+        gs[1:-1] = 0.25 * g[:-2] + 0.5 * g[1:-1] + 0.25 * g[2:]  # 3-tap frequency smooth (edges replicate)
+        gs = self._gain_alpha * gs + (1.0 - self._gain_alpha) * self._gain_prev   # temporal one-pole
+        self._gain_prev = gs
+        return gs
+
+    def process(self, block: Any, noise_gate: bool) -> Any:
+        """One mono block in → one mono block out (same length). ``noise_gate`` True ⇒ a noise-only
+        frame (feeds the floor). Byte-identical passthrough until ``warmup_frames`` gated frames seen.
+        Holds the lock so a concurrent :meth:`reset` can't tear the FIFO length derivation."""
+        import numpy as np
+
+        with self._lock:
+            x = np.asarray(block, dtype=float)
+            n = x.shape[0]
+            F, H = self._F, self._H
+            self._inq = np.concatenate([self._inq, x])
+            while self._inq.shape[0] >= H:
+                hop_in = self._inq[:H]
+                self._inq = self._inq[H:]
+                self._inbuf[:-H] = self._inbuf[H:]             # slide analysis frame left by one hop
+                self._inbuf[-H:] = hop_in
+                X = np.fft.rfft(self._inbuf * self._win)       # (nb,) complex
+                if noise_gate:                                  # learn the floor on noise-only frames only
+                    a = self._noise_alpha
+                    self._noise_mag *= (1.0 - a)
+                    self._noise_mag += a * np.abs(X)           # symmetric per-bin EMA
+                    if not self._engaged:
+                        self._noise_frames += 1
+                        if self._noise_frames >= self._warmup:
+                            self._engaged = True               # floor trusted → start suppressing
+                if self._engaged:
+                    Y = self._gain(X) * X
+                    y = np.fft.irfft(Y, n=F)
+                    self._ola[:-H] = self._ola[H:]
+                    self._ola[-H:] = 0.0
+                    self._ola += y                             # overlap-add (Hann COLA preserves amplitude)
+                    self._outq = np.concatenate([self._outq, self._ola[:H].copy()])
+            if not self._engaged:
+                return x.astype(np.float32)                    # WARMUP: byte-identical passthrough (no STFT delay)
+            if self._outq.shape[0] >= n:                       # ENGAGED: drain the synthesis FIFO
+                out = self._outq[:n]
+                self._outq = self._outq[n:]
+            else:                                              # one-time underflow at engagement (front-pad)
+                out = np.concatenate([np.zeros(n - self._outq.shape[0]), self._outq])
+                self._outq = self._outq[:0]
+            return out.astype(np.float32)
+
+
 def _install_hint() -> str:
     miss = missing_dependencies()
     pkgs = " + ".join(miss) if miss else "numpy + sounddevice"
@@ -789,6 +916,12 @@ class PolarisBeamformer(MicController):
         agc_max_gain_db: float = DEFAULT_AGC_MAX_GAIN_DB,                 # clamp |applied AGC gain| to ±this
         agc_slew_alpha: float = DEFAULT_AGC_SLEW_ALPHA,                   # per-block EMA slew on the gain
         agc_silence_db: float = DEFAULT_AGC_SILENCE_DB,                   # hold gain below this output RMS
+        post_nr: bool = False,                                           # post-beam spectral-gate NR (local fallback)
+        post_nr_floor_db: float = DEFAULT_POST_NR_FLOOR_DB,              # NR residual floor / suppression depth
+        post_nr_oversub: float = DEFAULT_POST_NR_OVERSUB,               # NR Wiener over-subtraction strength
+        post_nr_gain_alpha: float = DEFAULT_POST_NR_GAIN_ALPHA,         # NR temporal gain smoothing
+        post_nr_frame: int = DEFAULT_POST_NR_FRAME,                     # NR STFT frame (latency ↔ freq res)
+        post_nr_warmup_frames: int = DEFAULT_POST_NR_WARMUP_FRAMES,     # gated frames before NR engages
         output_callback: Optional[Callable[[Any], None]] = None,
         output_queue_size: int = 8,
         output_device: Optional[int] = None,
@@ -815,7 +948,10 @@ class PolarisBeamformer(MicController):
         # provider injected into the strategy at _make_beam() can read them safely at construction.
         self._noise_cov: Any = None          # (n_band, M, M) EMA, gated on noise-only frames
         self._noise_frames = 0               # gated frames accumulated (warmup gate)
-        self._noise_gate = True              # latest "noise-only" flag (DOA thread writes; audio reads)
+        # latest "noise-only" flag: the DOA thread writes (= not reading.active), the audio thread reads
+        # lock-free. Starts FALSE (unknown ⇒ don't train) so neither the MVDR noise cov NOR the post-beam
+        # NR floor learns from cold-start audio until the DOA thread confirms a noise-only frame.
+        self._noise_gate = False
         self._noise_cov_alpha = 0.05
 
         self.device = device
@@ -857,6 +993,16 @@ class PolarisBeamformer(MicController):
         # mirroring _tracker, since the audio thread mutates it lock-free.
         self._agc_gain: Optional[ExponentialTracker] = (
             ExponentialTracker(self._agc_alpha) if self._agc_target_rms is not None else None)
+        # post-beam noise suppression (P3): a light single-channel spectral gate on the mono output, a
+        # LOCAL fallback for when the OCTOVOX cloud cleaning path isn't running. OFF unless post_nr; the
+        # suppressor object is built in _setup_runtime (needs numpy) and reset in reset_transient.
+        self.post_nr = bool(post_nr)
+        self._post_nr_floor_db = float(post_nr_floor_db)
+        self._post_nr_oversub = float(post_nr_oversub)
+        self._post_nr_gain_alpha = float(post_nr_gain_alpha)
+        self._post_nr_frame = int(post_nr_frame)
+        self._post_nr_warmup_frames = int(post_nr_warmup_frames)
+        self._post_nr: Optional[_PostNoiseSuppressor] = None
         self.output_device = output_device
         self.monitor = monitor
         # device supervision (opt-in): wait for the array to appear, auto-reconnect if it drops
@@ -868,6 +1014,10 @@ class PolarisBeamformer(MicController):
         self._tracker = _TalkerTracker(hold_seconds=hold_seconds, switch_margin_deg=switch_margin_deg)
         self._beam = self._make_beam(geom)
         self._steered_az: Optional[float] = None
+        # Steering generation: bumped under _beam_lock whenever the steering INTENT changes (set_steering).
+        # _doa_tick snapshots it before its off-lock solve and only commits if it's unchanged — so a stale
+        # DOA-tick commit can't clobber a concurrently-applied seat lock (lost-update guard).
+        self._steer_gen = 0
         if fixed_azimuth_deg is not None:
             self._beam.set_look(fixed_azimuth_deg, self.off_nadir_deg)
             self._steered_az = float(fixed_azimuth_deg)
@@ -1011,14 +1161,18 @@ class PolarisBeamformer(MicController):
 
     def set_steering(self, azimuth_deg: Optional[float] = None) -> None:
         """Pin the beam to ``azimuth_deg`` (disables DOA-follow), or resume
-        following the tracked talker when ``None``."""
+        following the tracked talker when ``None``. Bumps the steering generation under ``_beam_lock`` so
+        an in-flight DOA tick's stale commit can't clobber this (lost-update guard)."""
         if azimuth_deg is None:
             self.steer_to_doa = True
+            with self._beam_lock:
+                self._steer_gen += 1          # invalidate any in-flight DOA-tick commit built for the lock
             return
         self.steer_to_doa = False
         nulls = self._compose_nulls([], float(azimuth_deg))            # caller-supplied seat/manual nulls
         plan = self._beam.plan_look(float(azimuth_deg), self.off_nadir_deg, nulls)   # off the lock
         with self._beam_lock:
+            self._steer_gen += 1              # this is the newest steering intent — DOA ticks must yield
             self._beam.commit_look(plan)
             self._steered_az = float(azimuth_deg)
         self._publish_active_nulls(nulls, float(azimuth_deg))          # telemetry = nulls actually applied
@@ -1123,6 +1277,7 @@ class PolarisBeamformer(MicController):
         # Re-steer when the talker moves; in mvdr, or whenever nulls are engaged, re-solve EVERY tick so
         # the null tracks the evolving noise field / appearing-or-clearing interferers even when the
         # committed look angle is unchanged. The heavy solve stays off the audio lock.
+        gen0 = self._steer_gen                          # snapshot steering intent before the off-lock solve
         target_az = reading.azimuth_deg if (self.steer_to_doa and reading.azimuth_deg is not None) \
             else self._steered_az
         nulls = self._compose_nulls(dets, target_az) if target_az is not None else []
@@ -1130,8 +1285,9 @@ class PolarisBeamformer(MicController):
                 target_az != self._steered_az or self.mode == MODE_MVDR or self._nulls_engaged()):
             plan = self._beam.plan_look(target_az, self.off_nadir_deg, nulls)   # heavy work off the lock
             with self._beam_lock:
-                self._beam.commit_look(plan)
-                self._steered_az = target_az
+                if self._steer_gen == gen0:             # no set_steering interleaved → safe to commit
+                    self._beam.commit_look(plan)
+                    self._steered_az = target_az
         self._publish_active_nulls(nulls, target_az)   # telemetry = the nulls actually applied
 
     def _snapshot_covariance(self):
@@ -1222,6 +1378,11 @@ class PolarisBeamformer(MicController):
         else:
             self._lp_kernel = None
             self._lp_tail = None
+        # post-beam noise suppressor (P3): built only when enabled (needs numpy); fresh per session.
+        self._post_nr = _PostNoiseSuppressor(
+            self.sample_rate, frame=self._post_nr_frame, floor_db=self._post_nr_floor_db,
+            oversub=self._post_nr_oversub, gain_alpha=self._post_nr_gain_alpha,
+            warmup_frames=self._post_nr_warmup_frames) if self.post_nr else None
 
     # ---- external-feed seam (BeamEngine drives the DSP from a shared stream) ----
     def process_block(self, block: Any) -> Any:
@@ -1235,6 +1396,8 @@ class PolarisBeamformer(MicController):
         np = self._np
         with self._beam_lock:
             mono = self._beam.process(block)
+        if self._post_nr is not None:
+            mono = self._post_nr.process(mono, self._noise_gate)   # spectral-gate NR before AGC (stable floor)
         if self._agc_gain is not None:
             mono = self._apply_agc(mono)              # target-loudness normalize (before the linear band-limit)
         if self._lp_kernel is not None:
@@ -1286,7 +1449,7 @@ class PolarisBeamformer(MicController):
             if self._noise_cov is not None:
                 self._noise_cov[...] = 0.0
         self._noise_frames = 0
-        self._noise_gate = True
+        self._noise_gate = False              # re-acquire on the next DOA tick (don't train on the switch transient)
         if self._stftbuf is not None and self._np is not None:
             self._stftbuf = self._np.zeros((0, self.n_channels), dtype=float)
         with self._state_lock:
@@ -1296,6 +1459,8 @@ class PolarisBeamformer(MicController):
             self._lp_tail = self._np.zeros(len(self._lp_kernel) - 1, dtype=float)  # flush FIR state
         if self._agc_gain is not None:
             self._agc_gain = ExponentialTracker(self._agc_alpha)   # fresh slew state (atomic rebind; audio reads lock-free)
+        if self._post_nr is not None:
+            self._post_nr.reset()          # drop NR streaming + floor history; its lock serializes vs an in-flight process()
         with self._beam_lock:
             self._beam.reset()             # drop the strategy's streaming history; rebuilt on next process
 
@@ -1539,6 +1704,10 @@ def _demo(argv: Optional[Sequence[str]] = None) -> int:
     ap.add_argument("--no-bandlimit", action="store_true", help="disable the beam band-limit")
     ap.add_argument("--agc-target-db", type=float, default=None,
                     help="normalize output loudness to this RMS, dBFS (e.g. -20); enables output AGC")
+    ap.add_argument("--post-nr", action="store_true",
+                    help="post-beam spectral-gate noise suppression (local fallback for the OCTOVOX cloud path)")
+    ap.add_argument("--post-nr-floor-db", type=float, default=DEFAULT_POST_NR_FLOOR_DB,
+                    help=f"post-NR residual floor / suppression depth, dB (default {DEFAULT_POST_NR_FLOOR_DB:.0f})")
     ap.add_argument("--auto-null", action="store_true",
                     help="null detected interferers (the non-dominant talkers); superdirective/mvdr only")
     ap.add_argument("--monitor", action="store_true", help="play the mono output (use HEADPHONES)")
@@ -1571,6 +1740,7 @@ def _demo(argv: Optional[Sequence[str]] = None) -> int:
         dead_capsule=dead, hold_seconds=args.hold, switch_margin_deg=args.switch_margin,
         mode=args.mode, superdirective_loading=args.loading, auto_null=args.auto_null,
         agc_target_db=args.agc_target_db,
+        post_nr=args.post_nr, post_nr_floor_db=args.post_nr_floor_db,
         monitor=args.monitor, output_device=args.output_device,
         wait_for_device=args.wait, **bl_kw,
     )
@@ -1588,6 +1758,9 @@ def _demo(argv: Optional[Sequence[str]] = None) -> int:
     print(f"Beam strategy: {bf.mode}  ({_mode_desc.get(bf.mode, '')})")
     if bf.agc_target_db is not None:
         print(f"Output AGC: normalizing to {bf.agc_target_db:.0f} dBFS (±{DEFAULT_AGC_MAX_GAIN_DB:.0f} dB, holds in silence).")
+    if bf.post_nr:
+        print(f"Post-beam NR: spectral gate, floor {bf._post_nr_floor_db:.0f} dB "
+              f"(frame {bf._post_nr_frame}; learns on noise-only frames). Local fallback for OCTOVOX.")
     if args.wait:
         print(f"Waiting for device {args.device} @ {args.rate:.0f} Hz (auto-reconnect on) ... Ctrl+C to stop.")
     else:

@@ -113,6 +113,27 @@ def test_live_overlay_with_seat_paints(win):
     assert win.canvas.grab().width() > 0          # 3D falls back to the hint, no crash
 
 
+def test_beameng_monitor_mute_gain_route_to_engine(win):
+    """With the A/B engine active, _active_ctl resolves to it and the LIVE Mute/Gain controls route to
+    the engine's monitor trim (so monitoring is mute/gain-controllable)."""
+    import conf_pipeline_control as cc
+    st = win.state
+    st.set_config(_config_with_array_and_seats(bearing=0.0))
+    panel = win.panels["live"]
+    eng = cc.BeamEngine(device=None, mode="steered", monitor=True)
+    panel._beam_engine = eng
+    assert panel._active_ctl() is eng                              # engine is the active control surface
+    panel.live_mute.setChecked(True)
+    panel._live_toggle_mute()
+    assert eng.muted is True                                       # Mute routes to the engine
+    panel.live_mute.setChecked(False)
+    panel._live_toggle_mute()
+    assert eng.muted is False
+    panel.live_gain.setValue(-6)
+    panel._live_gain_changed(-6)
+    assert eng.gain_db == -6.0                                     # Gain routes to the engine
+
+
 def test_beameng_seat_nulling_pushes_other_seats(win):
     """The A/B-engine 'Null the other seats' path: with a matched target seat, push the OTHER seats'
     bearings to the steered back-end via the engine; clear when disabled."""
@@ -133,3 +154,81 @@ def test_beameng_seat_nulling_pushes_other_seats(win):
     panel.live_beameng_nullseats.setChecked(False)                          # disabling clears the pushed nulls
     panel._push_seat_nulls()
     assert eng._steered._explicit_nulls == []
+
+
+def test_beameng_lock_to_seat_pins_the_steered_beam(win):
+    """Snap-steer: picking a seat in the Lock-to-seat combo pins the steered beam to that seat's azimuth
+    (via the engine), tracks the locked seat, and makes seat-nulling keep the LOCKED seat; 'Follow talker'
+    resumes DOA-follow."""
+    import conf_pipeline_control as cc
+    st = win.state
+    st.set_config(_config_with_array_and_seats(bearing=0.0))
+    panel = win.panels["live"]
+    panel._session_array_id = "A"
+    eng = cc.BeamEngine(device=None, mode="steered", steered_cfg={"mode": "superdirective"})
+    panel._beam_engine = eng
+    panel.live_beameng_mode.setCurrentIndex(panel.live_beameng_mode.findData("steered"))
+    panel._refresh_beameng_lockseat()
+    assert panel.live_beameng_lockseat.count() == 3                          # Follow + the two seats
+
+    panel.live_beameng_lockseat.setCurrentIndex(panel.live_beameng_lockseat.findData("sofa-seat2"))
+    panel._on_beameng_lockseat_changed()
+    assert panel._beameng_locked_seat == "sofa-seat2"
+    assert eng._steered.steer_to_doa is False and eng._steered._steered_az == 90.0   # pinned to seat 2 (east)
+
+    # snap-steer + seat-nulling: the nulls keep the LOCKED seat (null seat 1, not seat 2)
+    panel.live_beameng_nullseats.setChecked(True)
+    panel._push_seat_nulls()
+    assert eng._steered._explicit_nulls == cp.seat_null_azimuths(st.config, "A", exclude_seat_id="sofa-seat2")
+
+    panel.live_beameng_lockseat.setCurrentIndex(0)                          # 'Follow talker (DOA)'
+    panel._on_beameng_lockseat_changed()
+    assert panel._beameng_locked_seat is None and eng._steered.steer_to_doa is True
+
+
+def test_beameng_lock_survives_a_grid_roundtrip(win):
+    """A/B switching steered→grid→steered re-pins the lock (set_mode's reset_transient clears the steered
+    back-end's _steered_az, so the GUI re-applies it on the switch back)."""
+    import conf_pipeline_control as cc
+    st = win.state
+    st.set_config(_config_with_array_and_seats(bearing=0.0))
+    panel = win.panels["live"]
+    panel._session_array_id = "A"
+    eng = cc.BeamEngine(device=None, mode="steered", steered_cfg={"mode": "superdirective"})
+    panel._beam_engine = eng
+    panel.live_beameng_mode.setCurrentIndex(panel.live_beameng_mode.findData("steered"))
+    panel._refresh_beameng_lockseat()
+    panel.live_beameng_lockseat.setCurrentIndex(panel.live_beameng_lockseat.findData("sofa-seat2"))
+    panel._on_beameng_lockseat_changed()
+    assert eng._steered._steered_az == 90.0                                  # pinned to seat 2
+
+    panel.live_beameng_mode.setCurrentIndex(panel.live_beameng_mode.findData("grid"))
+    panel._on_beameng_mode_changed()                                        # set_mode("grid")
+    panel.live_beameng_mode.setCurrentIndex(panel.live_beameng_mode.findData("steered"))
+    panel._on_beameng_mode_changed()                                        # set_mode("steered") + re-pin
+    assert panel._beameng_locked_seat == "sofa-seat2"
+    assert eng._steered.steer_to_doa is False and eng._steered._steered_az == 90.0   # lock restored
+
+
+def test_beameng_locked_steering_repins_on_pose_change(win):
+    """Stale-lock fix: editing the array's bearing mid-session re-pins the locked seat to its NEW
+    array-relative azimuth on the next tick (look stays consistent with the live seat-null geometry)."""
+    import conf_pipeline_control as cc
+    st = win.state
+    st.set_config(_config_with_array_and_seats(bearing=0.0))
+    panel = win.panels["live"]
+    panel._session_array_id = "A"
+    eng = cc.BeamEngine(device=None, mode="steered", steered_cfg={"mode": "superdirective"})
+    panel._beam_engine = eng
+    panel.live_beameng_mode.setCurrentIndex(panel.live_beameng_mode.findData("steered"))
+    panel._refresh_beameng_lockseat()
+    panel.live_beameng_lockseat.setCurrentIndex(panel.live_beameng_lockseat.findData("sofa-seat2"))
+    panel._on_beameng_lockseat_changed()
+    assert eng._steered._steered_az == 90.0 and panel._beameng_locked_az == 90.0     # seat 2 (east), bearing 0
+
+    st.set_config(cp.set_array_bearing(st.config, "A", 90.0))               # re-mount: seat 2 now at array az 0
+    panel._push_locked_steering()
+    assert panel._beameng_locked_az == 0.0 and eng._steered._steered_az == 0.0       # re-pinned to the new pose
+    az_before = eng._steered._steered_az
+    panel._push_locked_steering()                                           # idempotent when the pose is unchanged
+    assert eng._steered._steered_az == az_before
