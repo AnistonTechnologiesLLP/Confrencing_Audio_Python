@@ -676,8 +676,14 @@ class LivePanel(PanelBase):
         if az is None:
             self.live_status.setText("Calibration: no clear talker detected — try again, louder.")
             return
-        self.live_front_offset.setValue(round(az))   # front talker measured here → that's the offset
-        self.live_status.setText(f"Front calibrated: azimuth {az:.0f}° ({sal:.0f} dB). Sector centre is now 'front'.")
+        # DOA reports 0..360°, but the Front-offset spin box is −180..180°, so a rear/left talker
+        # (az > 180, common on this front/back-ambiguous ring) would clamp to 180 instead of being
+        # applied. Wrap into (−180, 180]; the sector gate is wrap-aware, so it steers identically.
+        off = int(((round(az) + 180) % 360) - 180)
+        self.live_front_offset.setValue(off)
+        self.live_status.setText(
+            f"Front calibrated: heard at {az:.0f}° → front offset {off:+d}° ({sal:.0f} dB). "
+            "Sector centre is now 'front'.")
 
     def _on_calib_failed(self, msg):
         self.live_calib_btn.setEnabled(self.live_autosteer.isChecked())

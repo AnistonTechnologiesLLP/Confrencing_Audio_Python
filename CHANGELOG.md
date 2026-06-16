@@ -9,6 +9,15 @@ the TS sibling is at matching v5 parity. The desktop app is presented as
 
 ## [Unreleased]
 
+### Fixed
+- **Calibrate-front now applies rear/left bearings instead of clamping.** The LIVE panel's
+  "Calibrate front" measured the talker's bearing but fed the raw 0–360° DOA into the −180…180°
+  Front-offset spin box, so any talker the array localized above 180° (common on the front/back-
+  ambiguous POLARIS ring) was silently clamped to 180° — the value never matched the heard
+  bearing and the pickup sector never centred on the talker. The measured azimuth is now wrapped
+  into (−180, 180] before it's applied (the sector gate is wrap-aware, so steering is identical),
+  and the status line shows both the heard bearing and the applied offset. (+8 headless tests.)
+
 ### Added
 - **Live room-aware seat readout** (LIVE panel + room-map canvas) — while a DOA session runs
   (auto-steer or the POLARIS A/B engine), the dominant detected talker is mapped through
