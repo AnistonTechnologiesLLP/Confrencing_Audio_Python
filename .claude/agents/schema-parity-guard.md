@@ -17,9 +17,11 @@ diagnose and report; do not edit, migrate, or commit.
 
 ## The contract
 - The JSON config is **camelCase** and must **round-trip losslessly** between the two engines.
-- `CONFIG_VERSION` is currently **4** (`conf_pipeline/model.py`); v1/v2/v3 files migrate losslessly via
-  a chained migration in `conf_pipeline/persistence.py`. Each step is additive and version-correct
-  (a past bug hard-coded `CONFIG_VERSION` in the v2→v3 step — watch for that pattern).
+- `CONFIG_VERSION` is currently **5** (`conf_pipeline/model.py`); v1–v4 files migrate losslessly via
+  a chained migration in `conf_pipeline/persistence.py`. Each step is additive and version-correct,
+  setting its own explicit target version — a step must NOT set `obj["version"] = CONFIG_VERSION`
+  (that makes an old file jump straight to current, skipping intermediate steps); only the final
+  step bumps to `CONFIG_VERSION`. (A past bug hard-coded `CONFIG_VERSION` in the v2→v3 step.)
 - Serialization lives in `model.py` (snake_case dataclass fields ⇄ camelCase JSON via the
   `_camel`/`_snake` mapping; `_NULLABLE_KEYS` for keys kept when None; otherwise omit-when-None).
 - The byte-lossless round-trip is asserted by `tests/test_serialization.py`
@@ -38,13 +40,14 @@ For every new or renamed serialized field, produce a **checklist verdict** with 
    `... -m pytest -q tests/test_serialization.py`.
 5. **TS parity** — does the TS sibling carry the same camelCase key? Grep the TS emitter/parser:
    `grep -rn "<fieldName>" /c/Work/conferencing-audio-pipeline/src`. Flag any key present on one side
-   only. The TS package was last brought to **v4 parity**; confirm new keys exist there too.
+   only. The TS package is at **v5 parity**; confirm new keys exist there too.
 
-## Known open follow-up (surface it if relevant)
-The v4 field names were added on the Python side and should be spot-checked against the TS v4 emitter
-for exact parity: `bearingDeg`, `tiltDeg`, `rotationDeg`, `seatCapacity`, `seats[].facingDeg`,
-`blocksCamera`, `blocksAudio`, `absorption`, and the `CameraSpec` / `SpeakerSpec` shapes. If a task
-touches these, verify them.
+## Parity status (current)
+Python ⇄ TS are at **v5 parity** (verified 2026-06-16). All v4 fields (`bearingDeg`/`tiltDeg` on
+camera/loudspeaker; `rotationDeg`/`seatCapacity`/`seats[].facingDeg`/`blocksCamera`/`blocksAudio`/
+`absorption` on furniture; `CameraSpec`/`SpeakerSpec`) plus the v5 addition (`bearingDeg` on
+`microphoneArray`, set via `set_array_bearing` / `setArrayBearing`) round-trip with the TS sibling.
+Re-run the checklist above whenever a task touches the serialized schema.
 
 ## Output
 The checklist verdict (✓ / ✗ / N/A per item) with file:line citations and the exact mismatched key

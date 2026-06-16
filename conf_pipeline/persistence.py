@@ -28,8 +28,8 @@ def deserialize(text: str) -> SystemConfig:
         raise DeserializeError("Config must be a JSON object.")
     if not isinstance(parsed.get("version"), int):
         raise DeserializeError('Missing numeric "version".')
-    if parsed["version"] not in (1, 2, 3, CONFIG_VERSION):
-        raise DeserializeError(f'Unsupported config version {parsed["version"]}; expected 1, 2, 3 or {CONFIG_VERSION}.')
+    if parsed["version"] not in (1, 2, 3, 4, CONFIG_VERSION):
+        raise DeserializeError(f'Unsupported config version {parsed["version"]}; expected 1, 2, 3, 4 or {CONFIG_VERSION}.')
     for fld in ("devices", "routes", "matrix", "automixer", "muteLinks", "metadata"):
         if fld not in parsed:
             raise DeserializeError(f'Missing required field "{fld}".')
@@ -45,6 +45,8 @@ def deserialize(text: str) -> SystemConfig:
         _migrate_v2_to_v3(parsed)
     if parsed["version"] == 3:
         _migrate_v3_to_v4(parsed)
+    if parsed["version"] == 4:
+        _migrate_v4_to_v5(parsed)
     return config_from_dict(parsed)
 
 
@@ -73,4 +75,11 @@ def _migrate_v3_to_v4(obj: dict) -> None:
     ``room.objects`` — all optional, additive fields. A v3 file gains nothing it
     didn't have (every new field is omit-when-absent), so this is a pure version
     bump; existing devices/objects reconstruct identically."""
+    obj["version"] = 4
+
+
+def _migrate_v4_to_v5(obj: dict) -> None:
+    """v5 adds ``bearingDeg`` (mounting bearing) to ``microphoneArray`` devices — a single
+    optional, omit-when-absent field. A v4 file gains nothing it didn't have, so this is a
+    pure version bump; existing arrays reconstruct byte-identically."""
     obj["version"] = CONFIG_VERSION

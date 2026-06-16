@@ -94,12 +94,12 @@ def test_legacy_room_object_is_byte_identical():
 # --------------------------------------------------------------------------- #
 # Migration / version gate
 # --------------------------------------------------------------------------- #
-def test_v3_file_loads_as_v4():
+def test_v3_file_migrates_to_current():
     c = cp.create_config("Room", "x")
     doc = json.loads(cp.serialize(c))
     doc["version"] = 3                                    # a genuine v3 file
     restored = cp.deserialize(json.dumps(doc))
-    assert restored.version == cp.CONFIG_VERSION == 4
+    assert restored.version == cp.CONFIG_VERSION         # migrates the whole chain to current (v5)
     # additive: a v3 doc gains nothing, so re-bumping to v3 reproduces the original
     up = json.loads(cp.serialize(restored))
     up["version"] = 3
@@ -116,7 +116,7 @@ def test_v3_with_legacy_furniture_migrates():
         "objects": [{"id": "o1", "kind": "table", "position": {"x": 2, "y": 2}}],
     }
     restored = cp.deserialize(json.dumps(doc))
-    assert restored.version == 4
+    assert restored.version == cp.CONFIG_VERSION
     assert restored.room.objects[0].kind == "table"
 
 

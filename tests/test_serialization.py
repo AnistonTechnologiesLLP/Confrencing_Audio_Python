@@ -40,6 +40,40 @@ def test_camelcase_schema():
     assert "deviceId" in proc["ports"][0]
 
 
+def test_array_bearing_round_trip():
+    import json
+    c = cp.create_config("rt", "2026-01-01T00:00:00Z")
+    c = cp.add_device(c, cp.create_microphone_array("A", "Array"))
+    arr0 = next(x for x in json.loads(cp.serialize(c))["devices"] if x["id"] == "A")
+    assert "bearingDeg" not in arr0                          # omit-when-None (unaimed array)
+    c = cp.set_array_bearing(c, "A", 45.0)
+    d = json.loads(cp.serialize(c))
+    assert d["version"] == cp.CONFIG_VERSION == 5
+    arr1 = next(x for x in d["devices"] if x["id"] == "A")
+    assert arr1["bearingDeg"] == 45.0                        # serialized as camelCase
+    assert cp.serialize(cp.deserialize(cp.serialize(c))) == cp.serialize(c)   # lossless round-trip
+
+
+def test_v4_config_migrates_to_v5_losslessly():
+    import json
+    c = cp.create_config("m", "2026-01-01T00:00:00Z")
+    c = cp.add_device(c, cp.create_microphone_array("A", "Array"))
+    obj = json.loads(cp.serialize(c))
+    obj["version"] = 4                                       # a genuine v4 file: array carries no bearingDeg
+    restored = cp.deserialize(json.dumps(obj))              # migrate v4 -> v5
+    out = json.loads(cp.serialize(restored))
+    assert out["version"] == 5
+    arr = next(x for x in out["devices"] if x["id"] == "A")
+    assert "bearingDeg" not in arr                          # additive migration adds nothing
+
+
+def test_array_bearing_setter_rejects_non_array():
+    c = cp.create_config("x", "2026-01-01T00:00:00Z")
+    c = cp.add_device(c, cp.create_codec("C", "Codec", "dante"))
+    with pytest.raises(ValueError, match="not a microphone array"):
+        cp.set_array_bearing(c, "C", 10.0)
+
+
 def test_reject_malformed():
     with pytest.raises(DeserializeError):
         cp.deserialize("{ not json")

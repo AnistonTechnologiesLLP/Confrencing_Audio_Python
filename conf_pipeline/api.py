@@ -478,6 +478,16 @@ def set_speaker_tilt(config: SystemConfig, device_id: str, tilt_deg: float) -> S
     return _map_device(config, device_id, lambda d: _aimed(d, device_id, tilt_deg=tilt_deg))
 
 
+def set_array_bearing(config: SystemConfig, device_id: str, bearing_deg: float) -> SystemConfig:
+    """Set a microphone array's mounting bearing (compass heading of its 0° reference, 0° = +Y).
+    Needed to map a detected array-relative azimuth into room coordinates for room-aware steering. v5."""
+    def _set(d: Device) -> Device:
+        if d.type != "microphoneArray":
+            raise ValueError(f"Device {device_id} is not a microphone array (no bearing).")
+        return _with(d, bearing_deg=bearing_deg % 360.0)
+    return _map_device(config, device_id, _set)
+
+
 # --------------------------------------------------------------------------- #
 # Furniture / room objects (v4)
 # --------------------------------------------------------------------------- #

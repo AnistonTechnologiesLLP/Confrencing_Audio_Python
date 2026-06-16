@@ -278,6 +278,7 @@ from .api import (  # noqa: F401
     add_talker,
     assign_device_profile,
     remove_furniture,
+    set_array_bearing,
     set_camera_bearing,
     set_camera_tilt,
     set_furniture_dimensions,

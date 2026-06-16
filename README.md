@@ -13,8 +13,8 @@ and steering angles are planning abstractions; the optional **placement simulato
 placement, with an opt-in physics-validation backend — still no real-time DSP.
 
 The engine is a faithful port of the TypeScript version and writes the **same
-JSON schema** (camelCase keys; currently `version` 4 — older v1/v2/v3 files load
-and migrate losslessly), at matching v4 parity with the TS sibling. The PySide6
+JSON schema** (camelCase keys; currently `version` 5 — older v1–v4 files load
+and migrate losslessly), at matching v5 parity with the TS sibling. The PySide6
 desktop app is presented as **Aniston Room Designer**.
 
 ## Layout
@@ -526,6 +526,11 @@ dispersion) so the desktop app renders the same contract in **both 2D and 3D**. 
 app gains a floating **SimBar** to toggle the overlays and a **Furniture tool** to
 place / move / resize / rotate items. Lossless from v1/v2/v3; a config that uses none
 of the v4 fields round-trips byte-for-byte.
+
+**Schema v5** additionally gives `MicrophoneArray` an optional `bearingDeg` (its mounting
+heading, 0° = +Y) — the prerequisite for mapping a detected array-relative azimuth into room
+coordinates (room-aware steering). Additive and omit-when-absent, so v1–v4 configs still
+migrate byte-identically; set it with `cp.set_array_bearing(config, array_id, deg)`.
 
 ## Real-time array beamforming (1.16.0)
 

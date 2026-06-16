@@ -16,7 +16,7 @@ from typing import Any, Literal, Optional, TypeGuard, Union
 # --------------------------------------------------------------------------- #
 # Constants
 # --------------------------------------------------------------------------- #
-CONFIG_VERSION = 4
+CONFIG_VERSION = 5
 MAX_ZONES_PER_ARRAY = 8
 MAX_MANUAL_LOBES = 8
 DEFAULT_DEDICATED_ZONE_SIZE_M = 1.8
@@ -486,6 +486,10 @@ class MicrophoneArray:
     elevation: Optional[float] = None
     profile_id: Optional[str] = None
     dsp_blocks: list[DspBlock] = field(default_factory=list)
+    # v5 — mounting bearing (compass heading of the array's 0° reference, 0° = +Y). Lets a detected
+    # array-relative azimuth be mapped into room coordinates (room-aware steering). Optional so
+    # existing array configs round-trip byte-identically (None ⇒ orientation unspecified).
+    bearing_deg: Optional[float] = None
 
 
 @dataclass
@@ -754,7 +758,7 @@ def _device(d: dict[str, Any]) -> Device:
     elev = d.get("elevation")
     common = dict(id=d["id"], label=d["label"], ports=ports)
     if t == "microphoneArray":
-        dev: Device = MicrophoneArray(coverage_mode=d["coverageMode"], zones=[_zone(z) for z in d["zones"]], aec=_aec(d["aec"]), **common)
+        dev: Device = MicrophoneArray(coverage_mode=d["coverageMode"], zones=[_zone(z) for z in d["zones"]], aec=_aec(d["aec"]), bearing_deg=d.get("bearingDeg"), **common)
     elif t == "wirelessMic":
         dev = WirelessMic(aec=_aec(d["aec"]), **common)
     elif t == "wiredMic":

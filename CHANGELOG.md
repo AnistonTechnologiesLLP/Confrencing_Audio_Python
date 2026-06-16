@@ -3,13 +3,20 @@
 Python port of the Conferencing Audio Pipeline. Format based on
 [Keep a Changelog](https://keepachangelog.com/); versions originally tracked
 the TypeScript project they were ported from. The JSON **config schema** is
-camelCase, currently `CONFIG_VERSION` = 4 (v1/v2/v3 files migrate losslessly);
-the TS sibling is at matching v4 parity. The desktop app is presented as
+camelCase, currently `CONFIG_VERSION` = 5 (v1–v4 files migrate losslessly);
+the TS sibling is at matching v5 parity. The desktop app is presented as
 **Aniston Room Designer**.
 
 ## [Unreleased]
 
 ### Added
+- **Microphone-array mounting bearing** (schema **v4 → v5**) — `MicrophoneArray` gains an
+  optional `bearingDeg` (compass heading of the array's 0° reference, 0° = +Y), so a
+  detected array-relative azimuth can be mapped into room coordinates. It's the prerequisite
+  for room-aware steering. Additive and omit-when-absent (mirrors the loudspeaker's
+  `bearingDeg`), so existing v1–v4 configs migrate byte-identically; `set_array_bearing`
+  api + parity-matched in the TypeScript sibling (`bearingDeg` + `setArrayBearing`, same v5
+  migration). (`conf_pipeline/model.py`, `persistence.py`, `api.py`; +3 round-trip/migration tests.)
 - **Data-adaptive MVDR beamforming** (`mode="mvdr"`) — the flagship beam tier, reusing the
   superdirective STFT / `plan_look`-`commit_look` plumbing unchanged but feeding the per-bin solve a
   **measured** noise covariance instead of the fixed analytic Γ. A gated EMA (`_noise_cov`,
