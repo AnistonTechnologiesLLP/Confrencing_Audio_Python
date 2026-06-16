@@ -711,6 +711,8 @@ class PolarisBeamformer(MicController):
         mode: str = MODE_DELAYSUM,
         superdirective_loading: float = DEFAULT_SUPERDIRECTIVE_LOADING,   # mode="superdirective" only
         steer_to_doa: bool = True,
+        auto_null: bool = False,                   # null detected interferers (freq-domain modes only)
+        auto_null_max: int = 2,                    # max auto-derived interferer nulls per tick
         fixed_azimuth_deg: Optional[float] = None,
         beam_bandlimit_hz: Optional[float] = DEFAULT_BEAM_BANDLIMIT_HZ,   # None/0 disables
         output_callback: Optional[Callable[[Any], None]] = None,
@@ -755,6 +757,12 @@ class PolarisBeamformer(MicController):
         self.min_separation_deg = float(min_separation_deg)
         self.doa_update_hz = max(1.0, float(doa_update_hz))
         self.steer_to_doa = bool(steer_to_doa)
+        # auto-null: feed detected interferer bearings (and any caller-supplied set_nulls bearings)
+        # to the freq-domain beam as LCMV nulls. No-op for the time-domain modes (no null DOF).
+        self.auto_null = bool(auto_null)
+        self.auto_null_max = max(0, int(auto_null_max))
+        self._explicit_nulls: list = []      # caller-supplied bearings (set_nulls); DOA thread reads
+        self._active_nulls: list = []        # bearings actually nulled this tick (telemetry)
         self.beam_bandlimit_hz = beam_bandlimit_hz
         self.output_device = output_device
         self.monitor = monitor
@@ -915,23 +923,69 @@ class PolarisBeamformer(MicController):
             self.steer_to_doa = True
             return
         self.steer_to_doa = False
-        plan = self._beam.plan_look(float(azimuth_deg), self.off_nadir_deg)   # heavy work off the lock
+        nulls = self._current_nulls([], float(azimuth_deg))            # caller-supplied nulls, if any
+        plan = self._beam.plan_look(float(azimuth_deg), self.off_nadir_deg, nulls)   # off the lock
         with self._beam_lock:
             self._beam.commit_look(plan)
             self._steered_az = float(azimuth_deg)
+        self._publish_active_nulls(nulls, float(azimuth_deg))          # telemetry = nulls actually applied
+
+    def set_nulls(self, bearings: Optional[Sequence[float]] = None) -> None:
+        """Set explicit interferer bearings (deg) to null — e.g. from the room-aware layer (non-target
+        seats) or a manual control — applied on the next DOA tick. Frequency-domain modes only (the
+        time-domain tiers have no null degrees of freedom). ``None``/``[]`` clears them."""
+        self._explicit_nulls = [float(b) for b in (bearings or [])]
+
+    @property
+    def active_nulls(self) -> list:
+        """The interferer bearings the beam is currently nulling (for display / telemetry)."""
+        with self._state_lock:
+            return list(self._active_nulls)
+
+    def _freq_domain(self) -> bool:
+        """The beam mode supports nulls (LCMV) only in the frequency-domain tiers."""
+        return self.mode in (MODE_SUPERDIRECTIVE, MODE_MVDR)
+
+    def _nulls_engaged(self) -> bool:
+        """True when nulls can change tick-to-tick, so the look must be re-planned every tick."""
+        return self._freq_domain() and (self.auto_null or bool(self._explicit_nulls))
+
+    def _current_nulls(self, dets: list, look_az: float) -> list:
+        """Interferer bearings to null this tick (frequency-domain modes only, else empty): the
+        caller-supplied ``set_nulls`` bearings + — when ``auto_null`` — every detected source that is
+        not the one being looked at (the beam additionally drops any null within 5° of the look)."""
+        if not self._freq_domain():
+            return []
+        nulls = list(self._explicit_nulls)
+        if self.auto_null and dets:
+            keep = max(self.min_separation_deg / 2.0, _NULL_LOOK_GUARD_DEG)   # the look's own source
+            nulls.extend(d.azimuth_deg for d in dets if _az_sep(d.azimuth_deg, look_az) >= keep)
+        return nulls
+
+    def _publish_active_nulls(self, nulls: list, look_az: Optional[float]) -> None:
+        """Record the nulls the beam ACTUALLY applies (telemetry). Runs the *same* `_acceptable_nulls`
+        filter the LCMV solve uses (drop within 5° of the look / near-duplicates, cap to the M−1
+        budget), so `active_nulls` matches the committed beam rather than the raw request."""
+        if look_az is not None and self.geometry is not None:
+            applied = _acceptable_nulls(nulls, look_az, self.geometry.n_active - 1)
+        else:
+            applied = []
+        with self._state_lock:
+            self._active_nulls = applied
 
     # ---- DOA detection (pure-ish; covariance in, dominant azimuth out) ----
     def _detect_dominant(self, cov: Any, freqs: Any):
         """Run SRP-PHAT on a band covariance and return
         ``(dominant_az or None, salience_db, detections)``. ``cov`` must be the
         full ``(n_band, M, M)`` over **all** capsules — :func:`doa.detect` slices to
-        the active ones via the geometry mask; pre-slicing mis-maps azimuth."""
+        the active ones via the geometry mask; pre-slicing mis-maps azimuth. With ``auto_null`` we
+        ask for more peaks (dominant + interferers) so the secondary sources can be nulled."""
         assert self.geometry is not None
         res = doa.detect(
             cov, freqs, self.geometry,
             off_nadir_deg=self.off_nadir_deg,
             grid_step_deg=self.grid_step_deg,
-            max_talkers=1,                       # single dominant talker
+            max_talkers=(1 + self.auto_null_max) if self.auto_null else 1,   # dominant (+ interferers)
             min_separation_deg=self.min_separation_deg,
             min_salience_db=self.min_salience_db,
             vad_floor_db=self.vad_floor_db,
@@ -961,15 +1015,19 @@ class PolarisBeamformer(MicController):
             self._reading = reading
             self._detections = dets
         self._noise_gate = not reading.active     # gate the MVDR noise covariance (audio thread reads this)
-        # Re-steer when the talker moves; in mvdr also re-solve every tick so the null tracks the
-        # evolving (gated) noise field even when the committed look angle is unchanged.
+        # Re-steer when the talker moves; in mvdr, or whenever nulls are engaged, re-solve EVERY tick so
+        # the null tracks the evolving noise field / appearing-or-clearing interferers even when the
+        # committed look angle is unchanged. The heavy solve stays off the audio lock.
         target_az = reading.azimuth_deg if (self.steer_to_doa and reading.azimuth_deg is not None) \
             else self._steered_az
-        if target_az is not None and (target_az != self._steered_az or self.mode == MODE_MVDR):
-            plan = self._beam.plan_look(target_az, self.off_nadir_deg)   # heavy work off the lock
+        nulls = self._current_nulls(dets, target_az) if target_az is not None else []
+        if target_az is not None and (
+                target_az != self._steered_az or self.mode == MODE_MVDR or self._nulls_engaged()):
+            plan = self._beam.plan_look(target_az, self.off_nadir_deg, nulls)   # heavy work off the lock
             with self._beam_lock:
                 self._beam.commit_look(plan)
                 self._steered_az = target_az
+        self._publish_active_nulls(nulls, target_az)   # telemetry = the nulls actually applied
 
     def _snapshot_covariance(self):
         with self._cov_lock:
@@ -1350,6 +1408,8 @@ def _demo(argv: Optional[Sequence[str]] = None) -> int:
     ap.add_argument("--bandlimit", type=float, default=None,
                     help="beam low-pass cutoff, Hz (default: array aliasing cutoff ~5500)")
     ap.add_argument("--no-bandlimit", action="store_true", help="disable the beam band-limit")
+    ap.add_argument("--auto-null", action="store_true",
+                    help="null detected interferers (the non-dominant talkers); superdirective/mvdr only")
     ap.add_argument("--monitor", action="store_true", help="play the mono output (use HEADPHONES)")
     ap.add_argument("--output-device", type=int, default=None, help="monitor output device index")
     ap.add_argument("--wait", action="store_true",
@@ -1378,10 +1438,12 @@ def _demo(argv: Optional[Sequence[str]] = None) -> int:
     bf = PolarisBeamformer(
         device=args.device, radius_m=args.radius, sample_rate=args.rate, block_ms=args.block_ms,
         dead_capsule=dead, hold_seconds=args.hold, switch_margin_deg=args.switch_margin,
-        mode=args.mode, superdirective_loading=args.loading,
+        mode=args.mode, superdirective_loading=args.loading, auto_null=args.auto_null,
         monitor=args.monitor, output_device=args.output_device,
         wait_for_device=args.wait, **bl_kw,
     )
+    if args.auto_null and bf.mode not in (MODE_SUPERDIRECTIVE, MODE_MVDR):
+        print(f"Note: --auto-null needs a frequency-domain mode; '{bf.mode}' has no null DOF (ignored).")
     assert bf.geometry is not None
     print(f"Array: {bf.geometry.n_active}/{POLARIS_N_MICS} capsules, aperture "
           f"{bf.geometry.aperture_m() * 100:.1f} cm.  Aliasing cutoff ~{ALIAS_CUTOFF_HZ / 1000:.1f} kHz.")
@@ -1416,7 +1478,9 @@ def _demo(argv: Optional[Sequence[str]] = None) -> int:
             else:
                 tag = "  · "
             err = f"  !{bf.error}" if bf.error else ""
-            print(f"\r[{tag}] DOA {az}  sal {r.salience_db:4.1f}dB  | lvl {bf.read_level():4.2f}{err}    ",
+            nulls = bf.active_nulls
+            null_s = f"  null {','.join(f'{n:.0f}' for n in nulls)}°" if nulls else ""
+            print(f"\r[{tag}] DOA {az}  sal {r.salience_db:4.1f}dB{null_s}  | lvl {bf.read_level():4.2f}{err}    ",
                   end="", flush=True)
     except KeyboardInterrupt:
         print("\nStopping ...")

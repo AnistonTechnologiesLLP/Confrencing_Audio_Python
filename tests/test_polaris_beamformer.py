@@ -7,6 +7,7 @@ backpressure, and lifecycle parity (streams stubbed). numpy is required for the
 DSP paths and skipped if absent.
 """
 import math
+from types import SimpleNamespace
 
 import pytest
 
@@ -544,6 +545,76 @@ def test_time_domain_modes_ignore_nulls():
     p0, p1 = fd.plan_look(30.0), fd.plan_look(30.0, nulls=[120.0])
     assert p0[0] == p1[0] and p0[1] == p1[1] and p0[2] == p1[2]               # idx / int delays / maxd
     assert all(np.array_equal(a, b) for a, b in zip(p0[3], p1[3]))            # fractional FIR kernels
+
+
+# --------------------------------------------------------------------------- #
+# Auto-null wiring on the steered path (#13-2: detection → null hand-off)
+# --------------------------------------------------------------------------- #
+def test_current_nulls_time_domain_is_noop_freq_domain_flows():
+    """Explicit set_nulls flow into the freq-domain modes only; the time-domain tiers have no null
+    DOF, so _current_nulls is empty and _nulls_engaged is False there."""
+    ds = PolarisBeamformer(device=None, mode="delaysum", auto_null=True)
+    ds.set_nulls([90.0, 200.0])
+    assert ds._current_nulls([SimpleNamespace(azimuth_deg=120.0, salience_db=9.0)], 30.0) == []
+    assert ds._nulls_engaged() is False
+    sd = PolarisBeamformer(device=None, mode="superdirective")
+    sd.set_nulls([90.0, 200.0])
+    assert sd._current_nulls([], 30.0) == [90.0, 200.0]
+    assert sd._nulls_engaged() is True
+    sd.set_nulls(None)                                         # clear
+    assert sd._current_nulls([], 30.0) == [] and sd._nulls_engaged() is False
+
+
+def test_current_nulls_auto_null_nulls_non_look_detections():
+    """auto_null adds every detected source EXCEPT the one being looked at (within min_sep/2)."""
+    bf = PolarisBeamformer(device=None, mode="superdirective", auto_null=True)
+    dets = [SimpleNamespace(azimuth_deg=30.0, salience_db=20.0),   # the look's own source → kept
+            SimpleNamespace(azimuth_deg=35.0, salience_db=8.0),    # within 20° of look → kept
+            SimpleNamespace(azimuth_deg=120.0, salience_db=10.0),  # interferer → nulled
+            SimpleNamespace(azimuth_deg=210.0, salience_db=6.0)]   # interferer → nulled
+    nulls = bf._current_nulls(dets, 30.0)
+    assert nulls == [120.0, 210.0]
+    bf.set_nulls([300.0])                                      # explicit nulls union with the auto ones
+    assert bf._current_nulls(dets, 30.0) == [300.0, 120.0, 210.0]
+
+
+def test_detect_dominant_max_talkers_scales_with_auto_null(monkeypatch):
+    """auto_null asks SRP-PHAT for extra peaks (dominant + interferers); otherwise just the dominant."""
+    seen = {}
+    def fake_detect(cov, freqs, geom, **kw):
+        seen["max"] = kw.get("max_talkers")
+        return SimpleNamespace(active=False, detections=[])
+    monkeypatch.setattr(doa, "detect", fake_detect)
+    PolarisBeamformer(device=None, mode="superdirective", auto_null=False)._detect_dominant(object(), FREQS)
+    assert seen["max"] == 1
+    PolarisBeamformer(device=None, mode="superdirective", auto_null=True, auto_null_max=3)._detect_dominant(object(), FREQS)
+    assert seen["max"] == 4                                    # 1 dominant + 3 interferers
+
+
+def test_doa_tick_auto_null_commits_a_beam_that_nulls_the_interferer(monkeypatch):
+    """End-to-end wiring: a tick with a dominant at 30° and an interferer at 120° commits a beam that
+    is distortionless at 30° and nulls 120°, and reports it via active_nulls."""
+    bf = PolarisBeamformer(device=None, mode="superdirective", auto_null=True)
+    monkeypatch.setattr(bf, "_snapshot_covariance", lambda: (object(), FREQS))
+    dets = [SimpleNamespace(azimuth_deg=30.0, salience_db=20.0),
+            SimpleNamespace(azimuth_deg=120.0, salience_db=10.0)]
+    monkeypatch.setattr(doa, "detect", lambda *a, **k: SimpleNamespace(active=True, detections=dets))
+    bf.set_steering(30.0)                                      # pin the look (deterministic, no smoothing)
+    bf._doa_tick()
+    assert bf.active_nulls == [120.0]
+    W, freqs, geom = bf._beam._W, bf._beam._freqs, bf.geometry
+    bi = _band_bins(freqs)[1]
+    assert abs(_resp_at_bin(W, freqs, geom, bi, 30.0) - 1.0) < 1e-6   # distortionless at the look
+    assert _resp_at_bin(W, freqs, geom, bi, 120.0) < 1e-6             # interferer nulled exactly
+
+
+def test_active_nulls_reports_only_the_nulls_actually_applied():
+    """Telemetry matches the committed beam: a requested null within 5° of the look (dropped by the
+    LCMV filter) is NOT advertised by active_nulls."""
+    bf = PolarisBeamformer(device=None, mode="superdirective")
+    bf.set_nulls([33.0, 120.0])                  # 33° is within 5° of the 30° look → filtered out
+    bf.set_steering(30.0)                        # pins the look and publishes active_nulls via the filter
+    assert bf.active_nulls == [120.0]            # only the actually-applied null is reported
 
 
 # --------------------------------------------------------------------------- #

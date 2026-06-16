@@ -19,6 +19,15 @@ the TS sibling is at matching v5 parity. The desktop app is presented as
   and the status line shows both the heard bearing and the applied offset. (+8 headless tests.)
 
 ### Added
+- **Auto-null on the steered beam** (`PolarisBeamformer(auto_null=True)`) — wires the LCMV nulls into
+  the live DOA loop: the steered superdirective / mvdr beam now follows the dominant talker **and
+  nulls the other detected sources** (interferers). `_doa_tick` raises the SRP-PHAT peak budget
+  (`auto_null_max`), takes the dominant as the look and the non-look detections as nulls, and re-solves
+  off the audio lock each tick so a null appears / moves / clears as interferers do. `set_nulls(bearings)`
+  adds explicit caller-supplied nulls (e.g. non-target seat bearings from the room-aware layer); both
+  are reported via `active_nulls`. Threads through `BeamEngine(steered_cfg={"auto_null": True})` with no
+  engine change, and `polaris-beam-demo --auto-null`. The time-domain modes (no null DOF) ignore it.
+  (`conf_pipeline_control/polaris_beamformer.py`; +4 hardware-free tests — validated live on the array.)
 - **Explicit LCMV nulls on the steered frequency-domain beam** (`_FreqDomainBeam`, `mode` =
   `superdirective` / `mvdr`) — the per-bin solve generalises from plain MVDR
   (`w = R⁻¹a / aᴴR⁻¹a`) to LCMV (`w = R⁻¹C (CᴴR⁻¹C)⁻¹ g`, `C = [a(look), a(φ₁)…]`, `g = [1,0,…]`),
