@@ -10,6 +10,17 @@ the TS sibling is at matching v5 parity. The desktop app is presented as
 ## [Unreleased]
 
 ### Added
+- **Target-loudness AGC on the beam output** (`PolarisBeamformer`, `conf_pipeline_control/
+  polaris_beamformer.py`) — opt-in `agc_target_db` normalizes the mono output level so a near vs a far
+  talker lands at a consistent loudness. One scalar gain per block pushes the beam-output RMS toward the
+  target, **EMA-slewed** (`tracking.ExponentialTracker`, `agc_slew_alpha`) so it ramps without pumping
+  and **clamped** to ±`agc_max_gain_db` (default 18 dB) so it never amplifies the noise floor; below
+  `agc_silence_db` (default −55 dBFS) it **holds** the gain instead of chasing silence. Control-pure
+  (driven by output level only, no room/distance coupling) and sits below the user's `set_gain_db`.
+  Off by default (`agc_target_db=None` is byte-identical to before); threads through `BeamEngine`
+  (`steered_cfg={"agc_target_db": …}`) and the `polaris-beam-demo --agc-target-db` flag. The slew
+  tracker is atomically rebound on `reset_transient` (mirroring the talker tracker, since the audio
+  thread mutates it lock-free). (+3 hardware-free tests.)
 - **Room-aware seat-nulling** — while the steered beam follows the talker at the matched seat, null the
   **other (empty) seats**. New pure `conf_pipeline.seat_null_azimuths(config, array_id, *,
   exclude_seat_id=None)` returns the non-target seats' **array-relative** azimuths (the inverse of the

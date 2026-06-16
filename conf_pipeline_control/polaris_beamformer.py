@@ -59,7 +59,7 @@ from .audio import controls_available, list_input_devices, missing_dependencies
 from .beamformer import _unit_from_az_offnadir
 from .control import MicController
 from .geometry import SOUND_SPEED_MPS, ArrayGeometry, sensibel_8, with_active_channels
-from .tracking import Tracker
+from .tracking import ExponentialTracker, Tracker
 from . import doa
 
 # --- POLARIS hardware constants (physical facts — do not "tune") ---
@@ -91,6 +91,13 @@ DEFAULT_FRACDELAY_TAPS = 15       # fractional-delay FIR length (odd); common la
 _STFT_FRAME = DEFAULT_NFFT        # frequency-domain beam STFT length (1024)
 _STFT_HOP = _STFT_FRAME // 2      # 50% overlap → COLA-exact Hann overlap-add
 DEFAULT_SUPERDIRECTIVE_LOADING = 0.05   # diagonal loading for the superdirective solve (robustness↔DI)
+
+# --- target-loudness AGC (beam OUTPUT level normalization; OFF unless agc_target_db is set) ---
+# Pulls the mono output toward a constant loudness so a near vs far talker lands at a consistent
+# level. Control-pure: driven by the output RMS only (no room/distance coupling).
+DEFAULT_AGC_MAX_GAIN_DB = 18.0    # clamp |applied gain| to ±this (no run-away boost of the noise floor)
+DEFAULT_AGC_SLEW_ALPHA = 0.15     # per-block EMA on the gain — slow enough not to pump speech (~0.2s @ 32ms)
+DEFAULT_AGC_SILENCE_DB = -55.0    # below this OUTPUT rms, HOLD the gain (don't ramp up near-silence)
 
 MODE_DELAYSUM = "delaysum"        # integer-sample time-domain delay-and-sum (default)
 MODE_FRACDELAY = "fracdelay"      # sub-sample (fractional) delay-and-sum via windowed-sinc FIR
@@ -778,6 +785,10 @@ class PolarisBeamformer(MicController):
         seat_null_max_count: Optional[int] = None,              # cap seat nulls (reserve detected headroom)
         fixed_azimuth_deg: Optional[float] = None,
         beam_bandlimit_hz: Optional[float] = DEFAULT_BEAM_BANDLIMIT_HZ,   # None/0 disables
+        agc_target_db: Optional[float] = None,                           # target output RMS (dBFS); None = AGC off
+        agc_max_gain_db: float = DEFAULT_AGC_MAX_GAIN_DB,                 # clamp |applied AGC gain| to ±this
+        agc_slew_alpha: float = DEFAULT_AGC_SLEW_ALPHA,                   # per-block EMA slew on the gain
+        agc_silence_db: float = DEFAULT_AGC_SILENCE_DB,                   # hold gain below this output RMS
         output_callback: Optional[Callable[[Any], None]] = None,
         output_queue_size: int = 8,
         output_device: Optional[int] = None,
@@ -831,6 +842,21 @@ class PolarisBeamformer(MicController):
         self._explicit_nulls: list = []      # caller-supplied seat/manual bearings (set_nulls); DOA reads
         self._active_nulls: list = []        # bearings actually nulled this tick (telemetry)
         self.beam_bandlimit_hz = beam_bandlimit_hz
+        # target-loudness AGC on the beam OUTPUT (control-pure: driven by output RMS, NOT distance/room).
+        # OFF unless agc_target_db is set; sits below the user's set_gain_db (metering-only here), so manual
+        # gain still trims on top. The applied gain is one scalar/block, EMA-slewed so it ramps (no pumping)
+        # and clamped to ±agc_max_gain_db; near-silence HOLDS the gain so pauses don't amplify the floor.
+        self.agc_target_db = agc_target_db
+        self._agc_target_rms: Optional[float] = (
+            10.0 ** (float(agc_target_db) / 20.0) if agc_target_db is not None else None)
+        self._agc_gain_max = 10.0 ** (float(agc_max_gain_db) / 20.0)
+        self._agc_gain_min = 10.0 ** (-float(agc_max_gain_db) / 20.0)
+        self._agc_silence_rms = 10.0 ** (float(agc_silence_db) / 20.0)
+        self._agc_alpha = float(agc_slew_alpha)
+        # scalar EMA slewing the applied gain (pure stdlib). Rebound atomically in reset_transient,
+        # mirroring _tracker, since the audio thread mutates it lock-free.
+        self._agc_gain: Optional[ExponentialTracker] = (
+            ExponentialTracker(self._agc_alpha) if self._agc_target_rms is not None else None)
         self.output_device = output_device
         self.monitor = monitor
         # device supervision (opt-in): wait for the array to appear, auto-reconnect if it drops
@@ -1209,6 +1235,8 @@ class PolarisBeamformer(MicController):
         np = self._np
         with self._beam_lock:
             mono = self._beam.process(block)
+        if self._agc_gain is not None:
+            mono = self._apply_agc(mono)              # target-loudness normalize (before the linear band-limit)
         if self._lp_kernel is not None:
             mono = self._band_limit(mono)
         rms = float(np.sqrt(np.mean(mono * mono))) if mono.size else 0.0
@@ -1266,6 +1294,8 @@ class PolarisBeamformer(MicController):
         self._steered_az = None
         if self._lp_kernel is not None and self._np is not None:
             self._lp_tail = self._np.zeros(len(self._lp_kernel) - 1, dtype=float)  # flush FIR state
+        if self._agc_gain is not None:
+            self._agc_gain = ExponentialTracker(self._agc_alpha)   # fresh slew state (atomic rebind; audio reads lock-free)
         with self._beam_lock:
             self._beam.reset()             # drop the strategy's streaming history; rebuilt on next process
 
@@ -1396,6 +1426,26 @@ class PolarisBeamformer(MicController):
         self._last_block_monotonic = time.monotonic()       # watchdog: stream is alive
         self._emit(self.process_block(indata))              # DSP (beam + DOA cov) → emit
 
+    def _apply_agc(self, mono: Any) -> Any:
+        """Push the beam-output block RMS toward ``agc_target_db`` with one scalar gain, EMA-slewed so
+        it ramps (no pumping) and clamped to ±``agc_max_gain_db``. Near-silence (output RMS below
+        ``agc_silence_db``) HOLDS the current gain instead of ramping up — so pauses don't amplify the
+        noise floor. Control-pure: driven by the output level only, never distance/room. No-op unless
+        ``agc_target_db`` was set (guarded by the caller)."""
+        np = self._np
+        tr = self._agc_gain
+        target = self._agc_target_rms
+        if tr is None or target is None:                 # AGC off (also satisfies the type-checker)
+            return mono
+        rms = float(np.sqrt(np.mean(mono * mono))) if mono.size else 0.0
+        if rms > self._agc_silence_rms:
+            desired = min(self._agc_gain_max, max(self._agc_gain_min, target / rms))
+        else:
+            held = tr.value
+            desired = held if held is not None else 1.0  # hold through silence (don't pump the floor)
+        g = float(tr.update(desired))
+        return (mono * g).astype(np.float32)
+
     def _band_limit(self, mono: Any) -> Any:
         np = self._np
         ext = np.concatenate([self._lp_tail, mono])
@@ -1487,6 +1537,8 @@ def _demo(argv: Optional[Sequence[str]] = None) -> int:
     ap.add_argument("--bandlimit", type=float, default=None,
                     help="beam low-pass cutoff, Hz (default: array aliasing cutoff ~5500)")
     ap.add_argument("--no-bandlimit", action="store_true", help="disable the beam band-limit")
+    ap.add_argument("--agc-target-db", type=float, default=None,
+                    help="normalize output loudness to this RMS, dBFS (e.g. -20); enables output AGC")
     ap.add_argument("--auto-null", action="store_true",
                     help="null detected interferers (the non-dominant talkers); superdirective/mvdr only")
     ap.add_argument("--monitor", action="store_true", help="play the mono output (use HEADPHONES)")
@@ -1518,6 +1570,7 @@ def _demo(argv: Optional[Sequence[str]] = None) -> int:
         device=args.device, radius_m=args.radius, sample_rate=args.rate, block_ms=args.block_ms,
         dead_capsule=dead, hold_seconds=args.hold, switch_margin_deg=args.switch_margin,
         mode=args.mode, superdirective_loading=args.loading, auto_null=args.auto_null,
+        agc_target_db=args.agc_target_db,
         monitor=args.monitor, output_device=args.output_device,
         wait_for_device=args.wait, **bl_kw,
     )
@@ -1533,6 +1586,8 @@ def _demo(argv: Optional[Sequence[str]] = None) -> int:
         MODE_MVDR: f"frequency-domain data-adaptive MVDR (measured noise cov, loading={bf.superdirective_loading})",
     }
     print(f"Beam strategy: {bf.mode}  ({_mode_desc.get(bf.mode, '')})")
+    if bf.agc_target_db is not None:
+        print(f"Output AGC: normalizing to {bf.agc_target_db:.0f} dBFS (±{DEFAULT_AGC_MAX_GAIN_DB:.0f} dB, holds in silence).")
     if args.wait:
         print(f"Waiting for device {args.device} @ {args.rate:.0f} Hz (auto-reconnect on) ... Ctrl+C to stop.")
     else:

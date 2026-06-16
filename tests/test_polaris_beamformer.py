@@ -743,6 +743,87 @@ def test_process_block_bandlimit_attenuates_high_band():
 
 
 # --------------------------------------------------------------------------- #
+# Target-loudness AGC on the beam output (P2b)
+# --------------------------------------------------------------------------- #
+def _agc_rms(x):
+    return float(np.sqrt(np.mean(x * x))) if x.size else 0.0
+
+
+def test_agc_normalizes_quiet_and_loud_output_toward_target():
+    """A quiet vs a loud talker both land at the target output loudness after the gain ramps.
+    Band-limit off so the only processing is beam + AGC and steady-state RMS == the target exactly."""
+    fs = 44100.0
+    target_db = -20.0
+    target_rms = 10.0 ** (target_db / 20.0)                              # 0.1
+    base = _plane_wave_block(PolarisBeamformer(device=None).geometry, 0.0, fs, 1411)
+    for scale in (0.05, 0.5):                                            # a quiet then a loud source (both within ±18 dB)
+        bf = PolarisBeamformer(device=None, agc_target_db=target_db, beam_bandlimit_hz=None)
+        bf._setup_runtime()
+        blk = scale * base
+        out = None
+        for _ in range(150):                                            # let the EMA-slewed gain settle
+            out = bf.process_block(blk)
+        assert abs(_agc_rms(out) - target_rms) / target_rms < 0.08       # converged to target either way
+        assert bf._agc_gain_min <= bf._agc_gain.value <= bf._agc_gain_max  # gain stayed inside the clamp
+
+
+def test_agc_apply_clamps_gain_and_holds_through_silence():
+    """Unit-level on _apply_agc (deterministic, no beam): the gain clamps at ±agc_max_gain_db and a
+    silent block HOLDS the current gain instead of ramping the noise floor up to the clamp."""
+    # (a) signal far BELOW target → desired gain saturates at +max; output never reaches target
+    quiet = PolarisBeamformer(device=None, agc_target_db=-20.0, agc_max_gain_db=18.0)
+    quiet._np = np
+    q = np.full(512, 0.005, dtype=np.float32)                            # rms 0.005, above the -55 dB floor
+    last = None
+    for _ in range(150):
+        last = quiet._apply_agc(q)
+    assert abs(quiet._agc_gain.value - quiet._agc_gain_max) / quiet._agc_gain_max < 0.02   # pinned at +18 dB
+    assert _agc_rms(last) < 10.0 ** (-20.0 / 20.0)                       # clamp kept it short of target
+
+    # (b) signal far ABOVE target → desired gain saturates at -max
+    loud = PolarisBeamformer(device=None, agc_target_db=-20.0, agc_max_gain_db=18.0)
+    loud._np = np
+    big = np.full(512, 0.9, dtype=np.float32)
+    for _ in range(150):
+        loud._apply_agc(big)
+    assert abs(loud._agc_gain.value - loud._agc_gain_min) / loud._agc_gain_min < 0.02      # pinned at -18 dB
+
+    # (c) after the gain has moved, DIGITAL SILENCE holds it (does not pump back up / to the clamp)
+    held_gain = loud._agc_gain.value
+    for _ in range(50):
+        loud._apply_agc(np.zeros(512, dtype=np.float32))
+    assert abs(loud._agc_gain.value - held_gain) < 1e-6                  # frozen through silence
+
+    # (d) starting in silence holds unity — the floor never gets boosted
+    cold = PolarisBeamformer(device=None, agc_target_db=-20.0)
+    cold._np = np
+    for _ in range(50):
+        cold._apply_agc(np.zeros(512, dtype=np.float32))
+    assert abs(cold._agc_gain.value - 1.0) < 1e-9
+
+
+def test_agc_off_is_a_noop_and_reset_rebinds_gain():
+    fs = 44100.0
+    base = 0.3 * _plane_wave_block(PolarisBeamformer(device=None).geometry, 0.0, fs, 1411)
+    off = PolarisBeamformer(device=None, beam_bandlimit_hz=None)         # agc default None
+    ref = PolarisBeamformer(device=None, beam_bandlimit_hz=None)         # identical, agc None
+    on = PolarisBeamformer(device=None, beam_bandlimit_hz=None, agc_target_db=-20.0)
+    for bf in (off, ref, on):
+        bf._setup_runtime()
+    assert off._agc_gain is None and on._agc_gain is not None
+    o = off.process_block(base)
+    r = ref.process_block(base)
+    n = on.process_block(base)
+    assert np.array_equal(o, r)                                          # agc-off path is the unchanged beam output
+    assert not np.allclose(o, n)                                         # agc-on scaled it (here: a loud block, down)
+
+    # reset_transient rebinds a FRESH slew tracker (mirrors _tracker) so a re-activated beam doesn't replay gain
+    assert on._agc_gain.value is not None                               # has adapted
+    on.reset_transient()
+    assert on._agc_gain is not None and on._agc_gain.value is None       # fresh, re-acquires on next block
+
+
+# --------------------------------------------------------------------------- #
 # Error handling (device validation, missing extra)
 # --------------------------------------------------------------------------- #
 def test_device_not_found_raises(monkeypatch):
