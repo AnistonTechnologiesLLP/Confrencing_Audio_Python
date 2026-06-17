@@ -7,7 +7,8 @@ are coalesced onto the next event-loop tick.
 """
 from __future__ import annotations
 
-from PySide6.QtCore import QObject, QRunnable, Qt, QTimer, Signal
+from PySide6.QtCore import QObject, QPointF, QRectF, QRunnable, Qt, QTimer, Signal
+from PySide6.QtGui import QColor, QPainter, QPen
 from PySide6.QtWidgets import (
     QDoubleSpinBox,
     QFrame,
@@ -23,6 +24,7 @@ from PySide6.QtWidgets import (
 import conf_pipeline as cp
 
 from .. import workflow
+from ..theme import PALETTES, SPACE, palette as _palette
 
 DEVICE_TYPES = [
     ("Processor (DSP)", "processor"),
@@ -34,10 +36,9 @@ DEVICE_TYPES = [
     ("Codec (far-end)", "codec"),
 ]
 
-ISSUE_COLORS = {
-    "dark": {"error": "#ff6b81", "warning": "#f7c948"},
-    "light": {"error": "#e23b59", "warning": "#b8860b"},
-}
+# Sourced from the theme palette (err/warn) so issue colours never drift from the rest
+# of the UI — identical values to the old literals, one source now.
+ISSUE_COLORS = {t: {"error": PALETTES[t]["err"], "warning": PALETTES[t]["warn"]} for t in PALETTES}
 BLOCK_LABELS = {"gain": "Gain", "mute": "Mute", "peq4": "PEQ (4-band)", "agc": "AGC",
                 "compressor": "Compressor", "delay": "Delay", "noiseReduction": "Noise reduction", "deverb": "Dereverb"}
 BLOCK_PARAM_SCHEMA = {
@@ -49,6 +50,91 @@ BLOCK_PARAM_SCHEMA = {
     "noiseReduction": [("amountDb", "Amount dB", 0, 30, 1)],
     "deverb": [("amount", "Amount", 0, 1, 0.05)],
 }
+
+
+def set_danger(widget, on: bool = True) -> None:
+    """Mark/unmark a button as destructive (the QSS ``[danger="true"]`` variant) and re-polish so
+    the restyle takes on an already-shown widget (e.g. the Connect/Disconnect toggle)."""
+    widget.setProperty("danger", "true" if on else None)
+    widget.style().unpolish(widget)
+    widget.style().polish(widget)
+
+
+class LevelMeter(QWidget):
+    """A prominent horizontal output meter: green/amber/red zones, a falling peak-hold marker, and a
+    latching clip/hot flag — the read-out an operator watches constantly. ``set_level(frac)`` takes the
+    0..1 display fraction the live ticks already compute (dB-mapped). Click to clear a latched clip.
+    Pure painting, no behaviour — it replaces a flat QProgressBar in the LIVE transport footer."""
+
+    _PEAK_DECAY = 0.012     # the peak marker falls ~this much per update (~10-20 Hz tick) ≈ 2-4 s to floor
+    _CLIP_FRAC = 0.985      # >= this display fraction (~ −0.9 dB) latches the clip/hot flag
+    _AMBER = 0.80           # zone thresholds on the same dB-mapped fraction (~ −12 dB / −5 dB)
+    _RED = 0.92
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._level = 0.0
+        self._peak = 0.0
+        self._clip = False
+        self.setMinimumHeight(18)
+        self.setMinimumWidth(120)
+        self.setCursor(Qt.PointingHandCursor)
+        self.setToolTip("Output level (dB: −60 → left, 0 dBFS → right). Peak-hold marker + clip flag; click to clear.")
+
+    def set_level(self, frac: float, meter: bool = True) -> None:
+        """Set the bar to ``frac`` (0..1). With ``meter`` (audio level) also advance the peak-hold and
+        latch the clip flag; ``meter=False`` is a plain fill (e.g. the OCTOVOX buffer gauge)."""
+        f = 0.0 if frac is None else max(0.0, min(1.0, float(frac)))
+        self._level = f
+        if meter:
+            self._peak = f if f >= self._peak else max(f, self._peak - self._PEAK_DECAY)
+            if f >= self._CLIP_FRAC:
+                self._clip = True
+        else:
+            self._peak = 0.0
+        self.update()
+
+    def level(self) -> float:
+        return self._level
+
+    def reset(self) -> None:
+        self._level = self._peak = 0.0
+        self._clip = False
+        self.update()
+
+    def mousePressEvent(self, e):  # acknowledge / clear a latched clip
+        self._clip = False
+        self.update()
+
+    def _zone(self, f: float, pal: dict) -> str:
+        return pal["err"] if f >= self._RED else (pal["warn"] if f >= self._AMBER else pal["ok"])
+
+    def paintEvent(self, e):  # pragma: no cover - pure painting
+        st = getattr(self.window(), "state", None)        # adapt to the live theme (mirrors canvas.py)
+        pal = _palette(getattr(st, "theme", "dark") if st is not None else "dark")
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing, True)
+        r = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor(pal["surface"]))
+        p.drawRoundedRect(r, 4, 4)
+        if self._level > 0:                                  # filled bar, coloured by the level's zone
+            fill = QRectF(r.x(), r.y(), r.width() * self._level, r.height())
+            p.setBrush(QColor(self._zone(self._level, pal)))
+            p.drawRoundedRect(fill, 4, 4)
+        p.setPen(QPen(QColor(pal["border_strong"]), 1))      # zone-boundary ticks
+        for thr in (self._AMBER, self._RED):
+            x = r.x() + r.width() * thr
+            p.drawLine(QPointF(x, r.y() + 2), QPointF(x, r.bottom() - 2))
+        if self._peak > 0:                                   # falling peak-hold marker
+            px = r.x() + r.width() * self._peak
+            p.setPen(QPen(QColor(self._zone(self._peak, pal)), 2))
+            p.drawLine(QPointF(px, r.y() + 1), QPointF(px, r.bottom() - 1))
+        if self._clip:                                       # latched clip / hot flag
+            p.setPen(Qt.NoPen)
+            p.setBrush(QColor(pal["err"]))
+            p.drawRoundedRect(QRectF(r.right() - 7, r.y(), 7, r.height()), 2, 2)
+        p.end()
 
 
 class _ValidateSignals(QObject):
@@ -192,7 +278,7 @@ class Card(QFrame):
         self.setProperty("card", "true")
         self._title = title
         outer = QVBoxLayout(self)
-        outer.setContentsMargins(8, 4, 8, 8)
+        outer.setContentsMargins(SPACE["sm"], SPACE["xs"], SPACE["sm"], SPACE["sm"])
         outer.setSpacing(2)
         self.header = QPushButton()
         self.header.setProperty("cardHeader", "true")

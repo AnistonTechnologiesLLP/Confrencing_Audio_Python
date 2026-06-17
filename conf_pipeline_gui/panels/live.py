@@ -23,7 +23,6 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QPlainTextEdit,
-    QProgressBar,
     QPushButton,
     QSlider,
     QVBoxLayout,
@@ -35,9 +34,11 @@ import conf_pipeline_control as cc
 
 from .common import (
     Card,
+    LevelMeter,
     NoWheelDoubleSpinBox,
     NoWheelSpinBox,
     PanelBase,
+    set_danger,
     _ABWorker,
     _CalibWorker,
     _ProbeWorker,
@@ -91,6 +92,8 @@ class LivePanel(PanelBase):
         self._live_seat = None           # SeatMatch for the dominant talker (room-aware readout)
         self._beameng_locked_seat = None  # seat_id the steered beam is pinned to (snap-steer), or None
         self._beameng_locked_az = None    # the array-relative azimuth currently pinned (re-pushed if pose moves)
+        self._beameng_locked_manual_az = None  # array-relative angle pinned by the manual dial / a map click, or None
+        self._canvas = None               # injected by MainWindow so "click to aim" can arm the canvas click_cb
 
         root = QVBoxLayout(self)
         root.setContentsMargins(10, 8, 10, 8)
@@ -216,6 +219,17 @@ class LivePanel(PanelBase):
         )
         preset.clicked.connect(self._live_aggressive_preset)
         bf.addRow("Preset", preset)
+        self.live_limits_info = QLabel("ⓘ  POLARIS limits")
+        self.live_limits_info.setProperty("hintChip", "true")
+        self.live_limits_info.setCursor(Qt.WhatsThisCursor)
+        self.live_limits_info.setToolTip(
+            "<b>POLARIS array — physical limits</b><br>"
+            "• <b>Azimuth only</b> — a planar 8-mic ring; it steers left/right but cannot resolve elevation.<br>"
+            "• <b>~5.6 kHz</b> spatial-aliasing ceiling (≈40 mm aperture); the beam grates above it.<br>"
+            "• <b>Two talkers within ~40–50°</b> merge into one lobe — they can't be separated.<br>"
+            "• <b>Front/back ambiguous</b> — one planar ring, so mirrored directions look alike to the DOA."
+        )
+        bf.addRow("Limits", self.live_limits_info)
         beam.body_lay.addLayout(bf)
 
         design_btn = QPushButton("Design beam from zones")
@@ -284,6 +298,30 @@ class LivePanel(PanelBase):
         self.live_autosteer_gate = QCheckBox("Mute output when nobody is in the sector")
         self.live_autosteer_gate.setChecked(True)
         asf.addRow("Gate", self.live_autosteer_gate)
+        self.live_autosteer_clean = QComboBox()              # OCTOVOX voice cleaning on the auto-steer output
+        self.live_autosteer_clean.addItem("Off", None)
+        self.live_autosteer_clean.addItem("OCTOVOX cleaner (OM-LSA)", "omlsa")
+        self.live_autosteer_clean.addItem("Light gate (fast)", "gate")
+        self.live_autosteer_clean.setCurrentIndex(0)         # opt-in (Off by default, like the A/B engine)
+        self.live_autosteer_clean.setToolTip(
+            "Clean the followed talker's voice on the auto-steer output: suppress steady background noise "
+            "(fans / AC / HVAC) learned by minimum statistics — no silence needed — without muting speech. "
+            "'OCTOVOX cleaner' is the decision-directed OM-LSA denoiser ported from OCTOVOX (more natural, "
+            "better on non-stationary noise); 'Light gate' is the lighter spectral gate. Fixed at Connect."
+        )
+        self.live_autosteer_clean.setEnabled(False)          # enabled when auto-steer is ticked (pre-connect)
+        asf.addRow("Clean voice", self.live_autosteer_clean)
+        self.live_autosteer_depth = QComboBox()              # (post_nr_floor_db, post_nr_oversub)
+        self.live_autosteer_depth.addItem("Gentle", (-9.0, 1.2))
+        self.live_autosteer_depth.addItem("Medium", (-15.0, 1.5))
+        self.live_autosteer_depth.addItem("Aggressive", (-22.0, 2.0))
+        self.live_autosteer_depth.setCurrentIndex(1)         # Medium
+        self.live_autosteer_depth.setToolTip(
+            "How hard the cleaner suppresses. Aggressive cuts deeper but can dull speech; Gentle is safest. "
+            "Only applies when 'Clean voice' is on."
+        )
+        self.live_autosteer_depth.setEnabled(False)
+        asf.addRow("Strength", self.live_autosteer_depth)
         self.live_calib_btn = QPushButton("Calibrate front (talk from the front, then click)")
         self.live_calib_btn.setToolTip(
             "Records a few seconds while someone talks from your desk's 'front', measures "
@@ -343,6 +381,45 @@ class LivePanel(PanelBase):
         )
         self.live_beameng_nullseats.setEnabled(False)        # enabled when the engine is ticked
         ef.addRow("Seat nulling", self.live_beameng_nullseats)
+        self.live_beameng_postnr = QCheckBox("Suppress steady noise (fans/AC)")
+        self.live_beameng_postnr.setToolTip(
+            "Reduce steady background noise (fans, AC, HVAC hum) on the beam output: it continuously learns "
+            "the noise floor by minimum statistics — no silence needed — and attenuates it without muting "
+            "(speech sits above the learned floor). Pick the engine with 'Cleaner' below. Fixed at Connect, "
+            "so tick it before connecting."
+        )
+        self.live_beameng_postnr.setEnabled(False)           # enabled when the engine is ticked
+        ef.addRow("Noise gate", self.live_beameng_postnr)
+        self.live_beameng_nr_depth = QComboBox()             # (post_nr_floor_db, post_nr_oversub)
+        self.live_beameng_nr_depth.addItem("Gentle", (-9.0, 1.2))
+        self.live_beameng_nr_depth.addItem("Medium", (-15.0, 1.5))
+        self.live_beameng_nr_depth.addItem("Aggressive", (-22.0, 2.0))
+        self.live_beameng_nr_depth.setCurrentIndex(1)        # Medium (= the engine default)
+        self.live_beameng_nr_depth.setToolTip(
+            "How hard the noise gate suppresses. Aggressive cuts the fan/AC deeper but can dull speech; "
+            "Gentle is safest. Only applies when 'Suppress steady noise' is on."
+        )
+        self.live_beameng_nr_depth.setEnabled(False)         # enabled when the engine is ticked
+        ef.addRow("Noise depth", self.live_beameng_nr_depth)
+        self.live_beameng_nr_engine = QComboBox()            # post_nr engine: OCTOVOX cleaner vs the light gate
+        self.live_beameng_nr_engine.addItem("OCTOVOX cleaner (OM-LSA)", "omlsa")
+        self.live_beameng_nr_engine.addItem("Light gate (fast)", "gate")
+        self.live_beameng_nr_engine.setCurrentIndex(0)       # default: the OCTOVOX-derived decision-directed cleaner
+        self.live_beameng_nr_engine.setToolTip(
+            "Which noise reducer runs on the beam output. 'OCTOVOX cleaner' is the decision-directed OM-LSA "
+            "denoiser ported from OCTOVOX (more natural, better on non-stationary noise); 'Light gate' is the "
+            "lighter single-pole spectral gate. Only applies when 'Suppress steady noise' is on. Fixed at Connect."
+        )
+        self.live_beameng_nr_engine.setEnabled(False)        # enabled when the engine is ticked
+        ef.addRow("Cleaner", self.live_beameng_nr_engine)
+        self.live_beameng_adaptnull = QCheckBox("Adaptive null (learn room noise)")
+        self.live_beameng_adaptnull.setToolTip(
+            "Make the steered beam data-adaptive (MVDR): measure the room's noise field during pauses and "
+            "steer a null onto it (a directional fan / projector / duct), plus auto-null detected "
+            "interferers. Falls back to superdirective during speech. Fixed at Connect — tick before connecting."
+        )
+        self.live_beameng_adaptnull.setEnabled(False)        # enabled when the engine is ticked
+        ef.addRow("Adaptive null", self.live_beameng_adaptnull)
         self.live_beameng_lockseat = QComboBox()
         self.live_beameng_lockseat.addItem("Follow talker (DOA)", None)
         self.live_beameng_lockseat.setToolTip(
@@ -353,6 +430,20 @@ class LivePanel(PanelBase):
         self.live_beameng_lockseat.currentIndexChanged.connect(
             lambda *_a: None if self._refreshing else self._on_beameng_lockseat_changed())
         ef.addRow("Lock to seat", self.live_beameng_lockseat)
+        self.live_beameng_angle = NoWheelDoubleSpinBox()
+        self.live_beameng_angle.setRange(0.0, 360.0)
+        self.live_beameng_angle.setWrapping(True)            # 360° wraps to 0° (a compass dial)
+        self.live_beameng_angle.setSingleStep(5.0)
+        self.live_beameng_angle.setSuffix("°")
+        self.live_beameng_angle.setToolTip(
+            "Pin the steered beam to a manual array-relative angle (0° = the array's reference, clockwise). "
+            "Active when 'Lock to seat' is 'Manual angle' — or just click a spot on the 2D room map to aim "
+            "(that fills this dial). A fixed angle: it does not follow the talker or re-resolve if the array moves."
+        )
+        self.live_beameng_angle.setEnabled(False)            # enabled when steered + 'Manual angle' is selected
+        self.live_beameng_angle.valueChanged.connect(
+            lambda v: None if self._refreshing else self._on_beameng_angle_changed(v))
+        ef.addRow("Manual angle", self.live_beameng_angle)
         self.live_beameng_view = QLabel("Connect with the A/B engine to compare steered vs grid live.")
         self.live_beameng_view.setWordWrap(True)
         self.live_beameng_view.setFont(QFont("Consolas", 9))
@@ -423,11 +514,7 @@ class LivePanel(PanelBase):
         v.setContentsMargins(10, 8, 10, 8)
         v.setSpacing(6)
 
-        self.live_meter = QProgressBar()
-        self.live_meter.setRange(0, 100)
-        self.live_meter.setValue(0)
-        self.live_meter.setTextVisible(False)
-        self.live_meter.setToolTip("Output level (dB scale: −60 dB → 0 %, 0 dB → 100 %)")
+        self.live_meter = LevelMeter()
         v.addWidget(self.live_meter)
 
         row = QHBoxLayout()
@@ -436,6 +523,8 @@ class LivePanel(PanelBase):
         self.live_connect.clicked.connect(self._live_toggle_connect)
         self.live_mute = QPushButton("Mute")
         self.live_mute.setCheckable(True)
+        self.live_mute.setToolTip("Mute the monitor playback. For the A/B engine this needs 'Monitor output "
+                                  "(use headphones)' on — otherwise there's no playback to mute.")
         self.live_mute.clicked.connect(self._live_toggle_mute)
         row.addWidget(self.live_connect)
         row.addWidget(self.live_mute)
@@ -443,6 +532,8 @@ class LivePanel(PanelBase):
         self.live_gain = QSlider(Qt.Horizontal)
         self.live_gain.setRange(-60, 24)
         self.live_gain.setValue(0)
+        self.live_gain.setToolTip("Trim the monitor playback gain. For the A/B engine this needs 'Monitor "
+                                  "output (use headphones)' on.")
         self.live_gain.valueChanged.connect(self._live_gain_changed)
         self.live_gain_lbl = QLabel("0 dB")
         row.addWidget(self.live_gain, 1)
@@ -473,6 +564,13 @@ class LivePanel(PanelBase):
             return self._autosteer.ctrl
         return self._live_ctl
 
+    def _sync_autosteer_nr_enabled(self) -> None:
+        """Enable auto-steer's own OCTOVOX-cleaning controls when auto-steer is selected and not yet
+        connected (the cleaner is built at Connect, like the A/B engine's)."""
+        on = self.live_autosteer.isChecked() and self._autosteer is None
+        self.live_autosteer_clean.setEnabled(on)
+        self.live_autosteer_depth.setEnabled(on)
+
     def _on_autosteer_toggled(self):
         """Enable the sector controls only when auto-steer is selected."""
         on = self.live_autosteer.isChecked()
@@ -480,6 +578,7 @@ class LivePanel(PanelBase):
             w.setEnabled(on)
         if on:                               # session modes are mutually exclusive
             self.live_beameng.setChecked(False)
+        self._sync_autosteer_nr_enabled()    # auto-steer has its own OCTOVOX-cleaning controls
 
     # ---- POLARIS A/B engine (BeamEngine: steered ↔ grid on one stream) ----
     def _beameng_mode(self):
@@ -491,6 +590,10 @@ class LivePanel(PanelBase):
         on = self.live_beameng.isChecked()
         self.live_beameng_mode.setEnabled(on)
         self.live_beameng_nullseats.setEnabled(on)
+        self.live_beameng_postnr.setEnabled(on)
+        self.live_beameng_nr_depth.setEnabled(on)
+        self.live_beameng_nr_engine.setEnabled(on)
+        self.live_beameng_adaptnull.setEnabled(on)
         if on:
             self.live_autosteer.setChecked(False)
             self.live_octovox.setChecked(False)
@@ -499,13 +602,18 @@ class LivePanel(PanelBase):
         """Switch a running engine's strategy live (glitch-free crossfade); otherwise
         the picker just sets the mode the next Connect starts in."""
         e = self._beam_engine
-        if e is not None:
-            try:
-                e.set_mode(self._beameng_mode())
-                if self._beameng_mode() == "steered" and self._beameng_locked_seat is not None:
-                    self._on_beameng_lockseat_changed()   # re-pin: set_mode's reset_transient cleared _steered_az
-            except Exception as exc:
-                self.live_status.setText(f"A/B switch failed: {exc}")
+        if e is None:
+            return
+        steered = self._beameng_mode() == "steered"
+        self.live_beameng_lockseat.setEnabled(steered)   # snap-steer / manual angle only apply to the steered beam
+        if not steered:
+            self.live_beameng_angle.setEnabled(False)
+        try:
+            e.set_mode(self._beameng_mode())
+            if steered and self.live_beameng_lockseat.currentData() is not None:
+                self._on_beameng_lockseat_changed()   # re-pin seat / manual: set_mode's reset_transient cleared _steered_az
+        except Exception as exc:
+            self.live_status.setText(f"A/B switch failed: {exc}")
 
     def _autosteer_sector(self):
         return cc.SectorConfig(
@@ -881,6 +989,8 @@ class LivePanel(PanelBase):
         geom = self._live_geometry()
         rate = self.live_rate.currentData() or 44100
         sector = self._autosteer_sector()
+        clean = self.live_autosteer_clean.currentData()                     # None | "omlsa" | "gate"
+        nr_floor_db, nr_oversub = self.live_autosteer_depth.currentData()   # Gentle / Medium / Aggressive
         try:
             ctrl = cc.AutoSteerController(
                 geom, sector,
@@ -893,6 +1003,9 @@ class LivePanel(PanelBase):
                 gate_when_empty=self.live_autosteer_gate.isChecked(),
                 monitor=self.live_monitor.isChecked(),
                 output_device=self.live_out_device.currentData(),
+                post_nr=clean is not None,                              # OCTOVOX cleaning on the auto-steer output
+                post_nr_engine=clean or "gate",
+                post_nr_floor_db=nr_floor_db, post_nr_oversub=nr_oversub,
             )
             ctrl.ctrl.set_gain_db(float(self.live_gain.value()))
             ctrl.start()
@@ -900,16 +1013,35 @@ class LivePanel(PanelBase):
             self.live_status.setText(f"Auto-steer connect failed: {exc}")
             return
         self._autosteer = ctrl
+        self._sync_autosteer_nr_enabled()    # fixed at Connect: disable the cleaning controls
         self._session_array_id = self._live_array_id()
         self.live_connect.setText("Disconnect")
         # the gate owns muting while auto-steering; avoid a fight with the manual button
         self.live_mute.setEnabled(not self.live_autosteer_gate.isChecked())
         mon = ", monitoring" if self.live_monitor.isChecked() else ""
+        nr = {"omlsa": " · OCTOVOX cleaner", "gate": " · noise-gate"}.get(clean, "")
         self.live_status.setText(
-            f"Auto-steer live · sector {sector.center_deg:.0f}° ±{sector.half_width_deg:.0f}° "
+            f"Auto-steer live · sector {sector.center_deg:.0f}° ±{sector.half_width_deg:.0f}°{nr} "
             f"· up to {int(self.live_max_talkers.value())} talker(s){mon} (headphones)."
         )
         self._notify_session_changed()
+
+    def _beameng_steered_cfg(self, base: dict) -> dict:
+        """The steered back-end's config from the A/B-card noise options (fixed at Connect). Adaptive-null
+        ⇒ data-adaptive MVDR (+ auto-null); seat-nulling alone ⇒ superdirective (both are frequency-domain,
+        so seat nulls still apply under MVDR); the post-beam noise gate is independent of the mode."""
+        cfg = dict(base)
+        if self.live_beameng_adaptnull.isChecked():
+            cfg["mode"] = cc.MODE_MVDR                # data-adaptive: null the measured room noise field
+            cfg["auto_null"] = True
+        elif self.live_beameng_nullseats.isChecked():
+            cfg["mode"] = cc.MODE_SUPERDIRECTIVE      # seat nulls need a frequency-domain steered beam
+        if self.live_beameng_postnr.isChecked():
+            cfg["post_nr"] = True                     # noise reducer on the output (steady fans/AC)
+            floor_db, oversub = self.live_beameng_nr_depth.currentData()   # Gentle / Medium / Aggressive
+            cfg["post_nr_floor_db"], cfg["post_nr_oversub"] = floor_db, oversub
+            cfg["post_nr_engine"] = self.live_beameng_nr_engine.currentData()   # OCTOVOX OM-LSA vs light gate
+        return cfg
 
     def _beameng_connect(self):
         """Start the BeamEngine A/B: steered + grid back-ends on one shared POLARIS stream."""
@@ -921,9 +1053,7 @@ class LivePanel(PanelBase):
         cfg: dict = {"radius_m": float(self.live_radius.value())}
         if any(mask) and not all(mask):
             cfg["active_mask"] = list(mask)          # exclude the dead capsule on both back-ends
-        steered_cfg = dict(cfg)
-        if self.live_beameng_nullseats.isChecked():
-            steered_cfg["mode"] = cc.MODE_SUPERDIRECTIVE   # nulls need a frequency-domain steered beam
+        steered_cfg = self._beameng_steered_cfg(cfg)
         monitor_on = self.live_monitor.isChecked()
         try:
             eng = cc.BeamEngine(
@@ -951,11 +1081,23 @@ class LivePanel(PanelBase):
             eng.set_gain_db(float(self.live_gain.value()))
             eng.set_mute(self.live_mute.isChecked())
         self.live_beameng_nullseats.setEnabled(False)   # the steered beam mode is fixed at Connect
-        self._refresh_beameng_lockseat()                # populate the seat list for snap-steer
-        self.live_beameng_lockseat.setEnabled(self.live_beameng_lockseat.count() > 1)   # only if seats exist
-        mon = "monitoring (headphones)" if monitor_on else "no monitor"
+        self.live_beameng_postnr.setEnabled(False)      # NR / adaptive mode are fixed at Connect too
+        self.live_beameng_nr_depth.setEnabled(False)
+        self.live_beameng_nr_engine.setEnabled(False)
+        self.live_beameng_adaptnull.setEnabled(False)
+        self._refresh_beameng_lockseat()                # populate Follow / Manual angle / seats
+        steered = self._beameng_mode() == "steered"
+        self.live_beameng_lockseat.setEnabled(steered)  # snap-steer / manual angle only apply to the steered beam
+        self.live_beameng_angle.setEnabled(False)       # enabled when 'Manual angle' is selected
+        if self._canvas is not None:
+            self._canvas.click_cb = self._on_canvas_click_live   # arm "click the map to aim"
+        mon = "monitoring (headphones)" if monitor_on else "no monitor — tick Monitor for Mute/Gain"
+        _nr_label = "OCTOVOX cleaner" if self.live_beameng_nr_engine.currentData() == "omlsa" else "noise-gate"
+        nr = [n for n, on in (("adaptive-null", self.live_beameng_adaptnull.isChecked()),
+                              (_nr_label, self.live_beameng_postnr.isChecked())) if on]
+        nr_s = f" · {' + '.join(nr)}" if nr else ""
         self.live_status.setText(
-            f"A/B engine live · {self._beameng_mode()} · switch strategy from the picker ({mon})."
+            f"A/B engine live · {self._beameng_mode()}{nr_s} · switch strategy from the picker ({mon})."
         )
         self._notify_session_changed()
 
@@ -967,12 +1109,13 @@ class LivePanel(PanelBase):
         return f"   ·   seat {m.seat_id} ({m.separation_deg:.0f}° off)"
 
     def _refresh_beameng_lockseat(self):
-        """Rebuild the Lock-to-seat combo from the current room's seats (preserving the 'Follow talker'
-        head). Resets the lock to follow. Signals are blocked so this never auto-steers."""
+        """Rebuild the Lock-to-seat combo: 'Follow talker' head, then 'Manual angle', then the room's seats.
+        Resets the lock to follow. Signals are blocked so this never auto-steers."""
         c = self.live_beameng_lockseat
         c.blockSignals(True)
         c.clear()
         c.addItem("Follow talker (DOA)", None)
+        c.addItem("Manual angle", "__manual__")     # pin to the angle dial / a clicked map point
         try:
             seats = cp.room_seats(self.state.config)
         except Exception:
@@ -981,13 +1124,27 @@ class LivePanel(PanelBase):
             c.addItem(f"Seat {seat_id}", seat_id)
         c.blockSignals(False)
         self._beameng_locked_seat = None
+        self._beameng_locked_manual_az = None
 
     def _on_beameng_lockseat_changed(self):
-        """Pin the steered beam to the chosen seat (snap-steer), or resume DOA-follow on 'Follow talker'."""
+        """Pin the steered beam to the chosen seat (snap-steer), a manual angle, or resume DOA-follow on
+        'Follow talker'. The angle dial is enabled only while 'Manual angle' is selected."""
         e = self._beam_engine
         if e is None:
             return
-        seat_id = self.live_beameng_lockseat.currentData()
+        data = self.live_beameng_lockseat.currentData()
+        is_manual = data == "__manual__"
+        self.live_beameng_angle.setEnabled(is_manual)
+        if is_manual:                                         # pin to the manual dial (or a clicked map point)
+            self._beameng_locked_seat = None
+            self._beameng_locked_az = None
+            az = float(self.live_beameng_angle.value())
+            self._beameng_locked_manual_az = az
+            try: e.set_steering(az)
+            except Exception: pass
+            return
+        self._beameng_locked_manual_az = None                 # leaving manual: drop the angle lock
+        seat_id = data                                        # None = follow, else a seat id
         az = None
         if seat_id is not None and self._session_array_id:
             try:
@@ -1008,6 +1165,47 @@ class LivePanel(PanelBase):
         except Exception:
             pass
 
+    def _on_beameng_angle_changed(self, value):
+        """Pin the steered beam to the manual angle dial. Only acts while 'Manual angle' is the selected
+        lock (the dial is disabled otherwise), so seat / follow locks are never disturbed."""
+        e = self._beam_engine
+        if e is None or self.live_beameng_lockseat.currentData() != "__manual__":
+            return
+        az = float(value)
+        self._beameng_locked_manual_az = az
+        try: e.set_steering(az)
+        except Exception: pass
+
+    def _on_canvas_click_live(self, point) -> bool:
+        """Canvas 'click to aim': turn a clicked room point into a manual lock on the steered beam, by
+        seeding the angle dial + switching the lock selector to 'Manual angle', then driving the manual
+        lock through the one handler. Returns True when it consumed the click (aimed), False so a click
+        it can't act on still falls through to normal selection."""
+        # The A/B session keeps running when the user leaves Live mode (the app only toasts), but the canvas
+        # is shared across modes — so stay inert unless Live is the active view, or we'd hijack Design/etc. clicks.
+        if getattr(self.state, "mode", None) != "live":
+            return False
+        e = self._beam_engine
+        if e is None or self._beameng_mode() != "steered" or not self._session_array_id:
+            return False
+        try:
+            az = cp.azimuth_for_array_point(self.state.config, self._session_array_id, point)
+        except Exception:
+            az = None
+        if az is None:                                        # array has no position / room bearing
+            self.live_status.setText("Click-to-aim needs the array's position + room bearing (Design → array).")
+            return False
+        c = self.live_beameng_lockseat
+        prev = self._refreshing
+        self._refreshing = True                               # seed the dial + combo silently...
+        try:
+            self.live_beameng_angle.setValue(round(az, 1))
+            c.setCurrentIndex(c.findData("__manual__"))
+        finally:
+            self._refreshing = prev
+        self._on_beameng_lockseat_changed()                   # ...then pin once via the manual branch (clears any seat lock)
+        return True
+
     def _push_locked_steering(self):
         """Snap-steer upkeep: while locked (steered), re-resolve the seat's azimuth from the CURRENT
         config each tick and re-pin ONLY if it changed (e.g. the array's pose/bearing was edited in
@@ -1026,15 +1224,28 @@ class LivePanel(PanelBase):
             try: e.set_steering(az)
             except Exception: pass
 
+    def _manual_lock_seat_id(self):
+        """When manual-angle-locked, the seat nearest our manual aim — so 'Null other seats' keeps OUR
+        look (the seat we are aimed at) instead of nulling it. None when not manual-locked / no match."""
+        if self._beameng_locked_manual_az is None or not self._session_array_id:
+            return None
+        try:
+            m = cp.nearest_seat_for_array(self.state.config, self._session_array_id,
+                                          self._beameng_locked_manual_az)
+        except Exception:
+            return None
+        return m.seat_id if m is not None else None
+
     def _push_seat_nulls(self) -> int:
         """Room-aware seat nulling: while the engine runs steered, push the OTHER seats' bearings to the
-        steered beam as nulls, keeping the TARGET seat (the locked seat if snap-steered, else the matched
-        talker's seat). Returns the count pushed (0 = none / cleared); the beam's null-budget composer
-        handles dedupe + the M−1 budget."""
+        steered beam as nulls, keeping the TARGET seat (the locked seat if snap-steered, the seat nearest a
+        manual aim, else the matched talker's seat). Returns the count pushed (0 = none / cleared); the
+        beam's null-budget composer handles dedupe + the M−1 budget."""
         e = self._beam_engine
         if e is None:
             return 0
-        target = self._beameng_locked_seat or (self._live_seat.seat_id if self._live_seat is not None else None)
+        target = self._beameng_locked_seat or self._manual_lock_seat_id() \
+            or (self._live_seat.seat_id if self._live_seat is not None else None)
         az: list = []
         if (self.live_beameng_nullseats.isChecked() and self._beameng_mode() == "steered"
                 and target is not None and self._session_array_id):
@@ -1054,7 +1265,7 @@ class LivePanel(PanelBase):
         e = self._beam_engine
         lvl = e.read_level()
         pct = 0 if lvl <= 1e-6 else int(max(0.0, min(100.0, (20.0 * math.log10(lvl) + 60.0) / 60.0 * 100.0)))
-        self.live_meter.setValue(pct)
+        self.live_meter.set_level(pct / 100.0)
         loc = e.current_location
         self._beameng_loc = loc                      # cached for _publish_overlay
         if loc.angle_deg is not None:                # room-aware: map the tracked bearing to a seat
@@ -1068,7 +1279,14 @@ class LivePanel(PanelBase):
             ang = "  -- " if loc.angle_deg is None else f"{loc.angle_deg:5.0f}°"
             xy = "" if loc.xy is None else f"  ({loc.xy[0]:+.2f}, {loc.xy[1]:+.2f}) m"
             null_s = f"   ·   nulling {n_null} seat(s)" if n_null else ""
-            lock_s = f"   ·   locked → seat {self._beameng_locked_seat}" if self._beameng_locked_seat else ""
+            if self._beameng_mode() != "steered":        # only the steered beam honours a lock
+                lock_s = ""
+            elif self._beameng_locked_seat:
+                lock_s = f"   ·   locked → seat {self._beameng_locked_seat}"
+            elif self._beameng_locked_manual_az is not None:
+                lock_s = f"   ·   locked → {self._beameng_locked_manual_az:.0f}°"
+            else:
+                lock_s = ""
             self.live_beameng_view.setText(
                 f"[{loc.mode}] {ang}{xy}  ·  conf {loc.confidence:.0%}{self._seat_suffix()}{lock_s}{null_s}")
         if e.error:
@@ -1079,7 +1297,7 @@ class LivePanel(PanelBase):
         a = self._autosteer
         lvl = a.read_level()
         pct = 0 if lvl <= 1e-6 else int(max(0.0, min(100.0, (20.0 * math.log10(lvl) + 60.0) / 60.0 * 100.0)))
-        self.live_meter.setValue(pct)
+        self.live_meter.set_level(pct / 100.0)
         dets = a.detections()
         self._live_seat = _dominant_seat(
             self.state.config, self._session_array_id,
@@ -1104,12 +1322,23 @@ class LivePanel(PanelBase):
             self.live_mute.setEnabled(True)
             self.live_gain.setEnabled(True)
             self.live_beameng_nullseats.setEnabled(self.live_beameng.isChecked())   # re-enable for next Connect
+            self.live_beameng_postnr.setEnabled(self.live_beameng.isChecked())
+            self.live_beameng_nr_depth.setEnabled(self.live_beameng.isChecked())
+            self.live_beameng_nr_engine.setEnabled(self.live_beameng.isChecked())
+            self.live_beameng_adaptnull.setEnabled(self.live_beameng.isChecked())
             self.live_beameng_lockseat.setEnabled(False)        # snap-steer needs a running engine
             self.live_beameng_lockseat.blockSignals(True)
             self.live_beameng_lockseat.setCurrentIndex(0)       # back to "Follow talker"
             self.live_beameng_lockseat.blockSignals(False)
+            self.live_beameng_angle.setEnabled(False)
+            self.live_beameng_angle.blockSignals(True)
+            self.live_beameng_angle.setValue(0.0)
+            self.live_beameng_angle.blockSignals(False)
             self._beameng_locked_seat = None
             self._beameng_locked_az = None
+            self._beameng_locked_manual_az = None
+            if self._canvas is not None:
+                self._canvas.click_cb = None                    # disarm "click to aim"
             self.live_beameng_view.setText("Connect with the A/B engine to compare steered vs grid live.")
         if self._autosteer is not None:
             try:
@@ -1117,6 +1346,7 @@ class LivePanel(PanelBase):
             finally:
                 self._autosteer = None
             self.live_mute.setEnabled(True)
+            self._sync_autosteer_nr_enabled()                   # re-enable the cleaning controls for next Connect
             self.live_autosteer_view.setText("Connect with auto-steer enabled to see detected talkers.")
         if self._clean_monitor is not None:
             try:
@@ -1131,7 +1361,7 @@ class LivePanel(PanelBase):
         self._session_array_id = None
         self._live_seat = None
         self.live_connect.setText("Connect")
-        self.live_meter.setValue(0)
+        self.live_meter.reset()
         self.live_status.setText("Disconnected.")
         self._notify_session_changed()
         self._publish_overlay()  # clear the canvas operations view promptly
@@ -1151,7 +1381,9 @@ class LivePanel(PanelBase):
             ctl.set_gain_db(float(v))
 
     def _notify_session_changed(self):
-        """Tell the shell (ModeBar live dot) the session state flipped."""
+        """Tell the shell (ModeBar live dot) the session state flipped, and mark the Connect/Disconnect
+        button destructive while a session runs (it reads 'Disconnect' then)."""
+        set_danger(self.live_connect, self._live_busy())
         w = self.window()
         if hasattr(w, "_live_session_changed"):
             w._live_session_changed(self._live_busy())
@@ -1183,6 +1415,16 @@ class LivePanel(PanelBase):
         # (and the seat dots on the map). 0 when unset → the overlay renders exactly as before.
         arr = next((d for d in self.state.config.devices if d.id == self._session_array_id), None)
         bearing = getattr(arr, "bearing_deg", None) or 0.0
+        # the committed/locked steer (manual-angle dial or snap-steer seat) — drawn as a distinct
+        # solid arrow, separate from the dashed talker DOA. None while following the talker (the DOA
+        # rays already show that direction). Array-relative, lifted to room by `bearing` in the canvas.
+        # Only the STEERED beam honours a lock — in grid mode the lock state persists (for the switch-back
+        # re-pin) but the beam follows the loudest cell, so suppress the arrow to avoid a stale look.
+        steer_az = None
+        if self._beameng_mode() == "steered":
+            steer_az = self._beameng_locked_manual_az
+            if steer_az is None and self._beameng_locked_seat is not None:
+                steer_az = self._beameng_locked_az
         self.state.set_live_overlay({
             # pinned at connect — the combo may show another room's arrays
             "array_id": self._session_array_id,
@@ -1190,7 +1432,8 @@ class LivePanel(PanelBase):
             "detections": detections,
             "seat": seat,
             "bearing": bearing,
-            "level": self.live_meter.value() / 100.0,
+            "level": self.live_meter.level(),
+            "steer_az": steer_az,
             "connected": True,
         })
 
@@ -1210,7 +1453,7 @@ class LivePanel(PanelBase):
         if self._clean_monitor is not None:
             st = self._clean_monitor.state()
             # meter shows playback buffer fill (0..~chunk seconds); status shows progress
-            self.live_meter.setValue(int(min(1.0, st.buffered_s / max(0.5, self.live_chunk.value())) * 100))
+            self.live_meter.set_level(min(1.0, st.buffered_s / max(0.5, self.live_chunk.value())), meter=False)
             msg = f"OCTOVOX: {st.chunks_played} cleaned / {st.chunks_sent} sent"
             if st.gated:
                 msg += f", {st.gated} silent-gated"
@@ -1230,9 +1473,9 @@ class LivePanel(PanelBase):
             else:
                 db = 20.0 * math.log10(lvl)
                 pct = int(max(0.0, min(100.0, (db + 60.0) / 60.0 * 100.0)))
-            self.live_meter.setValue(pct)
-        elif self.live_meter.value() != 0:
-            self.live_meter.setValue(0)
+            self.live_meter.set_level(pct / 100.0)
+        elif self.live_meter.level() != 0:
+            self.live_meter.reset()
         self._publish_overlay()
 
     # --------------------------------------------------------------- refresh

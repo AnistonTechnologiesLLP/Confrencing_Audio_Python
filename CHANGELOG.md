@@ -9,7 +9,67 @@ the TS sibling is at matching v5 parity. The desktop app is presented as
 
 ## [Unreleased]
 
+## [1.18.0] - 2026-06-17
+
+Theme: **manual aiming, a visual-polish pass, and real-time noise suppression** (incl. the OCTOVOX
+OM-LSA cleaner) on the live POLARIS path — all on top of the v1.17.0 room-aware steering. No schema
+change (stays `CONFIG_VERSION` 5; TS sibling already at parity).
+
 ### Added
+- **OCTOVOX voice cleaner on the real-time output** (`conf_pipeline_control/streaming_cleaner.py`
+  `StreamingCleaner`; LIVE A/B card **"Cleaner"** picker; `post_nr_engine` knob; `--post-nr-engine` CLI) —
+  brings OCTOVOX's *cleaning* to the live path. The conferencing engine already beamforms the 8 capsules to
+  one mono voice in real time, so only the **single-channel noise reduction** is ported: a new post-beam
+  engine that runs OCTOVOX's decision-directed **OM-LSA** denoiser (Ephraim–Malah / Cohen 2003) frame-by-frame
+  at the existing `post_nr` seam. It's a **drop-in** for the light spectral gate — same
+  `process(block, noise_gate)`/`reset()` contract, same overlap-add + minimum-statistics floor — but swaps the
+  single-pole Wiener for the OM-LSA log-spectral-amplitude gain with a per-bin speech-presence floor, which is
+  more natural and stronger on non-stationary noise. Runs **on the audio thread** at 44.1 kHz (~12 ms added,
+  comfortably inside a ~100–150 ms conferencing budget); pure numpy, with a vendored `_exp1` exponential-integral
+  approximation standing in for `scipy.special.exp1`. Select it in the GUI "Cleaner" combo (**OCTOVOX cleaner
+  (OM-LSA)**, the default when the noise reducer is on; **Light gate (fast)** keeps the old behaviour), or via
+  `post_nr_engine="omlsa"|"wiener"|"gate"`. DeepFilterNet3 is deliberately **not** in the live path (it needs
+  48 kHz + torch and has no frame-streaming API), so it stays an offline / out-of-process path.
+  **The cleaner applies to the auto-steer path too**, not just the A/B engine: `LiveBeamController` (which
+  `AutoSteerController` wraps) gained the same `post_nr`/`post_nr_engine` knobs and runs the reducer on its
+  beam output, and the **Auto-steer** section now has its own **Clean voice** (Off / OCTOVOX cleaner / Light
+  gate) + **Strength** controls. (+25 tests.)
+- **Suppress steady fans / AC from the real-time output** (`PolarisBeamformer` post-NR + LIVE A/B card) —
+  the post-beam noise suppressor now learns the steady background by **minimum statistics** (the per-bin
+  running minimum of the smoothed power over a ~0.7 s window) instead of a VAD-gated EMA, so it removes
+  always-on fan/AC/HVAC hum **without needing silence**. The old gate trained only on VAD-flagged silences,
+  so it never learned a steady *directional* source the DOA mistakes for a talker — which is why a fan
+  wouldn't go away. Speech is preserved inherently (it sits above the learned floor) and the bounded Wiener
+  gate never hard-mutes. Surfaced in the LIVE **A/B engine** card: **"Suppress steady noise (fans/AC)"**
+  (`post_nr`) with a **Gentle / Medium / Aggressive** depth, plus **"Adaptive null (learn room noise)"**
+  (data-adaptive `mode="mvdr"` + `auto_null`) to spatially null a *directional* fan/duct. `cc.MODE_MVDR` /
+  `MODE_FRACDELAY` are now exported; `post_nr_minstat=False` (`--no-post-nr-minstat`) keeps the legacy gate.
+  (+5 tests.)
+- **Visual polish pass (all modes)** — a styling/consistency pass with **no functional or layout change**:
+  consolidated the design-token layer (spacing/type/canvas-colour tokens in `theme.py`, de-duped issue
+  colours, an AA contrast bump on the dimmest text); a **danger** button variant so destructive actions
+  (Delete / Remove / Disconnect) read as destructive; and additive LIVE-state cues — a **prominent output
+  meter** (peak-hold + clip + green/amber/red zones, replacing the flat bar), a distinct **solid
+  steered/locked-direction arrow** on the room map (vs the dashed talker DOA), a **hardware-limit (i)** chip
+  (azimuth-only / ~5.6 kHz / ~40–50° merge / planar), and **disabled-with-reason** hints on Mute/Gain.
+  (+12 tests.)
+- **Set a microphone array's room bearing in Design** (`conf_pipeline_gui/panels/design.py`) — the array's
+  mounting heading (`bearing_deg`, 0° = +Y) is now editable from the **Design** properties panel (a **Bearing
+  (°)** spin, like cameras/loudspeakers but without Tilt — the array is planar), routed to
+  `set_array_bearing`. This was the missing prerequisite that made the room-aware features inert from the
+  app: snap-steer ("Lock to seat"), seat-nulling, the live seat readout, and **click-to-aim** all need the
+  array bearing, but it was only settable via the API. Now it's a one-field setup in Design. (+1 test.)
+- **Lock the listening direction to a manual place** (`conf_pipeline.azimuth_for_array_point`, LIVE panel) —
+  besides "Lock to seat", the steered POLARIS beam can now be pinned to **any direction**: a **"Manual angle"**
+  entry in the lock picker reveals a degrees dial (0–360°, a compass that wraps), and **clicking a spot on the
+  2D room map** aims the beam there. Both drive the same pin — a map click computes the point's array-relative
+  azimuth (new `azimuth_for_array_point`, the same room-rotation as `seat_azimuth_for_array` but for an
+  arbitrary point) and fills the dial. Click-to-aim is opt-in (armed only while a steered A/B engine is
+  connected, via a new canvas `click_cb`) and a click it can't resolve falls through to normal selection.
+  Works **without any seats** (a raw angle) and without an array bearing for the dial; the map click needs the
+  array's position + room bearing. With "Null other seats" on, the nulls keep the seat **nearest your aim** so
+  you never null your own look; the readout shows `locked → …°`. Click-to-aim is inert outside Live mode
+  (the canvas is shared, so a backgrounded A/B session can't hijack Design/Simulate clicks). (+7 tests.)
 - **Snap-steer / "Lock to seat"** (`conf_pipeline.seat_azimuth_for_array`, `BeamEngine.set_steering`,
   LIVE panel) — pin the steered POLARIS beam to a **chosen room seat** instead of following the loudest
   talker. New pure helper `seat_azimuth_for_array(config, array_id, seat_id)` returns a specific seat's

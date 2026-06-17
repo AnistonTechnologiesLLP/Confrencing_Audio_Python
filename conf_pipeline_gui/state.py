@@ -59,6 +59,7 @@ class AppState(QObject):
         #  "detections": [(azimuth_deg, salience_db, in_sector)],
         #  "seat": {"id", "x", "y"} | None,   # room seat the dominant talker maps to
         #  "bearing": deg,                    # array mounting heading; rotates rays+sector to room
+        #  "steer_az": deg | None,            # committed/locked beam look (array-relative); solid arrow
         #  "level": 0..1, "connected": bool}  — or None when idle.
         self.live_overlay = None
 

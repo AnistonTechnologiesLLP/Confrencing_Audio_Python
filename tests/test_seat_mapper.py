@@ -172,3 +172,28 @@ def test_seat_azimuth_for_array_none_cases():
     c = _config_with_array_and_seats()
     c = cp.add_device(c, cp.create_codec("C", "Codec", "dante"))
     assert cp.seat_azimuth_for_array(c, "C", "sofa-seat1") is None                            # not a mic array
+
+
+# --------------------------------------------------------------------------- #
+# azimuth_for_array_point — array-relative bearing of an ARBITRARY point (click-to-aim)
+# --------------------------------------------------------------------------- #
+def test_azimuth_for_array_point_resolves_a_point():
+    c = _config_with_array_and_seats(bearing=0.0)
+    assert cp.azimuth_for_array_point(c, "A", Point2D(0.0, 3.0)) == 0.0     # north → array frame 0 (bearing 0)
+    assert cp.azimuth_for_array_point(c, "A", Point2D(3.0, 0.0)) == 90.0    # east → 90
+    assert cp.azimuth_for_array_point(c, "A", Point2D(-3.0, 0.0)) == 270.0  # west → 270
+    # re-mounting the array (bearing 90) rotates the point into the array frame by −90
+    c2 = _config_with_array_and_seats(bearing=90.0)
+    assert cp.azimuth_for_array_point(c2, "A", Point2D(0.0, 3.0)) == 270.0  # north 0−90 → 270
+    # a point that coincides with a seat resolves to the same azimuth as seat_azimuth_for_array
+    assert cp.azimuth_for_array_point(c, "A", Point2D(3.0, 0.0)) == cp.seat_azimuth_for_array(c, "A", "sofa-seat2")
+
+
+def test_azimuth_for_array_point_none_cases():
+    p = Point2D(1.0, 1.0)
+    assert cp.azimuth_for_array_point(_config_with_array_and_seats(), "ZZ", p) is None         # unknown array
+    assert cp.azimuth_for_array_point(_config_with_array_and_seats(bearing=None), "A", p) is None  # no bearing
+    assert cp.azimuth_for_array_point(_config_with_array_and_seats(position=None), "A", p) is None  # no position
+    c = _config_with_array_and_seats()
+    c = cp.add_device(c, cp.create_codec("C", "Codec", "dante"))
+    assert cp.azimuth_for_array_point(c, "C", p) is None                                       # not a mic array

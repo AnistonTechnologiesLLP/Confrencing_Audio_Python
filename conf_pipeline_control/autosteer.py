@@ -30,6 +30,11 @@ from .beamformer import MODE_SUPERDIRECTIVE, design_multi_bearings
 from .geometry import ArrayGeometry
 from .live import LiveBeamController
 from .model import DEFAULT_DESIGN_FREQ_HZ
+from .polaris_beamformer import (
+    DEFAULT_POST_NR_ENGINE,
+    DEFAULT_POST_NR_FLOOR_DB,
+    DEFAULT_POST_NR_OVERSUB,
+)
 
 
 @dataclass(frozen=True)
@@ -72,6 +77,10 @@ class AutoSteerController:
         monitor: bool = False,
         output_device: Optional[int] = None,
         record_path: Optional[str] = None,
+        post_nr: bool = False,
+        post_nr_engine: str = DEFAULT_POST_NR_ENGINE,
+        post_nr_floor_db: float = DEFAULT_POST_NR_FLOOR_DB,
+        post_nr_oversub: float = DEFAULT_POST_NR_OVERSUB,
     ):
         self.geometry = geometry
         self.sector = sector
@@ -97,6 +106,10 @@ class AutoSteerController:
             output_device=output_device,
             record_path=record_path,
             track_covariance=True,
+            post_nr=post_nr,
+            post_nr_engine=post_nr_engine,
+            post_nr_floor_db=post_nr_floor_db,
+            post_nr_oversub=post_nr_oversub,
         )
         self._thread: Optional[threading.Thread] = None
         self._stop = threading.Event()

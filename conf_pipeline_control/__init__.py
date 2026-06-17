@@ -103,7 +103,14 @@ from .doa import (  # noqa: F401
 )
 from .tracking import AlphaBetaTracker, ExponentialTracker, Tracker, ValueSmoother  # noqa: F401
 from .autosteer import AutoSteerController, SectorConfig  # noqa: F401
-from .polaris_beamformer import DeviceConfigError, DoaReading, PolarisBeamformer  # noqa: F401
+from .polaris_beamformer import (  # noqa: F401
+    MODE_FRACDELAY,
+    MODE_MVDR,
+    DeviceConfigError,
+    DoaReading,
+    PolarisBeamformer,
+)
+from .streaming_cleaner import StreamingCleaner  # noqa: F401  (OCTOVOX-derived live OM-LSA cleaner)
 from .virtual_mic_grid import VirtualMicGrid  # noqa: F401  (optional module — safe to delete)
 from .beam_engine import BeamEngine, Location  # noqa: F401  (optional A/B wrapper — safe to delete)
 
@@ -121,7 +128,7 @@ __all__ = [
     "pickup_directions", "exclusion_directions",
     "steering_vector", "delay_and_sum_weights", "lcmv_weights",
     "superdirective_weights", "diffuse_coherence", "directivity_index_db",
-    "MODE_DELAYSUM", "MODE_SUPERDIRECTIVE", "response",
+    "MODE_DELAYSUM", "MODE_SUPERDIRECTIVE", "MODE_FRACDELAY", "MODE_MVDR", "response",
     "response_db", "white_noise_gain_db", "beam_pattern_azimuth",
     "analyze_lobes", "LobeReport", "talker_leakage_db",
     "design_zone_beams", "design_from_bearings", "design_multi_bearings",
@@ -131,7 +138,7 @@ __all__ = [
     "DEFAULT_F_LO_HZ", "DEFAULT_F_HI_HZ",
     "AutoSteerController", "SectorConfig",
     "Tracker", "ValueSmoother", "ExponentialTracker", "AlphaBetaTracker",
-    "PolarisBeamformer", "DoaReading", "DeviceConfigError",
+    "PolarisBeamformer", "DoaReading", "DeviceConfigError", "StreamingCleaner",
     "VirtualMicGrid",
     "BeamEngine", "Location",
     "MicController", "MicState", "SimulatedMicController",

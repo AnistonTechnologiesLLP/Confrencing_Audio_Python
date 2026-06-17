@@ -66,11 +66,11 @@ conf_pipeline_control/ host-side array-microphone control (optional [control] ex
   octovox_bridge.py   zones → azimuths + HTTP client to the OCTOVOX clean server
   octovox_monitor.py  near-live cleaned monitor (rolling chunk → clean → playback)
   ab_test.py          A/B harness: record → beamform N ways → WAVs + dB report
-  polaris_beamformer.py  real-time SRP-PHAT DOA + steered beam (4 modes, auto-null, AGC) (POLARIS 8-mic)
+  polaris_beamformer.py  real-time SRP-PHAT DOA + steered beam (4 modes, auto-null, AGC, post-NR) (POLARIS 8-mic)
   virtual_mic_grid.py    Nureva-style fixed near-field virtual-mic grid, loudest selected
   beam_engine.py      A/B engine: steered + grid back-ends on one shared input stream
   tracking.py         swappable smoothers (EMA + constant-velocity/Kalman-family hook)
-tests/                pytest suite (538 tests; incl. headless GUI smoke)
+tests/                pytest suite (603 tests; incl. headless GUI smoke)
 run_gui.py            launcher
 ```
 
@@ -569,8 +569,10 @@ default (`beam_bandlimit_hz`), selection/steering smoothing is swappable behind 
 `Tracker` interface (`tracking.py`, with a constant-velocity Kalman-family hook), and
 `polaris-beam-demo` / `polaris-vmic-demo` / `polaris-beam-engine-demo` are console
 entry points. The desktop app's **LIVE** mode also drives the engine directly — a
-steered ↔ grid picker that switches live, with the tracked direction drawn on the room
-map (no monitoring yet).
+steered ↔ grid picker that switches live, a **headphone monitor** of the output, and the
+tracked direction drawn on the room map. You can **lock the look** to a room seat, a
+**manual angle dial**, or by **clicking the spot on the map** (a solid arrow shows where
+the beam is aimed, distinct from the dashed talker DOA).
 
 **Room-aware** (built on the v5 array `bearingDeg`): `conf_pipeline.seat_mapper` turns a
 detected azimuth into the **nearest room seat**, surfaced live as a `· seat <id>` readout
@@ -579,6 +581,21 @@ non-target seat bearings to the steered beam, arbitrated against auto-null by a 
 **null-budget composer** (measured interferers win the budget; speculative seat nulls fill
 the remainder). An opt-in **target-loudness AGC** (`agc_target_db`) normalizes the mono
 output level — EMA-slewed, clamped to ±18 dB, and held through silence.
+
+**Noise suppression for fans / AC** (LIVE A/B card): **"Suppress steady noise (fans/AC)"**
+(`post_nr`) runs a gentle single-channel Wiener gate on the beam output that learns the
+steady background by **minimum statistics** (the per-bin running minimum — no silence or
+VAD needed, so it removes always-on fan/AC/HVAC hum the old gate couldn't), with a
+**Gentle / Medium / Aggressive** depth; speech is preserved (it sits above the floor) and
+the gate never hard-mutes. A **"Cleaner"** picker chooses the engine: **OCTOVOX cleaner
+(OM-LSA)** — OCTOVOX's decision-directed Ephraim–Malah/Cohen denoiser ported to run live on
+the mono output (stronger and more natural on non-stationary noise; pure numpy, ~12 ms) —
+or the **light gate** (the single-pole spectral gate). The same cleaner is available on the
+**auto-steer** path (its **Clean voice** + **Strength** controls), not just the A/B engine.
+**"Adaptive null (learn room noise)"** switches the steered beam to data-adaptive `mvdr` +
+`auto_null` to spatially **null a directional fan/duct**. All opt-in and fixed at Connect;
+A/B them by ear on the monitor. (DeepFilterNet3 stays an offline path — it needs 48 kHz +
+torch and has no frame-streaming API.)
 
 **Caveat:** the ~cm aperture means coarse-zone selection, not
 MXA920/Nureva-scale pinpoint — these isolate a zone or A/B two strategies, they don't

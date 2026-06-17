@@ -14,25 +14,20 @@ from conf_pipeline.angles import Point3D, steering_angles
 from conf_pipeline.model import Point2D, RectShape, default_elevation
 
 from .state import AppState
-from .theme import palette
+from .theme import GLYPH, OVERLAY, palette
 
-DEVICE_STYLE = {
-    "processor": ("#9a6dff", "square"),
-    "microphoneArray": ("#6d8bff", "circle"),
-    "wirelessMic": ("#3ddc97", "circle"),
-    "wiredMic": ("#2dd4bf", "circle"),
-    "loudspeaker": ("#f7c948", "triangle"),
-    "codec": ("#94a3b8", "diamond"),
-    "camera": ("#ff9e5e", "camera"),
-}
-TALKER_COLOR = "#ff7ab6"
+# Canvas glyph/overlay colours live in theme.py (GLYPH/OVERLAY) — one source for both
+# files. These module names are kept as thin aliases so the painter code below is
+# unchanged.
+DEVICE_STYLE = GLYPH
+TALKER_COLOR = OVERLAY["talker"]
 # coverage-overlay colours (also mirrored as theme palette roles)
-PICKUP_COLOR = "#6d8bff"
-FOV_COLOR = "#ff9e5e"
-DISPERSION_COLOR = "#f7c948"
-OCCLUSION_COLOR = "#ff6b81"
-FURNITURE_COLOR = "#8b95bd"
-FURNITURE_SEAT_COLOR = "#3ddc97"
+PICKUP_COLOR = OVERLAY["pickup"]
+FOV_COLOR = OVERLAY["fov"]
+DISPERSION_COLOR = OVERLAY["dispersion"]
+OCCLUSION_COLOR = OVERLAY["occlusion"]
+FURNITURE_COLOR = OVERLAY["furniture"]
+FURNITURE_SEAT_COLOR = OVERLAY["seat"]
 DEFAULT_TALKER_ELEV = 1.2
 
 
@@ -44,13 +39,13 @@ def _qc(hex_str: str, alpha: int = 255) -> QColor:
 
 def _zone_style(ztype: str):
     if ztype == "exclusion":
-        return (_qc("#ff6b81", 40), _qc("#ff6b81"), [2, 3], "⦸")
+        return (_qc(OVERLAY["zone_exclusion"], 40), _qc(OVERLAY["zone_exclusion"]), [2, 3], "⦸")
     if ztype == "dedicated":
-        return (_qc("#9a6dff", 51), _qc("#9a6dff"), [], "◆")
-    return (_qc("#6d8bff", 38), _qc("#6d8bff"), [5, 4], "▢")
+        return (_qc(OVERLAY["zone_dedicated"], 51), _qc(OVERLAY["zone_dedicated"]), [], "◆")
+    return (_qc(OVERLAY["zone_default"], 38), _qc(OVERLAY["zone_default"]), [5, 4], "▢")
 
 
-REC_COLOR = "#3ddc97"  # placement-recommendation accent (green)
+REC_COLOR = OVERLAY["rec"]  # placement-recommendation accent (green)
 
 # What each workflow mode may edit / emphasises on the canvas. Selection works
 # everywhere (cross-mode synergy); geometry editing is a DESIGN job, talkers
@@ -94,6 +89,7 @@ class Canvas(QWidget):
         self.hover = None         # world point (room tool) / screen point (connect)
         self.connect_from = None
         self.coord_cb = None      # optional callback(str) for coordinate readout
+        self.click_cb = None      # optional callback(Point2D) -> bool; consumes a 2D click when it returns True
         self._bg_pixmap = None    # cached floor-plan QPixmap
         self._bg_pixmap_key = None
         self._diff_cache = None       # cached deployment diff for DEPLOY badges
@@ -907,7 +903,8 @@ class Canvas(QWidget):
                 continue
             A = self.w2s(self.device_pos(a), v)
             B = self.w2s(self.device_pos(b), v)
-            color = QColor("#ff6b81") if r.id in err else (QColor("#5fb6ff") if fp.transport == "dante" else QColor("#ffc06a"))
+            color = QColor(OVERLAY["route_err"]) if r.id in err else (
+                QColor(OVERLAY["route_dante"]) if fp.transport == "dante" else QColor(OVERLAY["route_analog"]))
             p.setPen(QPen(color, 3.2 if bold else 2))
             p.drawLine(A, B)
             self._arrowhead(p, A, B, color)
@@ -1007,6 +1004,18 @@ class Canvas(QWidget):
             p.setPen(QPen(_qc(color, alpha), 2.4))
             p.drawLine(c, tip)
             self._label(p, tip.x() + 4, tip.y(), f"{az:.0f}° · {sal:.0f} dB", color)
+        # committed/locked steer (snap-steer seat or the manual-angle dial): a distinct SOLID arrow
+        # showing where the beam is actually aimed, vs the dashed talker DOA. Array-relative angle,
+        # lifted into room coordinates by the bearing like everything else. Absent while DOA-following.
+        steer = ov.get("steer_az")
+        if steer is not None:
+            dx, dy = self._bearing_dir(float(steer) + bearing)
+            tip = self.w2s(Point2D(pos.x + dx * 3.0, pos.y + dy * 3.0), v)
+            scol = _qc(OVERLAY["steer"], 240)
+            p.setPen(QPen(scol, 2.8))
+            p.drawLine(c, tip)
+            self._arrowhead(p, c, tip, scol)
+            self._label(p, tip.x() + 5, tip.y() - 6, f"⊚ {float(steer):.0f}° lock", OVERLAY["steer"])
         # room-aware: ring + label the seat the dominant talker maps to, at the seat's true world
         # position. With the rays now in room coordinates too, ray and ring point the same way.
         seat = ov.get("seat")
@@ -1147,7 +1156,8 @@ class Canvas(QWidget):
             sb = self.project(pb, cam)
             if not sa or not sb:
                 continue
-            color = QColor("#ff6b81") if r.id in err else (QColor("#5fb6ff") if fp.transport == "dante" else QColor("#ffc06a"))
+            color = QColor(OVERLAY["route_err"]) if r.id in err else (
+                QColor(OVERLAY["route_dante"]) if fp.transport == "dante" else QColor(OVERLAY["route_analog"]))
             p.setPen(QPen(color, 1.8))
             p.drawLine(QPointF(sa[0], sa[1]), QPointF(sb[0], sb[1]))
 
@@ -1333,6 +1343,8 @@ class Canvas(QWidget):
             return self.update()
         v = self.view2d()
         w = self.s2w(pos.x(), pos.y(), v)
+        if self.click_cb is not None and self.click_cb(w):   # live "click to aim"; consumes the click
+            return self.update()
         psnap = Point2D(self.snap(w.x), self.snap(w.y))
         tool = self.state.tool
         try:
