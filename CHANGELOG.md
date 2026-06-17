@@ -10,6 +10,12 @@ the TS sibling is at matching v5 parity. The desktop app is presented as
 ## [Unreleased]
 
 ### Added
+- **Set a microphone array's room bearing in Design** (`conf_pipeline_gui/panels/design.py`) — the array's
+  mounting heading (`bearing_deg`, 0° = +Y) is now editable from the **Design** properties panel (a **Bearing
+  (°)** spin, like cameras/loudspeakers but without Tilt — the array is planar), routed to
+  `set_array_bearing`. This was the missing prerequisite that made the room-aware features inert from the
+  app: snap-steer ("Lock to seat"), seat-nulling, the live seat readout, and **click-to-aim** all need the
+  array bearing, but it was only settable via the API. Now it's a one-field setup in Design. (+1 test.)
 - **Lock the listening direction to a manual place** (`conf_pipeline.azimuth_for_array_point`, LIVE panel) —
   besides "Lock to seat", the steered POLARIS beam can now be pinned to **any direction**: a **"Manual angle"**
   entry in the lock picker reveals a degrees dial (0–360°, a compass that wraps), and **clicking a spot on the

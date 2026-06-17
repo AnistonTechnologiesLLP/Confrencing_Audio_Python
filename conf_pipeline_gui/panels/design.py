@@ -331,14 +331,17 @@ class DesignPanel(PanelBase):
             prof.setCurrentIndex(i)
         prof.currentIndexChanged.connect(lambda *_a: None if self._refreshing else self.state.set_config(cp.assign_device_profile(self.state.config, d.id, prof.currentData())))
         form.addRow("Profile", prof)
-        # aim (cameras + loudspeakers) — drives the coverage FOV/dispersion cone
-        if d.type in ("camera", "loudspeaker"):
+        # aim — bearing is the mounting heading (0°=+Y): cameras/loudspeakers steer their FOV/dispersion
+        # cone; a microphone ARRAY's bearing rotates its room frame, enabling room-aware steering
+        # (snap-steer / click-to-aim / seat-nulling). The planar array has no tilt (off-nadir fixed).
+        if d.type in ("camera", "loudspeaker", "microphoneArray"):
             bearing = self._spin(float(getattr(d, "bearing_deg", 0.0) or 0.0), lambda v: self._set_bearing(d, v))
             bearing.setRange(0, 360)
             form.addRow("Bearing (°)", bearing)
-            tilt = self._spin(float(getattr(d, "tilt_deg", 0.0) or 0.0), lambda v: self._set_tilt(d, v))
-            tilt.setRange(-90, 90)
-            form.addRow("Tilt (°)", tilt)
+            if d.type in ("camera", "loudspeaker"):
+                tilt = self._spin(float(getattr(d, "tilt_deg", 0.0) or 0.0), lambda v: self._set_tilt(d, v))
+                tilt.setRange(-90, 90)
+                form.addRow("Tilt (°)", tilt)
         caps = cp.device_capabilities(d)
         captxt = " · ".join([s for s, on in [("AEC", caps.aec), ("automix", caps.automix), ("mute", caps.mute)] if on]) or "—"
         if caps.camera is not None:
@@ -363,7 +366,12 @@ class DesignPanel(PanelBase):
         self.state.set_config(cp.set_device_position(self.state.config, did, Point2D(nx, ny)))
 
     def _set_bearing(self, d, v):
-        fn = cp.set_camera_bearing if d.type == "camera" else cp.set_speaker_bearing
+        if d.type == "camera":
+            fn = cp.set_camera_bearing
+        elif d.type == "microphoneArray":
+            fn = cp.set_array_bearing
+        else:
+            fn = cp.set_speaker_bearing
         self.state.set_config(fn(self.state.config, d.id, float(v)))
 
     def _set_tilt(self, d, v):

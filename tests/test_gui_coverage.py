@@ -107,6 +107,22 @@ def test_add_camera_and_aim_via_design_panel(win):
     assert cp.find_device(st.config, cam.id).bearing_deg == 123.0
 
 
+def test_array_bearing_settable_in_design_panel(win):
+    """Microphone arrays now expose a Bearing control in Design (their mounting heading) — the prerequisite
+    for room-aware steering (snap-steer / click-to-aim / seat-nulling), previously settable only via the API.
+    The props form renders a 'Bearing (°)' row for an array and _set_bearing routes to set_array_bearing."""
+    from PySide6.QtWidgets import QLabel
+    st = win.state
+    st.set_config(cp.add_device(st.config, cp.create_microphone_array("A", "Array", position=Point2D(1.0, 1.0))))
+    design = win.panels["design"]
+    arr = cp.find_device(st.config, "A")
+    design._device_props(arr)                                  # render the array's property form
+    assert "Bearing (°)" in [w.text() for w in design.findChildren(QLabel)]   # the new control is shown
+    assert "Tilt (°)" not in [w.text() for w in design.findChildren(QLabel)]  # planar array: no tilt
+    design._set_bearing(arr, 90.0)                             # the setter routes to set_array_bearing
+    assert cp.find_device(st.config, "A").bearing_deg == 90.0
+
+
 def test_canvas_click_cb_consumes_a_2d_click(win):
     """The opt-in click_cb fires with the clicked ROOM point on a 2D press; returning True consumes the
     click (skips tool handling), False lets it fall through to normal selection, and None (default) is a
