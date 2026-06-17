@@ -56,6 +56,7 @@ OVERLAY = {
     "occlusion": "#ff6b81", "furniture": "#8b95bd", "seat": "#3ddc97", "rec": "#3ddc97",
     "zone_exclusion": "#ff6b81", "zone_dedicated": "#9a6dff", "zone_default": "#6d8bff",
     "route_dante": "#5fb6ff", "route_analog": "#ffc06a", "route_err": "#ff6b81",
+    "steer": "#7fe3ff",         # the committed/locked beam direction (solid arrow, distinct from DOA)
 }
 
 _QSS_TEMPLATE = """

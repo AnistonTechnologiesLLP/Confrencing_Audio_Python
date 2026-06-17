@@ -23,7 +23,6 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QPlainTextEdit,
-    QProgressBar,
     QPushButton,
     QSlider,
     QVBoxLayout,
@@ -35,6 +34,7 @@ import conf_pipeline_control as cc
 
 from .common import (
     Card,
+    LevelMeter,
     NoWheelDoubleSpinBox,
     NoWheelSpinBox,
     PanelBase,
@@ -219,6 +219,17 @@ class LivePanel(PanelBase):
         )
         preset.clicked.connect(self._live_aggressive_preset)
         bf.addRow("Preset", preset)
+        self.live_limits_info = QLabel("ⓘ  POLARIS limits")
+        self.live_limits_info.setProperty("hintChip", "true")
+        self.live_limits_info.setCursor(Qt.WhatsThisCursor)
+        self.live_limits_info.setToolTip(
+            "<b>POLARIS array — physical limits</b><br>"
+            "• <b>Azimuth only</b> — a planar 8-mic ring; it steers left/right but cannot resolve elevation.<br>"
+            "• <b>~5.6 kHz</b> spatial-aliasing ceiling (≈40 mm aperture); the beam grates above it.<br>"
+            "• <b>Two talkers within ~40–50°</b> merge into one lobe — they can't be separated.<br>"
+            "• <b>Front/back ambiguous</b> — one planar ring, so mirrored directions look alike to the DOA."
+        )
+        bf.addRow("Limits", self.live_limits_info)
         beam.body_lay.addLayout(bf)
 
         design_btn = QPushButton("Design beam from zones")
@@ -440,11 +451,7 @@ class LivePanel(PanelBase):
         v.setContentsMargins(10, 8, 10, 8)
         v.setSpacing(6)
 
-        self.live_meter = QProgressBar()
-        self.live_meter.setRange(0, 100)
-        self.live_meter.setValue(0)
-        self.live_meter.setTextVisible(False)
-        self.live_meter.setToolTip("Output level (dB scale: −60 dB → 0 %, 0 dB → 100 %)")
+        self.live_meter = LevelMeter()
         v.addWidget(self.live_meter)
 
         row = QHBoxLayout()
@@ -453,6 +460,8 @@ class LivePanel(PanelBase):
         self.live_connect.clicked.connect(self._live_toggle_connect)
         self.live_mute = QPushButton("Mute")
         self.live_mute.setCheckable(True)
+        self.live_mute.setToolTip("Mute the monitor playback. For the A/B engine this needs 'Monitor output "
+                                  "(use headphones)' on — otherwise there's no playback to mute.")
         self.live_mute.clicked.connect(self._live_toggle_mute)
         row.addWidget(self.live_connect)
         row.addWidget(self.live_mute)
@@ -460,6 +469,8 @@ class LivePanel(PanelBase):
         self.live_gain = QSlider(Qt.Horizontal)
         self.live_gain.setRange(-60, 24)
         self.live_gain.setValue(0)
+        self.live_gain.setToolTip("Trim the monitor playback gain. For the A/B engine this needs 'Monitor "
+                                  "output (use headphones)' on.")
         self.live_gain.valueChanged.connect(self._live_gain_changed)
         self.live_gain_lbl = QLabel("0 dB")
         row.addWidget(self.live_gain, 1)
@@ -979,7 +990,7 @@ class LivePanel(PanelBase):
         self.live_beameng_angle.setEnabled(False)       # enabled when 'Manual angle' is selected
         if self._canvas is not None:
             self._canvas.click_cb = self._on_canvas_click_live   # arm "click the map to aim"
-        mon = "monitoring (headphones)" if monitor_on else "no monitor"
+        mon = "monitoring (headphones)" if monitor_on else "no monitor — tick Monitor for Mute/Gain"
         self.live_status.setText(
             f"A/B engine live · {self._beameng_mode()} · switch strategy from the picker ({mon})."
         )
@@ -1149,7 +1160,7 @@ class LivePanel(PanelBase):
         e = self._beam_engine
         lvl = e.read_level()
         pct = 0 if lvl <= 1e-6 else int(max(0.0, min(100.0, (20.0 * math.log10(lvl) + 60.0) / 60.0 * 100.0)))
-        self.live_meter.setValue(pct)
+        self.live_meter.set_level(pct / 100.0)
         loc = e.current_location
         self._beameng_loc = loc                      # cached for _publish_overlay
         if loc.angle_deg is not None:                # room-aware: map the tracked bearing to a seat
@@ -1163,7 +1174,9 @@ class LivePanel(PanelBase):
             ang = "  -- " if loc.angle_deg is None else f"{loc.angle_deg:5.0f}°"
             xy = "" if loc.xy is None else f"  ({loc.xy[0]:+.2f}, {loc.xy[1]:+.2f}) m"
             null_s = f"   ·   nulling {n_null} seat(s)" if n_null else ""
-            if self._beameng_locked_seat:
+            if self._beameng_mode() != "steered":        # only the steered beam honours a lock
+                lock_s = ""
+            elif self._beameng_locked_seat:
                 lock_s = f"   ·   locked → seat {self._beameng_locked_seat}"
             elif self._beameng_locked_manual_az is not None:
                 lock_s = f"   ·   locked → {self._beameng_locked_manual_az:.0f}°"
@@ -1179,7 +1192,7 @@ class LivePanel(PanelBase):
         a = self._autosteer
         lvl = a.read_level()
         pct = 0 if lvl <= 1e-6 else int(max(0.0, min(100.0, (20.0 * math.log10(lvl) + 60.0) / 60.0 * 100.0)))
-        self.live_meter.setValue(pct)
+        self.live_meter.set_level(pct / 100.0)
         dets = a.detections()
         self._live_seat = _dominant_seat(
             self.state.config, self._session_array_id,
@@ -1238,7 +1251,7 @@ class LivePanel(PanelBase):
         self._session_array_id = None
         self._live_seat = None
         self.live_connect.setText("Connect")
-        self.live_meter.setValue(0)
+        self.live_meter.reset()
         self.live_status.setText("Disconnected.")
         self._notify_session_changed()
         self._publish_overlay()  # clear the canvas operations view promptly
@@ -1292,6 +1305,16 @@ class LivePanel(PanelBase):
         # (and the seat dots on the map). 0 when unset → the overlay renders exactly as before.
         arr = next((d for d in self.state.config.devices if d.id == self._session_array_id), None)
         bearing = getattr(arr, "bearing_deg", None) or 0.0
+        # the committed/locked steer (manual-angle dial or snap-steer seat) — drawn as a distinct
+        # solid arrow, separate from the dashed talker DOA. None while following the talker (the DOA
+        # rays already show that direction). Array-relative, lifted to room by `bearing` in the canvas.
+        # Only the STEERED beam honours a lock — in grid mode the lock state persists (for the switch-back
+        # re-pin) but the beam follows the loudest cell, so suppress the arrow to avoid a stale look.
+        steer_az = None
+        if self._beameng_mode() == "steered":
+            steer_az = self._beameng_locked_manual_az
+            if steer_az is None and self._beameng_locked_seat is not None:
+                steer_az = self._beameng_locked_az
         self.state.set_live_overlay({
             # pinned at connect — the combo may show another room's arrays
             "array_id": self._session_array_id,
@@ -1299,7 +1322,8 @@ class LivePanel(PanelBase):
             "detections": detections,
             "seat": seat,
             "bearing": bearing,
-            "level": self.live_meter.value() / 100.0,
+            "level": self.live_meter.level(),
+            "steer_az": steer_az,
             "connected": True,
         })
 
@@ -1319,7 +1343,7 @@ class LivePanel(PanelBase):
         if self._clean_monitor is not None:
             st = self._clean_monitor.state()
             # meter shows playback buffer fill (0..~chunk seconds); status shows progress
-            self.live_meter.setValue(int(min(1.0, st.buffered_s / max(0.5, self.live_chunk.value())) * 100))
+            self.live_meter.set_level(min(1.0, st.buffered_s / max(0.5, self.live_chunk.value())), meter=False)
             msg = f"OCTOVOX: {st.chunks_played} cleaned / {st.chunks_sent} sent"
             if st.gated:
                 msg += f", {st.gated} silent-gated"
@@ -1339,9 +1363,9 @@ class LivePanel(PanelBase):
             else:
                 db = 20.0 * math.log10(lvl)
                 pct = int(max(0.0, min(100.0, (db + 60.0) / 60.0 * 100.0)))
-            self.live_meter.setValue(pct)
-        elif self.live_meter.value() != 0:
-            self.live_meter.setValue(0)
+            self.live_meter.set_level(pct / 100.0)
+        elif self.live_meter.level() != 0:
+            self.live_meter.reset()
         self._publish_overlay()
 
     # --------------------------------------------------------------- refresh

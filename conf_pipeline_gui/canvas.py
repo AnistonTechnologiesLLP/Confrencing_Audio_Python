@@ -1004,6 +1004,18 @@ class Canvas(QWidget):
             p.setPen(QPen(_qc(color, alpha), 2.4))
             p.drawLine(c, tip)
             self._label(p, tip.x() + 4, tip.y(), f"{az:.0f}° · {sal:.0f} dB", color)
+        # committed/locked steer (snap-steer seat or the manual-angle dial): a distinct SOLID arrow
+        # showing where the beam is actually aimed, vs the dashed talker DOA. Array-relative angle,
+        # lifted into room coordinates by the bearing like everything else. Absent while DOA-following.
+        steer = ov.get("steer_az")
+        if steer is not None:
+            dx, dy = self._bearing_dir(float(steer) + bearing)
+            tip = self.w2s(Point2D(pos.x + dx * 3.0, pos.y + dy * 3.0), v)
+            scol = _qc(OVERLAY["steer"], 240)
+            p.setPen(QPen(scol, 2.8))
+            p.drawLine(c, tip)
+            self._arrowhead(p, c, tip, scol)
+            self._label(p, tip.x() + 5, tip.y() - 6, f"⊚ {float(steer):.0f}° lock", OVERLAY["steer"])
         # room-aware: ring + label the seat the dominant talker maps to, at the seat's true world
         # position. With the rays now in room coordinates too, ray and ring point the same way.
         seat = ov.get("seat")

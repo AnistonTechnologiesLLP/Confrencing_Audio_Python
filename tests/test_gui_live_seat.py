@@ -330,3 +330,95 @@ def test_beameng_manual_lock_nulls_keep_our_seat(win):
     panel.live_beameng_nullseats.setChecked(True)
     panel._push_seat_nulls()
     assert eng._steered._explicit_nulls == cp.seat_null_azimuths(st.config, "A", exclude_seat_id="sofa-seat2")
+
+
+# --------------------------------------------------------------------------- #
+# Visual-polish live-state cues (commit 3): meter, steer arrow, (i), disabled hints
+# --------------------------------------------------------------------------- #
+def test_level_meter_peak_hold_clip_and_plain_fill(qapp):
+    """The LevelMeter: set_level tracks a falling peak and latches a clip flag; meter=False is a plain
+    fill (no peak/clip) for the OCTOVOX buffer gauge; reset clears everything."""
+    from conf_pipeline_gui.panels.common import LevelMeter
+    m = LevelMeter()
+    m.set_level(0.5)
+    assert m.level() == 0.5 and m._peak >= 0.5
+    m.set_level(0.1)                                   # falls; peak decays but stays above the new level
+    assert m.level() == 0.1 and 0.1 < m._peak < 0.5
+    m.set_level(0.99)                                  # >= clip frac latches the clip/hot flag
+    assert m._clip is True
+    m.reset()
+    assert m.level() == 0.0 and m._peak == 0.0 and m._clip is False
+    m.set_level(1.0, meter=False)                      # plain fill: no peak, no clip
+    assert m.level() == 1.0 and m._peak == 0.0 and m._clip is False
+
+
+def test_live_panel_uses_the_prominent_level_meter(win):
+    from conf_pipeline_gui.panels.common import LevelMeter
+    assert isinstance(win.panels["live"].live_meter, LevelMeter)
+
+
+def test_publish_overlay_includes_the_locked_steer_az(win):
+    """_publish_overlay carries steer_az = the committed/locked look (manual angle or snap-steer seat),
+    and None while following the talker (the DOA rays already show that)."""
+    import conf_pipeline_control as cc
+    st = win.state
+    st.set_config(_config_with_array_and_seats(bearing=0.0))
+    panel = win.panels["live"]
+    panel._session_array_id = "A"
+    panel._beam_engine = cc.BeamEngine(device=None, mode="steered", steered_cfg={"mode": "superdirective"})
+    panel._beameng_locked_manual_az = None
+    panel._beameng_locked_seat = None
+    panel._publish_overlay()
+    assert st.live_overlay is not None and st.live_overlay.get("steer_az") is None     # following → no arrow
+    panel._beameng_locked_manual_az = 60.0                                              # manual lock
+    panel._publish_overlay()
+    assert st.live_overlay["steer_az"] == 60.0
+    panel._beameng_locked_manual_az = None                                             # seat lock
+    panel._beameng_locked_seat, panel._beameng_locked_az = "sofa-seat2", 90.0
+    panel._publish_overlay()
+    assert st.live_overlay["steer_az"] == 90.0
+
+
+def test_live_overlay_with_steer_az_paints(win):
+    st = win.state
+    st.set_config(_config_with_array_and_seats(bearing=0.0))
+    st.set_mode("live")
+    st.view = "2d"
+    st.set_live_overlay({"array_id": "A", "sector": None, "detections": [(20.0, 9.0, True)],
+                         "seat": None, "bearing": 0.0, "steer_az": 60.0, "level": 0.5, "connected": True})
+    assert win.canvas.grab().width() > 0               # the steer arrow + ray paint, no crash
+
+
+def test_live_limits_info_and_disabled_hints(win):
+    """The hardware-limit (i) chip surfaces the key limits; Mute/Gain carry a 'needs Monitor' hint."""
+    panel = win.panels["live"]
+    assert "5.6 kHz" in panel.live_limits_info.toolTip()
+    assert "Monitor" in panel.live_mute.toolTip() and "Monitor" in panel.live_gain.toolTip()
+
+
+def test_steer_az_is_suppressed_in_grid_mode(win):
+    """Review fix: the lock arrow is steered-only. Switching the A/B engine to grid (which ignores
+    steering) must NOT publish steer_az, even though the lock STATE persists for the switch-back re-pin."""
+    import conf_pipeline_control as cc
+    st = win.state
+    st.set_config(_config_with_array_and_seats(bearing=0.0))
+    panel = win.panels["live"]
+    panel._session_array_id = "A"
+    panel._beam_engine = cc.BeamEngine(device=None, mode="steered", steered_cfg={"mode": "superdirective"})
+    panel.live_beameng_mode.setCurrentIndex(panel.live_beameng_mode.findData("steered"))
+    panel._beameng_locked_manual_az = 60.0
+    panel._publish_overlay()
+    assert st.live_overlay["steer_az"] == 60.0                 # steered + locked → arrow
+    panel.live_beameng_mode.setCurrentIndex(panel.live_beameng_mode.findData("grid"))
+    panel._publish_overlay()
+    assert st.live_overlay["steer_az"] is None                 # grid → no arrow (lock persists, unhonoured)
+    assert panel._beameng_locked_manual_az == 60.0             # …but the lock state survives the switch
+
+
+def test_level_meter_paints_in_light_theme(win):
+    """Review fix: the LevelMeter reads the live theme (mirrors the canvas), so it adapts to a light-theme
+    toggle instead of painting a dark slab."""
+    win.state.theme = "light"
+    win.panels["live"].live_meter.set_level(0.9)
+    assert win.panels["live"].live_meter.grab().width() > 0    # paints against state.theme, no crash
+    win.state.theme = "dark"
