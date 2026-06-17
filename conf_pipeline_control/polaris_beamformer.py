@@ -108,6 +108,15 @@ DEFAULT_POST_NR_OVERSUB = 1.5      # Wiener over-subtraction (1.0 = plain Wiener
 DEFAULT_POST_NR_GAIN_ALPHA = 0.5   # per-bin temporal one-pole on the gain (musical-noise control)
 DEFAULT_POST_NR_WARMUP_FRAMES = 16 # gated noise frames before the gate engages (mirror _NOISE_WARMUP_FRAMES)
 DEFAULT_POST_NR_NOISE_ALPHA = 0.05 # per-bin noise-floor EMA rate (matches _noise_cov_alpha)
+# Minimum-statistics noise floor (DEFAULT): learn the per-bin floor as the running minimum over a sliding
+# window, so STEADY noise (fans/AC/HVAC) is suppressed WITHOUT the VAD flagging silence — a steady
+# directional source reads as a talker (keeps noise_gate False), so the gated EMA above never trains on it.
+# Speech is preserved inherently (it sits ABOVE the per-bin minimum). post_nr_minstat=False ⇒ legacy gate.
+DEFAULT_POST_NR_MINSTAT = True       # minimum statistics (VAD-independent) vs the gated EMA
+DEFAULT_POST_NR_MINSTAT_SUB = 8      # sliding window = this many sub-windows ...
+DEFAULT_POST_NR_MINSTAT_SUBLEN = 16  # ... × this many frames each (8×16 = 128 frames ≈ 0.7 s @ frame 512/256)
+DEFAULT_POST_NR_MINSTAT_BIAS = 1.5   # the minimum under-estimates the mean noise power → lift toward it
+DEFAULT_POST_NR_POWER_ALPHA = 0.8    # per-bin power-smoothing EMA feeding the minimum tracker
 
 MODE_DELAYSUM = "delaysum"        # integer-sample time-domain delay-and-sum (default)
 MODE_FRACDELAY = "fracdelay"      # sub-sample (fractional) delay-and-sum via windowed-sinc FIR
@@ -735,7 +744,14 @@ class _PostNoiseSuppressor:
     """Light single-channel **post-beam** spectral-gate noise suppressor (pure numpy) — a local fallback
     for when the OCTOVOX cloud cleaning path isn't running. Runs on the beamformed MONO output: a windowed
     overlap-add STFT (Hann, 50% hop, COLA-exact) whose per-bin gain is a gentle **single-pole Wiener**
-    against a noise floor learned ONLY on noise-only frames (the SRP VAD's ``noise_gate``).
+    against a learned noise floor.
+
+    Floor estimator (``minstat``, default ON): **minimum statistics** — the per-bin floor is the running
+    minimum of the smoothed power over a sliding window (``minstat_sub`` × ``minstat_sublen`` frames),
+    lifted by ``minstat_bias``. This learns STEADY noise (fans/AC/HVAC) **continuously, without a VAD**, and
+    preserves speech inherently (speech sits ABOVE the per-bin minimum). ``minstat=False`` falls back to the
+    legacy gated EMA that learns ONLY on noise-only frames (the SRP VAD's ``noise_gate``) — which can't
+    train on a steady DIRECTIONAL source the VAD mistakes for a talker.
 
     Gentle by construction — no musical noise: ``G = g_floor + (1−g_floor)·P/(P + oversub·N²)`` is
     smooth and monotonic, bounded in ``[g_floor, 1]`` so it never hard-mutes; a 3-tap frequency smooth
@@ -760,7 +776,12 @@ class _PostNoiseSuppressor:
                  floor_db: float = DEFAULT_POST_NR_FLOOR_DB, oversub: float = DEFAULT_POST_NR_OVERSUB,
                  gain_alpha: float = DEFAULT_POST_NR_GAIN_ALPHA,
                  warmup_frames: int = DEFAULT_POST_NR_WARMUP_FRAMES,
-                 noise_alpha: float = DEFAULT_POST_NR_NOISE_ALPHA):
+                 noise_alpha: float = DEFAULT_POST_NR_NOISE_ALPHA,
+                 minstat: bool = DEFAULT_POST_NR_MINSTAT,
+                 minstat_sub: int = DEFAULT_POST_NR_MINSTAT_SUB,
+                 minstat_sublen: int = DEFAULT_POST_NR_MINSTAT_SUBLEN,
+                 minstat_bias: float = DEFAULT_POST_NR_MINSTAT_BIAS,
+                 power_alpha: float = DEFAULT_POST_NR_POWER_ALPHA):
         self._sr = float(sample_rate)
         self._F = max(2, (int(frame) // 2) * 2)                 # even ≥ 2 (Hann 50%-hop COLA needs even frame)
         self._H = self._F // 2
@@ -769,6 +790,11 @@ class _PostNoiseSuppressor:
         self._gain_alpha = min(1.0, max(0.0, float(gain_alpha)))
         self._warmup = max(0, int(warmup_frames))
         self._noise_alpha = min(1.0, max(0.0, float(noise_alpha)))
+        self._minstat = bool(minstat)
+        self._minstat_sub = max(1, int(minstat_sub))
+        self._minstat_sublen = max(1, int(minstat_sublen))
+        self._minstat_bias = max(1.0, float(minstat_bias))
+        self._power_alpha = min(1.0, max(0.0, float(power_alpha)))
         self._lock = threading.Lock()          # serialize process() (audio thread) vs reset() (control thread)
         self._init_state()
 
@@ -781,11 +807,18 @@ class _PostNoiseSuppressor:
         self._ola = np.zeros(self._F, dtype=float)              # overlap-add synthesis accumulator
         self._inq = np.zeros(0, dtype=float)                    # pending input samples (FIFO)
         self._outq = np.zeros(self._F, dtype=float)             # synthesized output (FIFO; primed = fixed latency)
-        self._noise_mag = np.zeros(nb, dtype=float)            # per-bin noise-floor magnitude EMA
+        self._noise_mag = np.zeros(nb, dtype=float)            # per-bin noise-floor magnitude (EMA or min-stat)
         self._gain_prev = np.ones(nb, dtype=float)             # per-bin gain (temporal smoothing state)
         self._freqs = np.fft.rfftfreq(self._F, d=1.0 / self._sr)
-        self._noise_frames = 0                                 # gated frames seen (warmup counter)
+        self._noise_frames = 0                                 # gated frames seen (legacy-EMA warmup counter)
         self._engaged = False                                  # True once the floor is trusted
+        # minimum-statistics state: a sliding window of per-bin power minima (VAD-independent floor)
+        self._total_frames = 0                                 # all frames seen (min-stat warmup counter)
+        self._p_smooth = np.zeros(nb, dtype=float)             # per-bin smoothed |X|² feeding the min tracker
+        self._submin = np.full(nb, np.inf, dtype=float)        # current sub-window running minimum
+        self._minbuf = np.full((self._minstat_sub, nb), np.inf, dtype=float)  # completed sub-window minima
+        self._sub_frame = 0                                    # frame index within the current sub-window
+        self._sub_idx = 0                                      # circular write index into _minbuf
 
     def reset(self) -> None:
         with self._lock:               # serialize vs an in-flight process() on the audio thread
@@ -822,7 +855,25 @@ class _PostNoiseSuppressor:
                 self._inbuf[:-H] = self._inbuf[H:]             # slide analysis frame left by one hop
                 self._inbuf[-H:] = hop_in
                 X = np.fft.rfft(self._inbuf * self._win)       # (nb,) complex
-                if noise_gate:                                  # learn the floor on noise-only frames only
+                if self._minstat:                               # min-statistics floor — runs EVERY frame (no VAD)
+                    P = X.real * X.real + X.imag * X.imag       # |X|² per bin
+                    if not self._total_frames:                  # seed the EMA with the first power so the minimum
+                        self._p_smooth = P.copy()               # tracker doesn't latch a cold-start 0-ramp under-floor
+                    else:
+                        self._p_smooth = self._power_alpha * self._p_smooth + (1.0 - self._power_alpha) * P
+                    self._submin = np.minimum(self._submin, self._p_smooth)
+                    self._sub_frame += 1
+                    if self._sub_frame >= self._minstat_sublen:   # close the sub-window, start a fresh one
+                        self._minbuf[self._sub_idx] = self._submin
+                        self._sub_idx = (self._sub_idx + 1) % self._minstat_sub
+                        self._submin = self._p_smooth.copy()
+                        self._sub_frame = 0
+                    p_min = np.minimum(self._submin, self._minbuf.min(axis=0))   # window minimum (finite after 1 frame)
+                    self._noise_mag = np.sqrt(self._minstat_bias * p_min)        # → _gain squares it (n2 = noise_mag²)
+                    self._total_frames += 1
+                    if not self._engaged and self._total_frames >= self._warmup:
+                        self._engaged = True                   # enough frames seen → start suppressing (no VAD needed)
+                elif noise_gate:                                # legacy: learn the floor on noise-only frames only
                     a = self._noise_alpha
                     self._noise_mag *= (1.0 - a)
                     self._noise_mag += a * np.abs(X)           # symmetric per-bin EMA
@@ -921,7 +972,8 @@ class PolarisBeamformer(MicController):
         post_nr_oversub: float = DEFAULT_POST_NR_OVERSUB,               # NR Wiener over-subtraction strength
         post_nr_gain_alpha: float = DEFAULT_POST_NR_GAIN_ALPHA,         # NR temporal gain smoothing
         post_nr_frame: int = DEFAULT_POST_NR_FRAME,                     # NR STFT frame (latency ↔ freq res)
-        post_nr_warmup_frames: int = DEFAULT_POST_NR_WARMUP_FRAMES,     # gated frames before NR engages
+        post_nr_warmup_frames: int = DEFAULT_POST_NR_WARMUP_FRAMES,     # frames before NR engages
+        post_nr_minstat: bool = DEFAULT_POST_NR_MINSTAT,                # min-statistics floor (VAD-free) vs gated EMA
         output_callback: Optional[Callable[[Any], None]] = None,
         output_queue_size: int = 8,
         output_device: Optional[int] = None,
@@ -1002,6 +1054,7 @@ class PolarisBeamformer(MicController):
         self._post_nr_gain_alpha = float(post_nr_gain_alpha)
         self._post_nr_frame = int(post_nr_frame)
         self._post_nr_warmup_frames = int(post_nr_warmup_frames)
+        self._post_nr_minstat = bool(post_nr_minstat)
         self._post_nr: Optional[_PostNoiseSuppressor] = None
         self.output_device = output_device
         self.monitor = monitor
@@ -1382,7 +1435,7 @@ class PolarisBeamformer(MicController):
         self._post_nr = _PostNoiseSuppressor(
             self.sample_rate, frame=self._post_nr_frame, floor_db=self._post_nr_floor_db,
             oversub=self._post_nr_oversub, gain_alpha=self._post_nr_gain_alpha,
-            warmup_frames=self._post_nr_warmup_frames) if self.post_nr else None
+            warmup_frames=self._post_nr_warmup_frames, minstat=self._post_nr_minstat) if self.post_nr else None
 
     # ---- external-feed seam (BeamEngine drives the DSP from a shared stream) ----
     def process_block(self, block: Any) -> Any:
@@ -1708,6 +1761,10 @@ def _demo(argv: Optional[Sequence[str]] = None) -> int:
                     help="post-beam spectral-gate noise suppression (local fallback for the OCTOVOX cloud path)")
     ap.add_argument("--post-nr-floor-db", type=float, default=DEFAULT_POST_NR_FLOOR_DB,
                     help=f"post-NR residual floor / suppression depth, dB (default {DEFAULT_POST_NR_FLOOR_DB:.0f})")
+    ap.add_argument("--post-nr-oversub", type=float, default=DEFAULT_POST_NR_OVERSUB,
+                    help=f"post-NR Wiener over-subtraction strength (default {DEFAULT_POST_NR_OVERSUB})")
+    ap.add_argument("--no-post-nr-minstat", dest="post_nr_minstat", action="store_false",
+                    help="use the legacy VAD-gated noise floor instead of minimum statistics (default: min-stat)")
     ap.add_argument("--auto-null", action="store_true",
                     help="null detected interferers (the non-dominant talkers); superdirective/mvdr only")
     ap.add_argument("--monitor", action="store_true", help="play the mono output (use HEADPHONES)")
@@ -1741,6 +1798,7 @@ def _demo(argv: Optional[Sequence[str]] = None) -> int:
         mode=args.mode, superdirective_loading=args.loading, auto_null=args.auto_null,
         agc_target_db=args.agc_target_db,
         post_nr=args.post_nr, post_nr_floor_db=args.post_nr_floor_db,
+        post_nr_oversub=args.post_nr_oversub, post_nr_minstat=args.post_nr_minstat,
         monitor=args.monitor, output_device=args.output_device,
         wait_for_device=args.wait, **bl_kw,
     )
