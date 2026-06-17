@@ -11,7 +11,7 @@ PALETTES = {
         bg="#0a0a0e", surface="#0e0e13", surface2="#13131a", surface3="#181820", hover="#1f1f2a", elev="#1a1a23",
         chrome="#08080c",
         border="#262633", border_soft="#1c1c26", border_strong="#33333f",
-        text="#edeef4", text_dim="#c4c5d2", muted="#9197ab", faint="#646a82",
+        text="#edeef4", text_dim="#c4c5d2", muted="#9197ab", faint="#7e85a0",
         accent="#6d8bff", accent_bright="#85a0ff", accent_press="#5a78f0", on_accent="#070a16",
         sel="#1b2138", ok="#3ddc97", warn="#f7c948", err="#ff6b81",
         canvas_bg="#0a0e18", canvas_grid="#172238", canvas_axis="#2c3760",
@@ -27,6 +27,35 @@ PALETTES = {
         canvas_bg="#e9edf5", canvas_grid="#d4dae8", canvas_axis="#b9c2da",
         canvas_text="#33353f", canvas_text_dim="#5b6075",
     ),
+}
+
+# --- Spacing & type scale: the single source for layout rhythm + fonts. QSS holds
+#     no variables, so Python widgets (and the new shared widgets) read these directly,
+#     mirroring how the painter reads ``canvas_*`` / ``GLYPH`` / ``OVERLAY`` below. ---
+SPACE = {"xs": 4, "sm": 8, "md": 12, "lg": 16, "xl": 24}
+FONT = {
+    "family": "Segoe UI", "mono": "Consolas",
+    "caption": 8, "body": 9, "title": 12, "heading": 15,
+    "w_medium": 500, "w_semibold": 600, "w_bold": 700, "w_heavy": 800,
+}
+
+# --- Canvas glyph / overlay / zone / route colours. Theme-independent (one ramp for
+#     both themes today) and read directly by the QPainter, which QSS cannot reach.
+#     One source so a hue change is a single edit instead of a hunt through canvas.py. ---
+GLYPH = {                       # device type -> (colour, marker shape)
+    "processor": ("#9a6dff", "square"),
+    "microphoneArray": ("#6d8bff", "circle"),
+    "wirelessMic": ("#3ddc97", "circle"),
+    "wiredMic": ("#2dd4bf", "circle"),
+    "loudspeaker": ("#f7c948", "triangle"),
+    "codec": ("#94a3b8", "diamond"),
+    "camera": ("#ff9e5e", "camera"),
+}
+OVERLAY = {
+    "talker": "#ff7ab6", "pickup": "#6d8bff", "fov": "#ff9e5e", "dispersion": "#f7c948",
+    "occlusion": "#ff6b81", "furniture": "#8b95bd", "seat": "#3ddc97", "rec": "#3ddc97",
+    "zone_exclusion": "#ff6b81", "zone_dedicated": "#9a6dff", "zone_default": "#6d8bff",
+    "route_dante": "#5fb6ff", "route_analog": "#ffc06a", "route_err": "#ff6b81",
 }
 
 _QSS_TEMPLATE = """

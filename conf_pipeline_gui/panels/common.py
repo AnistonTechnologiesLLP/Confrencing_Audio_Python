@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
 import conf_pipeline as cp
 
 from .. import workflow
+from ..theme import PALETTES, SPACE
 
 DEVICE_TYPES = [
     ("Processor (DSP)", "processor"),
@@ -34,10 +35,9 @@ DEVICE_TYPES = [
     ("Codec (far-end)", "codec"),
 ]
 
-ISSUE_COLORS = {
-    "dark": {"error": "#ff6b81", "warning": "#f7c948"},
-    "light": {"error": "#e23b59", "warning": "#b8860b"},
-}
+# Sourced from the theme palette (err/warn) so issue colours never drift from the rest
+# of the UI — identical values to the old literals, one source now.
+ISSUE_COLORS = {t: {"error": PALETTES[t]["err"], "warning": PALETTES[t]["warn"]} for t in PALETTES}
 BLOCK_LABELS = {"gain": "Gain", "mute": "Mute", "peq4": "PEQ (4-band)", "agc": "AGC",
                 "compressor": "Compressor", "delay": "Delay", "noiseReduction": "Noise reduction", "deverb": "Dereverb"}
 BLOCK_PARAM_SCHEMA = {
@@ -192,7 +192,7 @@ class Card(QFrame):
         self.setProperty("card", "true")
         self._title = title
         outer = QVBoxLayout(self)
-        outer.setContentsMargins(8, 4, 8, 8)
+        outer.setContentsMargins(SPACE["sm"], SPACE["xs"], SPACE["sm"], SPACE["sm"])
         outer.setSpacing(2)
         self.header = QPushButton()
         self.header.setProperty("cardHeader", "true")
