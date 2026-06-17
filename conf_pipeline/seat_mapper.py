@@ -115,11 +115,11 @@ def nearest_seat_for_array(
     )
 
 
-def _array_relative_azimuth(array_position: Point2D, array_bearing_deg: float, anchor: SeatAnchor) -> float:
-    """A seat's azimuth in the **array** frame (``0°`` = +Y clockwise — the DOA / ``set_steering`` /
+def _array_relative_azimuth(array_position: Point2D, array_bearing_deg: float, target: Point2D) -> float:
+    """A room point's azimuth in the **array** frame (``0°`` = +Y clockwise — the DOA / ``set_steering`` /
     ``set_nulls`` frame): the inverse of the mapper's room rotation, ``azimuth =
-    bearing_to_deg(array, seat) − array_bearing_deg``."""
-    return _norm_bearing(bearing_to_deg(array_position, anchor.position) - array_bearing_deg)
+    bearing_to_deg(array, target) − array_bearing_deg``."""
+    return _norm_bearing(bearing_to_deg(array_position, target) - array_bearing_deg)
 
 
 def seat_null_azimuths(
@@ -143,7 +143,7 @@ def seat_null_azimuths(
     if array.position is None or array.bearing_deg is None:
         return []
     return [
-        _array_relative_azimuth(array.position, array.bearing_deg, anchor)
+        _array_relative_azimuth(array.position, array.bearing_deg, anchor.position)
         for seat_id, anchor in room_seats(config)
         if seat_id != exclude_seat_id
     ]
@@ -164,5 +164,21 @@ def seat_azimuth_for_array(config: SystemConfig, array_id: str, seat_id: str) ->
         return None
     for sid, anchor in room_seats(config):
         if sid == seat_id:
-            return _array_relative_azimuth(array.position, array.bearing_deg, anchor)
+            return _array_relative_azimuth(array.position, array.bearing_deg, anchor.position)
     return None
+
+
+def azimuth_for_array_point(config: SystemConfig, array_id: str, point: Point2D) -> Optional[float]:
+    """The **array-relative** azimuth (deg, ``0°`` = +Y clockwise — the ``set_steering`` / DOA frame) of an
+    ARBITRARY room point, for pinning the steered beam to a clicked spot ("lock to place"). The same
+    rotation as :func:`seat_azimuth_for_array`, but for any point rather than a predefined seat.
+
+    Returns ``None`` if ``array_id`` is unknown / not a microphone array / has no ``position`` or
+    ``bearing_deg``.
+    """
+    array = next((d for d in config.devices if d.id == array_id), None)
+    if not isinstance(array, MicrophoneArray):
+        return None
+    if array.position is None or array.bearing_deg is None:
+        return None
+    return _array_relative_azimuth(array.position, array.bearing_deg, point)

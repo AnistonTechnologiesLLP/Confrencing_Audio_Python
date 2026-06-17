@@ -10,6 +10,17 @@ the TS sibling is at matching v5 parity. The desktop app is presented as
 ## [Unreleased]
 
 ### Added
+- **Lock the listening direction to a manual place** (`conf_pipeline.azimuth_for_array_point`, LIVE panel) —
+  besides "Lock to seat", the steered POLARIS beam can now be pinned to **any direction**: a **"Manual angle"**
+  entry in the lock picker reveals a degrees dial (0–360°, a compass that wraps), and **clicking a spot on the
+  2D room map** aims the beam there. Both drive the same pin — a map click computes the point's array-relative
+  azimuth (new `azimuth_for_array_point`, the same room-rotation as `seat_azimuth_for_array` but for an
+  arbitrary point) and fills the dial. Click-to-aim is opt-in (armed only while a steered A/B engine is
+  connected, via a new canvas `click_cb`) and a click it can't resolve falls through to normal selection.
+  Works **without any seats** (a raw angle) and without an array bearing for the dial; the map click needs the
+  array's position + room bearing. With "Null other seats" on, the nulls keep the seat **nearest your aim** so
+  you never null your own look; the readout shows `locked → …°`. Click-to-aim is inert outside Live mode
+  (the canvas is shared, so a backgrounded A/B session can't hijack Design/Simulate clicks). (+7 tests.)
 - **Snap-steer / "Lock to seat"** (`conf_pipeline.seat_azimuth_for_array`, `BeamEngine.set_steering`,
   LIVE panel) — pin the steered POLARIS beam to a **chosen room seat** instead of following the loudest
   talker. New pure helper `seat_azimuth_for_array(config, array_id, seat_id)` returns a specific seat's

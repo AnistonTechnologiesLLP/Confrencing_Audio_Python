@@ -169,7 +169,7 @@ def test_beameng_lock_to_seat_pins_the_steered_beam(win):
     panel._beam_engine = eng
     panel.live_beameng_mode.setCurrentIndex(panel.live_beameng_mode.findData("steered"))
     panel._refresh_beameng_lockseat()
-    assert panel.live_beameng_lockseat.count() == 3                          # Follow + the two seats
+    assert panel.live_beameng_lockseat.count() == 4                          # Follow + Manual angle + the two seats
 
     panel.live_beameng_lockseat.setCurrentIndex(panel.live_beameng_lockseat.findData("sofa-seat2"))
     panel._on_beameng_lockseat_changed()
@@ -232,3 +232,101 @@ def test_beameng_locked_steering_repins_on_pose_change(win):
     az_before = eng._steered._steered_az
     panel._push_locked_steering()                                           # idempotent when the pose is unchanged
     assert eng._steered._steered_az == az_before
+
+
+def test_beameng_manual_angle_lock_pins_the_beam(win):
+    """Manual lock: 'Manual angle' + the dial pins the steered beam to a fixed array-relative angle
+    (disabling DOA-follow) and is NOT a seat lock; 'Follow talker' resumes following + disables the dial."""
+    import conf_pipeline_control as cc
+    st = win.state
+    st.set_config(_config_with_array_and_seats(bearing=0.0))
+    panel = win.panels["live"]
+    panel._session_array_id = "A"
+    eng = cc.BeamEngine(device=None, mode="steered", steered_cfg={"mode": "superdirective"})
+    panel._beam_engine = eng
+    panel.live_beameng_mode.setCurrentIndex(panel.live_beameng_mode.findData("steered"))
+    panel._refresh_beameng_lockseat()
+
+    panel.live_beameng_lockseat.setCurrentIndex(panel.live_beameng_lockseat.findData("__manual__"))
+    panel._on_beameng_lockseat_changed()
+    assert panel.live_beameng_angle.isEnabled()                            # dial enabled in manual mode
+    panel.live_beameng_angle.setValue(100.0)
+    panel._on_beameng_angle_changed(100.0)
+    assert panel._beameng_locked_manual_az == 100.0 and panel._beameng_locked_seat is None
+    assert eng._steered.steer_to_doa is False and eng._steered._steered_az == 100.0
+
+    panel.live_beameng_lockseat.setCurrentIndex(0)                         # 'Follow talker (DOA)'
+    panel._on_beameng_lockseat_changed()
+    assert panel._beameng_locked_manual_az is None and eng._steered.steer_to_doa is True
+    assert not panel.live_beameng_angle.isEnabled()                        # dial disabled when following
+
+
+def test_beameng_map_click_sets_manual_angle(win):
+    """Click-to-aim: a clicked room point becomes a manual lock — the combo flips to 'Manual angle', the
+    dial shows the point's array-relative azimuth and the beam pins there (returns True). A click with no
+    array bearing is declined (returns False) so the click still falls through to normal selection."""
+    import conf_pipeline_control as cc
+    from conf_pipeline.model import Point2D
+    st = win.state
+    st.set_config(_config_with_array_and_seats(bearing=0.0))
+    st.set_mode("live")
+    panel = win.panels["live"]
+    panel._session_array_id = "A"
+    eng = cc.BeamEngine(device=None, mode="steered", steered_cfg={"mode": "superdirective"})
+    panel._beam_engine = eng
+    panel.live_beameng_mode.setCurrentIndex(panel.live_beameng_mode.findData("steered"))
+    panel._refresh_beameng_lockseat()
+
+    east = Point2D(3.0, 0.0)                                                # array-relative azimuth 90 (bearing 0)
+    assert panel._on_canvas_click_live(east) is True                       # consumed the click
+    assert panel.live_beameng_lockseat.currentData() == "__manual__"       # flipped to Manual angle
+    assert panel.live_beameng_angle.value() == 90.0 == round(cp.azimuth_for_array_point(st.config, "A", east), 1)
+    assert eng._steered.steer_to_doa is False and eng._steered._steered_az == 90.0
+    assert panel._beameng_locked_manual_az == 90.0
+
+    st.set_config(_config_with_array_and_seats(bearing=None))              # no room bearing → can't aim
+    assert panel._on_canvas_click_live(east) is False                      # declined; the click is not consumed
+    assert "Click-to-aim needs" in panel.live_status.text()
+
+
+def test_beameng_click_to_aim_inert_outside_live_mode(win):
+    """The A/B session keeps running when the user leaves Live mode, but the canvas is shared — so a
+    map click outside Live mode is NOT hijacked: _on_canvas_click_live returns False (falls through to
+    the active tool) even with a connected, aim-able steered engine."""
+    import conf_pipeline_control as cc
+    from conf_pipeline.model import Point2D
+    st = win.state
+    st.set_config(_config_with_array_and_seats(bearing=0.0))
+    panel = win.panels["live"]
+    panel._session_array_id = "A"
+    eng = cc.BeamEngine(device=None, mode="steered", steered_cfg={"mode": "superdirective"})
+    panel._beam_engine = eng
+    panel.live_beameng_mode.setCurrentIndex(panel.live_beameng_mode.findData("steered"))
+    panel._refresh_beameng_lockseat()
+    east = Point2D(3.0, 0.0)
+    st.set_mode("live")
+    assert panel._on_canvas_click_live(east) is True                       # armed + active → aims
+    st.set_mode("design")                                                  # leave Live (session stays connected)
+    assert panel._on_canvas_click_live(east) is False                      # inert: the Design click is not hijacked
+
+
+def test_beameng_manual_lock_nulls_keep_our_seat(win):
+    """Manual lock + 'Null other seats': the pushed nulls keep the seat NEAREST our manual aim (so we don't
+    null our own look) — aiming ~east keeps sofa-seat2 and nulls only sofa-seat1."""
+    import conf_pipeline_control as cc
+    st = win.state
+    st.set_config(_config_with_array_and_seats(bearing=0.0))
+    panel = win.panels["live"]
+    panel._session_array_id = "A"
+    eng = cc.BeamEngine(device=None, mode="steered", steered_cfg={"mode": "superdirective"})
+    panel._beam_engine = eng
+    panel.live_beameng_mode.setCurrentIndex(panel.live_beameng_mode.findData("steered"))
+    panel._refresh_beameng_lockseat()
+    panel.live_beameng_lockseat.setCurrentIndex(panel.live_beameng_lockseat.findData("__manual__"))
+    panel.live_beameng_angle.setValue(85.0)                                # ~east → nearest seat is sofa-seat2
+    panel._on_beameng_angle_changed(85.0)
+    assert panel._manual_lock_seat_id() == "sofa-seat2"
+
+    panel.live_beameng_nullseats.setChecked(True)
+    panel._push_seat_nulls()
+    assert eng._steered._explicit_nulls == cp.seat_null_azimuths(st.config, "A", exclude_seat_id="sofa-seat2")

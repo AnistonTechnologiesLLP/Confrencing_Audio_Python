@@ -91,6 +91,7 @@ class MainWindow(QMainWindow):
             "deploy": DeployPanel(self.state),
             "live": LivePanel(self.state),
         }
+        self.panels["live"]._canvas = self.canvas   # so the Live panel can arm "click to aim"
         self.panel_stack = QStackedWidget()
         self.panel_stack.setMinimumWidth(380)
         for mode in workflow.MODES:

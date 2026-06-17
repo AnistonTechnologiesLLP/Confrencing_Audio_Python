@@ -107,6 +107,28 @@ def test_add_camera_and_aim_via_design_panel(win):
     assert cp.find_device(st.config, cam.id).bearing_deg == 123.0
 
 
+def test_canvas_click_cb_consumes_a_2d_click(win):
+    """The opt-in click_cb fires with the clicked ROOM point on a 2D press; returning True consumes the
+    click (skips tool handling), False lets it fall through to normal selection, and None (default) is a
+    no-op."""
+    st = win.state
+    st.tool = "select"
+    got = []
+
+    win.canvas.click_cb = lambda p: (got.append(p) or True)        # consume the click
+    win.canvas._down2d(_screen(win, Point2D(2.0, 1.5)))
+    assert len(got) == 1
+    assert got[0].x == pytest.approx(2.0, abs=0.05) and got[0].y == pytest.approx(1.5, abs=0.05)
+
+    got.clear()                                                    # returning False → still fires, but falls through
+    win.canvas.click_cb = lambda p: (got.append(p) or False)
+    win.canvas._down2d(_screen(win, Point2D(2.0, 1.5)))            # normal select handling runs, no crash
+    assert len(got) == 1
+
+    win.canvas.click_cb = None                                     # default: no callback, normal behaviour
+    win.canvas._down2d(_screen(win, Point2D(2.0, 1.5)))            # must not raise
+
+
 def _screen(win, world):
     """World point → screen QPointF using the canvas's current 2D transform."""
     win.state.view = "2d"

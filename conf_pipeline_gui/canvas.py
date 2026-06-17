@@ -94,6 +94,7 @@ class Canvas(QWidget):
         self.hover = None         # world point (room tool) / screen point (connect)
         self.connect_from = None
         self.coord_cb = None      # optional callback(str) for coordinate readout
+        self.click_cb = None      # optional callback(Point2D) -> bool; consumes a 2D click when it returns True
         self._bg_pixmap = None    # cached floor-plan QPixmap
         self._bg_pixmap_key = None
         self._diff_cache = None       # cached deployment diff for DEPLOY badges
@@ -1333,6 +1334,8 @@ class Canvas(QWidget):
             return self.update()
         v = self.view2d()
         w = self.s2w(pos.x(), pos.y(), v)
+        if self.click_cb is not None and self.click_cb(w):   # live "click to aim"; consumes the click
+            return self.update()
         psnap = Point2D(self.snap(w.x), self.snap(w.y))
         tool = self.state.tool
         try:

@@ -91,6 +91,8 @@ class LivePanel(PanelBase):
         self._live_seat = None           # SeatMatch for the dominant talker (room-aware readout)
         self._beameng_locked_seat = None  # seat_id the steered beam is pinned to (snap-steer), or None
         self._beameng_locked_az = None    # the array-relative azimuth currently pinned (re-pushed if pose moves)
+        self._beameng_locked_manual_az = None  # array-relative angle pinned by the manual dial / a map click, or None
+        self._canvas = None               # injected by MainWindow so "click to aim" can arm the canvas click_cb
 
         root = QVBoxLayout(self)
         root.setContentsMargins(10, 8, 10, 8)
@@ -353,6 +355,20 @@ class LivePanel(PanelBase):
         self.live_beameng_lockseat.currentIndexChanged.connect(
             lambda *_a: None if self._refreshing else self._on_beameng_lockseat_changed())
         ef.addRow("Lock to seat", self.live_beameng_lockseat)
+        self.live_beameng_angle = NoWheelDoubleSpinBox()
+        self.live_beameng_angle.setRange(0.0, 360.0)
+        self.live_beameng_angle.setWrapping(True)            # 360° wraps to 0° (a compass dial)
+        self.live_beameng_angle.setSingleStep(5.0)
+        self.live_beameng_angle.setSuffix("°")
+        self.live_beameng_angle.setToolTip(
+            "Pin the steered beam to a manual array-relative angle (0° = the array's reference, clockwise). "
+            "Active when 'Lock to seat' is 'Manual angle' — or just click a spot on the 2D room map to aim "
+            "(that fills this dial). A fixed angle: it does not follow the talker or re-resolve if the array moves."
+        )
+        self.live_beameng_angle.setEnabled(False)            # enabled when steered + 'Manual angle' is selected
+        self.live_beameng_angle.valueChanged.connect(
+            lambda v: None if self._refreshing else self._on_beameng_angle_changed(v))
+        ef.addRow("Manual angle", self.live_beameng_angle)
         self.live_beameng_view = QLabel("Connect with the A/B engine to compare steered vs grid live.")
         self.live_beameng_view.setWordWrap(True)
         self.live_beameng_view.setFont(QFont("Consolas", 9))
@@ -499,13 +515,18 @@ class LivePanel(PanelBase):
         """Switch a running engine's strategy live (glitch-free crossfade); otherwise
         the picker just sets the mode the next Connect starts in."""
         e = self._beam_engine
-        if e is not None:
-            try:
-                e.set_mode(self._beameng_mode())
-                if self._beameng_mode() == "steered" and self._beameng_locked_seat is not None:
-                    self._on_beameng_lockseat_changed()   # re-pin: set_mode's reset_transient cleared _steered_az
-            except Exception as exc:
-                self.live_status.setText(f"A/B switch failed: {exc}")
+        if e is None:
+            return
+        steered = self._beameng_mode() == "steered"
+        self.live_beameng_lockseat.setEnabled(steered)   # snap-steer / manual angle only apply to the steered beam
+        if not steered:
+            self.live_beameng_angle.setEnabled(False)
+        try:
+            e.set_mode(self._beameng_mode())
+            if steered and self.live_beameng_lockseat.currentData() is not None:
+                self._on_beameng_lockseat_changed()   # re-pin seat / manual: set_mode's reset_transient cleared _steered_az
+        except Exception as exc:
+            self.live_status.setText(f"A/B switch failed: {exc}")
 
     def _autosteer_sector(self):
         return cc.SectorConfig(
@@ -951,8 +972,12 @@ class LivePanel(PanelBase):
             eng.set_gain_db(float(self.live_gain.value()))
             eng.set_mute(self.live_mute.isChecked())
         self.live_beameng_nullseats.setEnabled(False)   # the steered beam mode is fixed at Connect
-        self._refresh_beameng_lockseat()                # populate the seat list for snap-steer
-        self.live_beameng_lockseat.setEnabled(self.live_beameng_lockseat.count() > 1)   # only if seats exist
+        self._refresh_beameng_lockseat()                # populate Follow / Manual angle / seats
+        steered = self._beameng_mode() == "steered"
+        self.live_beameng_lockseat.setEnabled(steered)  # snap-steer / manual angle only apply to the steered beam
+        self.live_beameng_angle.setEnabled(False)       # enabled when 'Manual angle' is selected
+        if self._canvas is not None:
+            self._canvas.click_cb = self._on_canvas_click_live   # arm "click the map to aim"
         mon = "monitoring (headphones)" if monitor_on else "no monitor"
         self.live_status.setText(
             f"A/B engine live · {self._beameng_mode()} · switch strategy from the picker ({mon})."
@@ -967,12 +992,13 @@ class LivePanel(PanelBase):
         return f"   ·   seat {m.seat_id} ({m.separation_deg:.0f}° off)"
 
     def _refresh_beameng_lockseat(self):
-        """Rebuild the Lock-to-seat combo from the current room's seats (preserving the 'Follow talker'
-        head). Resets the lock to follow. Signals are blocked so this never auto-steers."""
+        """Rebuild the Lock-to-seat combo: 'Follow talker' head, then 'Manual angle', then the room's seats.
+        Resets the lock to follow. Signals are blocked so this never auto-steers."""
         c = self.live_beameng_lockseat
         c.blockSignals(True)
         c.clear()
         c.addItem("Follow talker (DOA)", None)
+        c.addItem("Manual angle", "__manual__")     # pin to the angle dial / a clicked map point
         try:
             seats = cp.room_seats(self.state.config)
         except Exception:
@@ -981,13 +1007,27 @@ class LivePanel(PanelBase):
             c.addItem(f"Seat {seat_id}", seat_id)
         c.blockSignals(False)
         self._beameng_locked_seat = None
+        self._beameng_locked_manual_az = None
 
     def _on_beameng_lockseat_changed(self):
-        """Pin the steered beam to the chosen seat (snap-steer), or resume DOA-follow on 'Follow talker'."""
+        """Pin the steered beam to the chosen seat (snap-steer), a manual angle, or resume DOA-follow on
+        'Follow talker'. The angle dial is enabled only while 'Manual angle' is selected."""
         e = self._beam_engine
         if e is None:
             return
-        seat_id = self.live_beameng_lockseat.currentData()
+        data = self.live_beameng_lockseat.currentData()
+        is_manual = data == "__manual__"
+        self.live_beameng_angle.setEnabled(is_manual)
+        if is_manual:                                         # pin to the manual dial (or a clicked map point)
+            self._beameng_locked_seat = None
+            self._beameng_locked_az = None
+            az = float(self.live_beameng_angle.value())
+            self._beameng_locked_manual_az = az
+            try: e.set_steering(az)
+            except Exception: pass
+            return
+        self._beameng_locked_manual_az = None                 # leaving manual: drop the angle lock
+        seat_id = data                                        # None = follow, else a seat id
         az = None
         if seat_id is not None and self._session_array_id:
             try:
@@ -1008,6 +1048,47 @@ class LivePanel(PanelBase):
         except Exception:
             pass
 
+    def _on_beameng_angle_changed(self, value):
+        """Pin the steered beam to the manual angle dial. Only acts while 'Manual angle' is the selected
+        lock (the dial is disabled otherwise), so seat / follow locks are never disturbed."""
+        e = self._beam_engine
+        if e is None or self.live_beameng_lockseat.currentData() != "__manual__":
+            return
+        az = float(value)
+        self._beameng_locked_manual_az = az
+        try: e.set_steering(az)
+        except Exception: pass
+
+    def _on_canvas_click_live(self, point) -> bool:
+        """Canvas 'click to aim': turn a clicked room point into a manual lock on the steered beam, by
+        seeding the angle dial + switching the lock selector to 'Manual angle', then driving the manual
+        lock through the one handler. Returns True when it consumed the click (aimed), False so a click
+        it can't act on still falls through to normal selection."""
+        # The A/B session keeps running when the user leaves Live mode (the app only toasts), but the canvas
+        # is shared across modes — so stay inert unless Live is the active view, or we'd hijack Design/etc. clicks.
+        if getattr(self.state, "mode", None) != "live":
+            return False
+        e = self._beam_engine
+        if e is None or self._beameng_mode() != "steered" or not self._session_array_id:
+            return False
+        try:
+            az = cp.azimuth_for_array_point(self.state.config, self._session_array_id, point)
+        except Exception:
+            az = None
+        if az is None:                                        # array has no position / room bearing
+            self.live_status.setText("Click-to-aim needs the array's position + room bearing (Design → array).")
+            return False
+        c = self.live_beameng_lockseat
+        prev = self._refreshing
+        self._refreshing = True                               # seed the dial + combo silently...
+        try:
+            self.live_beameng_angle.setValue(round(az, 1))
+            c.setCurrentIndex(c.findData("__manual__"))
+        finally:
+            self._refreshing = prev
+        self._on_beameng_lockseat_changed()                   # ...then pin once via the manual branch (clears any seat lock)
+        return True
+
     def _push_locked_steering(self):
         """Snap-steer upkeep: while locked (steered), re-resolve the seat's azimuth from the CURRENT
         config each tick and re-pin ONLY if it changed (e.g. the array's pose/bearing was edited in
@@ -1026,15 +1107,28 @@ class LivePanel(PanelBase):
             try: e.set_steering(az)
             except Exception: pass
 
+    def _manual_lock_seat_id(self):
+        """When manual-angle-locked, the seat nearest our manual aim — so 'Null other seats' keeps OUR
+        look (the seat we are aimed at) instead of nulling it. None when not manual-locked / no match."""
+        if self._beameng_locked_manual_az is None or not self._session_array_id:
+            return None
+        try:
+            m = cp.nearest_seat_for_array(self.state.config, self._session_array_id,
+                                          self._beameng_locked_manual_az)
+        except Exception:
+            return None
+        return m.seat_id if m is not None else None
+
     def _push_seat_nulls(self) -> int:
         """Room-aware seat nulling: while the engine runs steered, push the OTHER seats' bearings to the
-        steered beam as nulls, keeping the TARGET seat (the locked seat if snap-steered, else the matched
-        talker's seat). Returns the count pushed (0 = none / cleared); the beam's null-budget composer
-        handles dedupe + the M−1 budget."""
+        steered beam as nulls, keeping the TARGET seat (the locked seat if snap-steered, the seat nearest a
+        manual aim, else the matched talker's seat). Returns the count pushed (0 = none / cleared); the
+        beam's null-budget composer handles dedupe + the M−1 budget."""
         e = self._beam_engine
         if e is None:
             return 0
-        target = self._beameng_locked_seat or (self._live_seat.seat_id if self._live_seat is not None else None)
+        target = self._beameng_locked_seat or self._manual_lock_seat_id() \
+            or (self._live_seat.seat_id if self._live_seat is not None else None)
         az: list = []
         if (self.live_beameng_nullseats.isChecked() and self._beameng_mode() == "steered"
                 and target is not None and self._session_array_id):
@@ -1068,7 +1162,12 @@ class LivePanel(PanelBase):
             ang = "  -- " if loc.angle_deg is None else f"{loc.angle_deg:5.0f}°"
             xy = "" if loc.xy is None else f"  ({loc.xy[0]:+.2f}, {loc.xy[1]:+.2f}) m"
             null_s = f"   ·   nulling {n_null} seat(s)" if n_null else ""
-            lock_s = f"   ·   locked → seat {self._beameng_locked_seat}" if self._beameng_locked_seat else ""
+            if self._beameng_locked_seat:
+                lock_s = f"   ·   locked → seat {self._beameng_locked_seat}"
+            elif self._beameng_locked_manual_az is not None:
+                lock_s = f"   ·   locked → {self._beameng_locked_manual_az:.0f}°"
+            else:
+                lock_s = ""
             self.live_beameng_view.setText(
                 f"[{loc.mode}] {ang}{xy}  ·  conf {loc.confidence:.0%}{self._seat_suffix()}{lock_s}{null_s}")
         if e.error:
@@ -1108,8 +1207,15 @@ class LivePanel(PanelBase):
             self.live_beameng_lockseat.blockSignals(True)
             self.live_beameng_lockseat.setCurrentIndex(0)       # back to "Follow talker"
             self.live_beameng_lockseat.blockSignals(False)
+            self.live_beameng_angle.setEnabled(False)
+            self.live_beameng_angle.blockSignals(True)
+            self.live_beameng_angle.setValue(0.0)
+            self.live_beameng_angle.blockSignals(False)
             self._beameng_locked_seat = None
             self._beameng_locked_az = None
+            self._beameng_locked_manual_az = None
+            if self._canvas is not None:
+                self._canvas.click_cb = None                    # disarm "click to aim"
             self.live_beameng_view.setText("Connect with the A/B engine to compare steered vs grid live.")
         if self._autosteer is not None:
             try:
