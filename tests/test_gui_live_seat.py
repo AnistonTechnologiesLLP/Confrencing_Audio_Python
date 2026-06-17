@@ -422,3 +422,25 @@ def test_level_meter_paints_in_light_theme(win):
     win.panels["live"].live_meter.set_level(0.9)
     assert win.panels["live"].live_meter.grab().width() > 0    # paints against state.theme, no crash
     win.state.theme = "dark"
+
+
+def test_beameng_noise_suppression_steered_cfg(win):
+    """The A/B-card noise toggles build the right steered_cfg: post-NR (steady fans/AC) is independent of
+    mode; adaptive-null ⇒ MVDR + auto_null; seat-nulling alone ⇒ superdirective; adaptive-null wins over
+    seat-nulling (MVDR is also frequency-domain, so seat nulls still apply)."""
+    import conf_pipeline_control as cc
+    panel = win.panels["live"]
+    base = {"radius_m": 0.04}
+    assert "post_nr" not in panel._beameng_steered_cfg(base)
+    assert "mode" not in panel._beameng_steered_cfg(base)               # default: plain steered beam
+    panel.live_beameng_postnr.setChecked(True)
+    assert panel._beameng_steered_cfg(base)["post_nr"] is True
+    panel.live_beameng_adaptnull.setChecked(True)
+    cfg = panel._beameng_steered_cfg(base)
+    assert cfg["mode"] == cc.MODE_MVDR and cfg["auto_null"] is True and cfg["post_nr"] is True
+    panel.live_beameng_postnr.setChecked(False)
+    panel.live_beameng_adaptnull.setChecked(False)
+    panel.live_beameng_nullseats.setChecked(True)
+    assert panel._beameng_steered_cfg(base)["mode"] == cc.MODE_SUPERDIRECTIVE   # seat-nulling alone
+    panel.live_beameng_adaptnull.setChecked(True)
+    assert panel._beameng_steered_cfg(base)["mode"] == cc.MODE_MVDR     # adaptive-null wins over seat-nulling

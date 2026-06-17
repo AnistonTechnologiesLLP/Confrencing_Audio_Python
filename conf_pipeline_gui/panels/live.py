@@ -357,6 +357,22 @@ class LivePanel(PanelBase):
         )
         self.live_beameng_nullseats.setEnabled(False)        # enabled when the engine is ticked
         ef.addRow("Seat nulling", self.live_beameng_nullseats)
+        self.live_beameng_postnr = QCheckBox("Suppress steady noise (fans/AC)")
+        self.live_beameng_postnr.setToolTip(
+            "Run a light spectral gate on the beam output that learns the steady background (fans, AC, "
+            "HVAC hum) during speech pauses and attenuates it — without muting. A local, real-time "
+            "alternative to the OCTOVOX cleaning path. Fixed at Connect, so tick it before connecting."
+        )
+        self.live_beameng_postnr.setEnabled(False)           # enabled when the engine is ticked
+        ef.addRow("Noise gate", self.live_beameng_postnr)
+        self.live_beameng_adaptnull = QCheckBox("Adaptive null (learn room noise)")
+        self.live_beameng_adaptnull.setToolTip(
+            "Make the steered beam data-adaptive (MVDR): measure the room's noise field during pauses and "
+            "steer a null onto it (a directional fan / projector / duct), plus auto-null detected "
+            "interferers. Falls back to superdirective during speech. Fixed at Connect — tick before connecting."
+        )
+        self.live_beameng_adaptnull.setEnabled(False)        # enabled when the engine is ticked
+        ef.addRow("Adaptive null", self.live_beameng_adaptnull)
         self.live_beameng_lockseat = QComboBox()
         self.live_beameng_lockseat.addItem("Follow talker (DOA)", None)
         self.live_beameng_lockseat.setToolTip(
@@ -519,6 +535,8 @@ class LivePanel(PanelBase):
         on = self.live_beameng.isChecked()
         self.live_beameng_mode.setEnabled(on)
         self.live_beameng_nullseats.setEnabled(on)
+        self.live_beameng_postnr.setEnabled(on)
+        self.live_beameng_adaptnull.setEnabled(on)
         if on:
             self.live_autosteer.setChecked(False)
             self.live_octovox.setChecked(False)
@@ -944,6 +962,20 @@ class LivePanel(PanelBase):
         )
         self._notify_session_changed()
 
+    def _beameng_steered_cfg(self, base: dict) -> dict:
+        """The steered back-end's config from the A/B-card noise options (fixed at Connect). Adaptive-null
+        ⇒ data-adaptive MVDR (+ auto-null); seat-nulling alone ⇒ superdirective (both are frequency-domain,
+        so seat nulls still apply under MVDR); the post-beam noise gate is independent of the mode."""
+        cfg = dict(base)
+        if self.live_beameng_adaptnull.isChecked():
+            cfg["mode"] = cc.MODE_MVDR                # data-adaptive: null the measured room noise field
+            cfg["auto_null"] = True
+        elif self.live_beameng_nullseats.isChecked():
+            cfg["mode"] = cc.MODE_SUPERDIRECTIVE      # seat nulls need a frequency-domain steered beam
+        if self.live_beameng_postnr.isChecked():
+            cfg["post_nr"] = True                     # spectral gate on the output (steady fans/AC)
+        return cfg
+
     def _beameng_connect(self):
         """Start the BeamEngine A/B: steered + grid back-ends on one shared POLARIS stream."""
         if not cc.controls_available():
@@ -954,9 +986,7 @@ class LivePanel(PanelBase):
         cfg: dict = {"radius_m": float(self.live_radius.value())}
         if any(mask) and not all(mask):
             cfg["active_mask"] = list(mask)          # exclude the dead capsule on both back-ends
-        steered_cfg = dict(cfg)
-        if self.live_beameng_nullseats.isChecked():
-            steered_cfg["mode"] = cc.MODE_SUPERDIRECTIVE   # nulls need a frequency-domain steered beam
+        steered_cfg = self._beameng_steered_cfg(cfg)
         monitor_on = self.live_monitor.isChecked()
         try:
             eng = cc.BeamEngine(
@@ -984,6 +1014,8 @@ class LivePanel(PanelBase):
             eng.set_gain_db(float(self.live_gain.value()))
             eng.set_mute(self.live_mute.isChecked())
         self.live_beameng_nullseats.setEnabled(False)   # the steered beam mode is fixed at Connect
+        self.live_beameng_postnr.setEnabled(False)      # NR / adaptive mode are fixed at Connect too
+        self.live_beameng_adaptnull.setEnabled(False)
         self._refresh_beameng_lockseat()                # populate Follow / Manual angle / seats
         steered = self._beameng_mode() == "steered"
         self.live_beameng_lockseat.setEnabled(steered)  # snap-steer / manual angle only apply to the steered beam
@@ -991,8 +1023,11 @@ class LivePanel(PanelBase):
         if self._canvas is not None:
             self._canvas.click_cb = self._on_canvas_click_live   # arm "click the map to aim"
         mon = "monitoring (headphones)" if monitor_on else "no monitor — tick Monitor for Mute/Gain"
+        nr = [n for n, on in (("adaptive-null", self.live_beameng_adaptnull.isChecked()),
+                              ("noise-gate", self.live_beameng_postnr.isChecked())) if on]
+        nr_s = f" · {' + '.join(nr)}" if nr else ""
         self.live_status.setText(
-            f"A/B engine live · {self._beameng_mode()} · switch strategy from the picker ({mon})."
+            f"A/B engine live · {self._beameng_mode()}{nr_s} · switch strategy from the picker ({mon})."
         )
         self._notify_session_changed()
 
@@ -1217,6 +1252,8 @@ class LivePanel(PanelBase):
             self.live_mute.setEnabled(True)
             self.live_gain.setEnabled(True)
             self.live_beameng_nullseats.setEnabled(self.live_beameng.isChecked())   # re-enable for next Connect
+            self.live_beameng_postnr.setEnabled(self.live_beameng.isChecked())
+            self.live_beameng_adaptnull.setEnabled(self.live_beameng.isChecked())
             self.live_beameng_lockseat.setEnabled(False)        # snap-steer needs a running engine
             self.live_beameng_lockseat.blockSignals(True)
             self.live_beameng_lockseat.setCurrentIndex(0)       # back to "Follow talker"
