@@ -91,3 +91,29 @@ def test_save_ab_report_writes_wavs(tmp_path):
     assert any(p.endswith("omni.wav") for p in paths)
     assert any(p.endswith("report.txt") for p in paths)
     assert (tmp_path / "superdirective_aggressive.wav").exists()
+
+
+# --------------------------------------------------------------------------- #
+# measure_null_depth — the 2-source spatial-null A/B (talker + interferer)
+# --------------------------------------------------------------------------- #
+def test_measure_null_depth_suppresses_the_interferer_and_keeps_the_talker():
+    """Beaming a 2-source scene look-only vs look+null: the interferer FROM the null direction drops,
+    the talker AT the look direction is essentially untouched. (Engine-convention plane waves so the
+    synthetic azimuths line up with design_from_bearings.)"""
+    from test_polaris_beamformer import _plane_wave_block   # engine-convention (0°=+Y CW) synthesizer
+    geom = cc.sensibel_8(radius_m=0.04)
+    sr, n = 44100, 44100
+    intf = _plane_wave_block(geom, 90.0, sr, n).T           # interferer from 90° -> (M, samples)
+    talk = _plane_wave_block(geom, 0.0, sr, n).T            # talker at the 0° look
+    rep = cc.measure_null_depth(geom, intf, sr, look_az_deg=0.0, null_az_deg=90.0, talker_y8=talk, loading=0.02)
+    assert rep.null_depth_db < -1.0                          # the 90° interferer is suppressed by the null
+    assert rep.look_change_db is not None and abs(rep.look_change_db) < 1.5   # the look (talker) is preserved
+    assert rep.null_az_deg == 90.0 and rep.look_az_deg == 0.0 and "Null at 90" in rep.summary
+
+
+def test_measure_null_depth_without_a_talker_clip():
+    from test_polaris_beamformer import _plane_wave_block
+    geom = cc.sensibel_8(radius_m=0.04)
+    intf = _plane_wave_block(geom, 90.0, 44100, 44100).T
+    rep = cc.measure_null_depth(geom, intf, 44100, look_az_deg=0.0, null_az_deg=90.0)
+    assert rep.null_depth_db < -1.0 and rep.look_change_db is None
