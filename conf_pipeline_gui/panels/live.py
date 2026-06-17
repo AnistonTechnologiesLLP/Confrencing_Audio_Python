@@ -359,12 +359,24 @@ class LivePanel(PanelBase):
         ef.addRow("Seat nulling", self.live_beameng_nullseats)
         self.live_beameng_postnr = QCheckBox("Suppress steady noise (fans/AC)")
         self.live_beameng_postnr.setToolTip(
-            "Run a light spectral gate on the beam output that learns the steady background (fans, AC, "
-            "HVAC hum) during speech pauses and attenuates it — without muting. A local, real-time "
-            "alternative to the OCTOVOX cleaning path. Fixed at Connect, so tick it before connecting."
+            "Run a light spectral gate on the beam output that continuously learns the steady background "
+            "(fans, AC, HVAC hum) by minimum statistics — no silence needed — and attenuates it without "
+            "muting. Speech is preserved (it sits above the learned floor). A local, real-time alternative "
+            "to the OCTOVOX cleaning path. Fixed at Connect, so tick it before connecting."
         )
         self.live_beameng_postnr.setEnabled(False)           # enabled when the engine is ticked
         ef.addRow("Noise gate", self.live_beameng_postnr)
+        self.live_beameng_nr_depth = QComboBox()             # (post_nr_floor_db, post_nr_oversub)
+        self.live_beameng_nr_depth.addItem("Gentle", (-9.0, 1.2))
+        self.live_beameng_nr_depth.addItem("Medium", (-15.0, 1.5))
+        self.live_beameng_nr_depth.addItem("Aggressive", (-22.0, 2.0))
+        self.live_beameng_nr_depth.setCurrentIndex(1)        # Medium (= the engine default)
+        self.live_beameng_nr_depth.setToolTip(
+            "How hard the noise gate suppresses. Aggressive cuts the fan/AC deeper but can dull speech; "
+            "Gentle is safest. Only applies when 'Suppress steady noise' is on."
+        )
+        self.live_beameng_nr_depth.setEnabled(False)         # enabled when the engine is ticked
+        ef.addRow("Noise depth", self.live_beameng_nr_depth)
         self.live_beameng_adaptnull = QCheckBox("Adaptive null (learn room noise)")
         self.live_beameng_adaptnull.setToolTip(
             "Make the steered beam data-adaptive (MVDR): measure the room's noise field during pauses and "
@@ -536,6 +548,7 @@ class LivePanel(PanelBase):
         self.live_beameng_mode.setEnabled(on)
         self.live_beameng_nullseats.setEnabled(on)
         self.live_beameng_postnr.setEnabled(on)
+        self.live_beameng_nr_depth.setEnabled(on)
         self.live_beameng_adaptnull.setEnabled(on)
         if on:
             self.live_autosteer.setChecked(False)
@@ -974,6 +987,8 @@ class LivePanel(PanelBase):
             cfg["mode"] = cc.MODE_SUPERDIRECTIVE      # seat nulls need a frequency-domain steered beam
         if self.live_beameng_postnr.isChecked():
             cfg["post_nr"] = True                     # spectral gate on the output (steady fans/AC)
+            floor_db, oversub = self.live_beameng_nr_depth.currentData()   # Gentle / Medium / Aggressive
+            cfg["post_nr_floor_db"], cfg["post_nr_oversub"] = floor_db, oversub
         return cfg
 
     def _beameng_connect(self):
@@ -1015,6 +1030,7 @@ class LivePanel(PanelBase):
             eng.set_mute(self.live_mute.isChecked())
         self.live_beameng_nullseats.setEnabled(False)   # the steered beam mode is fixed at Connect
         self.live_beameng_postnr.setEnabled(False)      # NR / adaptive mode are fixed at Connect too
+        self.live_beameng_nr_depth.setEnabled(False)
         self.live_beameng_adaptnull.setEnabled(False)
         self._refresh_beameng_lockseat()                # populate Follow / Manual angle / seats
         steered = self._beameng_mode() == "steered"
@@ -1253,6 +1269,7 @@ class LivePanel(PanelBase):
             self.live_gain.setEnabled(True)
             self.live_beameng_nullseats.setEnabled(self.live_beameng.isChecked())   # re-enable for next Connect
             self.live_beameng_postnr.setEnabled(self.live_beameng.isChecked())
+            self.live_beameng_nr_depth.setEnabled(self.live_beameng.isChecked())
             self.live_beameng_adaptnull.setEnabled(self.live_beameng.isChecked())
             self.live_beameng_lockseat.setEnabled(False)        # snap-steer needs a running engine
             self.live_beameng_lockseat.blockSignals(True)

@@ -10,6 +10,25 @@ the TS sibling is at matching v5 parity. The desktop app is presented as
 ## [Unreleased]
 
 ### Added
+- **Suppress steady fans / AC from the real-time output** (`PolarisBeamformer` post-NR + LIVE A/B card) —
+  the post-beam noise suppressor now learns the steady background by **minimum statistics** (the per-bin
+  running minimum of the smoothed power over a ~0.7 s window) instead of a VAD-gated EMA, so it removes
+  always-on fan/AC/HVAC hum **without needing silence**. The old gate trained only on VAD-flagged silences,
+  so it never learned a steady *directional* source the DOA mistakes for a talker — which is why a fan
+  wouldn't go away. Speech is preserved inherently (it sits above the learned floor) and the bounded Wiener
+  gate never hard-mutes. Surfaced in the LIVE **A/B engine** card: **"Suppress steady noise (fans/AC)"**
+  (`post_nr`) with a **Gentle / Medium / Aggressive** depth, plus **"Adaptive null (learn room noise)"**
+  (data-adaptive `mode="mvdr"` + `auto_null`) to spatially null a *directional* fan/duct. `cc.MODE_MVDR` /
+  `MODE_FRACDELAY` are now exported; `post_nr_minstat=False` (`--no-post-nr-minstat`) keeps the legacy gate.
+  (+5 tests.)
+- **Visual polish pass (all modes)** — a styling/consistency pass with **no functional or layout change**:
+  consolidated the design-token layer (spacing/type/canvas-colour tokens in `theme.py`, de-duped issue
+  colours, an AA contrast bump on the dimmest text); a **danger** button variant so destructive actions
+  (Delete / Remove / Disconnect) read as destructive; and additive LIVE-state cues — a **prominent output
+  meter** (peak-hold + clip + green/amber/red zones, replacing the flat bar), a distinct **solid
+  steered/locked-direction arrow** on the room map (vs the dashed talker DOA), a **hardware-limit (i)** chip
+  (azimuth-only / ~5.6 kHz / ~40–50° merge / planar), and **disabled-with-reason** hints on Mute/Gain.
+  (+12 tests.)
 - **Set a microphone array's room bearing in Design** (`conf_pipeline_gui/panels/design.py`) — the array's
   mounting heading (`bearing_deg`, 0° = +Y) is now editable from the **Design** properties panel (a **Bearing
   (°)** spin, like cameras/loudspeakers but without Tilt — the array is planar), routed to

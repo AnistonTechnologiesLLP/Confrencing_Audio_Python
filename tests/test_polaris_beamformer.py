@@ -975,29 +975,60 @@ def test_post_nr_reset_transient_wipes_state():
     for _ in range(6):
         bf.process_block(_plane_wave_block(bf.geometry, 0.0, bf.sample_rate, bf.blocksize))
     nr = bf._post_nr
-    assert nr._engaged and nr._noise_frames > 0
+    assert nr._engaged and nr._total_frames > 0                            # min-stat engages on total frames
     bf.reset_transient()
     assert bf._post_nr is nr                                                           # reset in place
-    assert (not nr._engaged) and nr._noise_frames == 0
+    assert (not nr._engaged) and nr._noise_frames == 0 and nr._total_frames == 0
     assert float(np.max(np.abs(nr._noise_mag))) == 0.0
     assert nr._inq.shape[0] == 0 and bool(np.all(nr._outq == 0.0))        # FIFO drained (primed zeros)
     assert bool(np.all(nr._gain_prev == 1.0))
 
 
 def test_post_nr_does_not_train_on_speech_when_gate_is_false():
-    """Cold-start safety (review fix): `_noise_gate` starts False (unknown ⇒ don't train), so until the
-    DOA thread confirms a noise-only frame the NR never learns/engages — an active talker passes through
-    byte-identical and the floor can't train on speech."""
+    """LEGACY (post_nr_minstat=False) cold-start safety: `_noise_gate` starts False (unknown ⇒ don't train),
+    so until the DOA thread confirms a noise-only frame the gated-EMA NR never learns/engages — an active
+    talker passes through byte-identical and the floor can't train on speech."""
     fs = 44100.0
     tone = 0.3 * _plane_wave_block(PolarisBeamformer(device=None).geometry, 0.0, fs, 1411)
     ref = PolarisBeamformer(device=None, beam_bandlimit_hz=None)                       # no NR
-    on = PolarisBeamformer(device=None, beam_bandlimit_hz=None, post_nr=True, post_nr_warmup_frames=2)
+    on = PolarisBeamformer(device=None, beam_bandlimit_hz=None, post_nr=True,
+                           post_nr_minstat=False, post_nr_warmup_frames=2)             # legacy gated EMA
     ref._setup_runtime()
     on._setup_runtime()
     assert on._noise_gate is False                                                     # default: unknown ⇒ don't train
     for _ in range(8):
         assert np.array_equal(ref.process_block(tone), on.process_block(tone))         # talker untouched
     assert on._post_nr._engaged is False and float(np.max(on._post_nr._noise_mag)) == 0.0
+
+
+def test_post_nr_minstat_learns_steady_noise_without_the_gate():
+    """The fix: with minimum statistics (default), the NR learns the steady noise floor and engages even
+    when `noise_gate` stays FALSE the whole time (a steady directional fan reads as a talker) — where the
+    legacy gated-EMA path stays byte-identical and never suppresses."""
+    rng = np.random.default_rng(3)
+    blocks = [0.05 * rng.standard_normal(512) for _ in range(120)]
+    nr = pb._PostNoiseSuppressor(44100.0, frame=512, warmup_frames=8, minstat=True)       # default
+    out = [nr.process(b, noise_gate=False) for b in blocks]                            # VAD 'active' throughout
+    assert nr._engaged                                                                 # engaged with no gated frame
+    rout = _nr_rms(np.concatenate(out[60:]))
+    assert 0.3 * 0.05 < rout < 0.85 * 0.05                                             # steady noise attenuated
+    # the legacy path, same input + gate False, never engages → byte-identical passthrough
+    leg = pb._PostNoiseSuppressor(44100.0, frame=512, warmup_frames=8, minstat=False)
+    assert np.array_equal(leg.process(blocks[0], noise_gate=False), blocks[0].astype(np.float32))
+    assert not leg._engaged
+
+
+def test_post_nr_minstat_preserves_speech():
+    """Min-stat keeps speech: a strong tone sits ABOVE the learned per-bin minimum, so after warming on
+    steady low noise the tone passes near-distortionless (the floor doesn't rise to brief speech)."""
+    rng = np.random.default_rng(4)
+    nr = pb._PostNoiseSuppressor(44100.0, frame=512, warmup_frames=8, minstat=True)
+    for _ in range(40):
+        nr.process(0.01 * rng.standard_normal(512), noise_gate=False)                 # learn a low floor
+    t = np.arange(4096) / 44100.0
+    tone = (0.3 * np.sin(2 * np.pi * 700.0 * t)).astype(float)
+    out = nr.process(tone, noise_gate=False)
+    assert _nr_rms(out[1024:]) > 0.85 * _nr_rms(tone[1024:])                           # near-distortionless
 
 
 def test_post_nr_floor_db_positive_never_boosts():

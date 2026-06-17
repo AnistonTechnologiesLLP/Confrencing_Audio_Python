@@ -435,6 +435,12 @@ def test_beameng_noise_suppression_steered_cfg(win):
     assert "mode" not in panel._beameng_steered_cfg(base)               # default: plain steered beam
     panel.live_beameng_postnr.setChecked(True)
     assert panel._beameng_steered_cfg(base)["post_nr"] is True
+    # the depth combo sets the suppression knobs (default Medium; Aggressive cuts deeper)
+    assert panel._beameng_steered_cfg(base)["post_nr_floor_db"] == -15.0   # Medium default
+    panel.live_beameng_nr_depth.setCurrentIndex(panel.live_beameng_nr_depth.findText("Aggressive"))
+    cfg_a = panel._beameng_steered_cfg(base)
+    assert cfg_a["post_nr_floor_db"] == -22.0 and cfg_a["post_nr_oversub"] == 2.0
+    panel.live_beameng_nr_depth.setCurrentIndex(panel.live_beameng_nr_depth.findText("Medium"))
     panel.live_beameng_adaptnull.setChecked(True)
     cfg = panel._beameng_steered_cfg(base)
     assert cfg["mode"] == cc.MODE_MVDR and cfg["auto_null"] is True and cfg["post_nr"] is True
