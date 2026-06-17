@@ -17,6 +17,7 @@ from typing import Optional
 from .beamformer import (
     MODE_DELAYSUM,
     MODE_SUPERDIRECTIVE,
+    design_from_bearings,
     design_zone_beams,
     directivity_index_db,
     talker_leakage_db,
@@ -175,6 +176,49 @@ def ab_compare(
         for label, gain, in_pk in sorted(leak, key=lambda r: -r[1]):
             lines.append(f"  {label}: {gain:+.0f} dB  [{'pickup' if in_pk else 'OUTSIDE'}]")
     return ABReport(sr=sr, variants=variants, talker_leakage=leak, summary="\n".join(lines))
+
+
+@dataclass
+class NullDepthReport:
+    """How much a steered beam's spatial null at ``null_az_deg`` suppresses energy coming FROM that
+    direction, and whether the look at ``look_az_deg`` is preserved. Measured by beamforming a clip
+    BOTH ways — look-only vs look+null — and comparing output power. On a small (≈40 mm) array the
+    broadband depth is modest (a few dB), so this is the honest *spatial* figure to set against the
+    single-channel cleaner's deeper cut."""
+    look_az_deg: float
+    null_az_deg: float
+    null_depth_db: float            # interferer-direction power, look+null vs look-only (negative = suppressed)
+    look_change_db: Optional[float]  # look-direction power change (≈0 = preserved), if a look clip is given
+    summary: str
+
+
+def measure_null_depth(geom: ArrayGeometry, interferer_y8, sr: int, look_az_deg: float, null_az_deg: float,
+                       *, talker_y8=None, off_nadir_deg: float = 90.0, freq_hz: float = 1500.0,
+                       loading: float = 0.02, mode: str = MODE_SUPERDIRECTIVE) -> "NullDepthReport":
+    """Measure the null depth a steered beam achieves on a SECOND source. ``interferer_y8`` is a raw
+    ``(M, samples)`` clip dominated by the interferer at ``null_az_deg`` (e.g. a fan with nobody talking);
+    ``talker_y8`` is an optional clip from ``look_az_deg``. Beams each clip look-only vs look+null (LCMV)
+    and reports the dB change — the interferer should drop, the talker should stay. Pure offline math
+    (reuses :func:`apply_design_offline`); hardware-free and deterministic."""
+    import numpy as np
+
+    look = (float(look_az_deg), float(off_nadir_deg))
+    nullb = (float(null_az_deg), float(off_nadir_deg))
+    d_off = design_from_bearings(geom, look, nulls=(), freq_hz=freq_hz, mode=mode, loading=loading)
+    d_on = design_from_bearings(geom, look, nulls=[nullb], freq_hz=freq_hz, mode=mode, loading=loading)
+
+    def _rms(d, y8) -> float:
+        m = apply_design_offline(d, geom, y8, sr, np)
+        return float(np.sqrt(np.mean(m[_AB_FRAME:] ** 2)) + 1e-20)   # skip the first frame (OLA edge)
+
+    null_db = 20.0 * float(np.log10(_rms(d_on, interferer_y8) / _rms(d_off, interferer_y8)))
+    look_db = None
+    if talker_y8 is not None:
+        look_db = 20.0 * float(np.log10(_rms(d_on, talker_y8) / _rms(d_off, talker_y8)))
+    lines = [f"Null at {null_az_deg:.0f}° (look {look_az_deg:.0f}°): interferer {null_db:+.1f} dB"]
+    if look_db is not None:
+        lines.append(f"talker at look preserved {look_db:+.1f} dB")
+    return NullDepthReport(float(look_az_deg), float(null_az_deg), null_db, look_db, " · ".join(lines))
 
 
 def save_ab_report(report: ABReport, out_dir: str) -> list:

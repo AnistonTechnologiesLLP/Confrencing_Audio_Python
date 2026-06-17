@@ -9,6 +9,15 @@ the TS sibling is at matching v5 parity. The desktop app is presented as
 
 ## [Unreleased]
 
+### Added
+- **Measure the steered beam's null depth on a 2nd source** (`conf_pipeline_control.measure_null_depth`,
+  `NullDepthReport`) — beamforms a raw 8-ch clip BOTH ways (look-only vs look+LCMV-null) and reports the dB
+  the null drops energy from the interferer direction, plus whether the talker at the look is preserved.
+  The honest *spatial* figure (a few dB on the ≈40 mm POLARIS — the single-channel cleaner does the deep
+  cut) for the talker+interferer A/B. Pure offline math (reuses `apply_design_offline`); hardware-free and
+  deterministic. (+2 tests.) Note: live capture from POLARIS still needs the engine's own input stream —
+  `record_clip`/`sd.rec` can't open these WDM-KS/DirectSound endpoints at 8 ch.
+
 ## [1.18.0] - 2026-06-17
 
 Theme: **manual aiming, a visual-polish pass, and real-time noise suppression** (incl. the OCTOVOX
