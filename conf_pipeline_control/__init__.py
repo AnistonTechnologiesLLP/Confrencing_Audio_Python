@@ -61,8 +61,10 @@ from .octovox_monitor import CleanMonitor, MonitorState  # noqa: F401
 from .ab_test import (  # noqa: F401
     ABReport,
     ABVariant,
+    NullDepthReport,
     ab_compare,
     apply_design_offline,
+    measure_null_depth,
     omni_reference,
     record_clip,
     save_ab_report,
@@ -151,4 +153,5 @@ __all__ = [
     "repair_dead_channels", "CleanMonitor", "MonitorState",
     "ab_compare", "apply_design_offline", "omni_reference", "save_ab_report",
     "record_clip", "ABReport", "ABVariant",
+    "measure_null_depth", "NullDepthReport",
 ]
