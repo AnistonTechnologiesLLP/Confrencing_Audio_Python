@@ -70,7 +70,7 @@ conf_pipeline_control/ host-side array-microphone control (optional [control] ex
   virtual_mic_grid.py    Nureva-style fixed near-field virtual-mic grid, loudest selected
   beam_engine.py      A/B engine: steered + grid back-ends on one shared input stream
   tracking.py         swappable smoothers (EMA + constant-velocity/Kalman-family hook)
-tests/                pytest suite (581 tests; incl. headless GUI smoke)
+tests/                pytest suite (603 tests; incl. headless GUI smoke)
 run_gui.py            launcher
 ```
 
@@ -587,9 +587,15 @@ output level — EMA-slewed, clamped to ±18 dB, and held through silence.
 steady background by **minimum statistics** (the per-bin running minimum — no silence or
 VAD needed, so it removes always-on fan/AC/HVAC hum the old gate couldn't), with a
 **Gentle / Medium / Aggressive** depth; speech is preserved (it sits above the floor) and
-the gate never hard-mutes. **"Adaptive null (learn room noise)"** switches the steered beam
-to data-adaptive `mvdr` + `auto_null` to spatially **null a directional fan/duct**. Both
-are opt-in and fixed at Connect; A/B them by ear on the monitor.
+the gate never hard-mutes. A **"Cleaner"** picker chooses the engine: **OCTOVOX cleaner
+(OM-LSA)** — OCTOVOX's decision-directed Ephraim–Malah/Cohen denoiser ported to run live on
+the mono output (stronger and more natural on non-stationary noise; pure numpy, ~12 ms) —
+or the **light gate** (the single-pole spectral gate). The same cleaner is available on the
+**auto-steer** path (its **Clean voice** + **Strength** controls), not just the A/B engine.
+**"Adaptive null (learn room noise)"** switches the steered beam to data-adaptive `mvdr` +
+`auto_null` to spatially **null a directional fan/duct**. All opt-in and fixed at Connect;
+A/B them by ear on the monitor. (DeepFilterNet3 stays an offline path — it needs 48 kHz +
+torch and has no frame-streaming API.)
 
 **Caveat:** the ~cm aperture means coarse-zone selection, not
 MXA920/Nureva-scale pinpoint — these isolate a zone or A/B two strategies, they don't

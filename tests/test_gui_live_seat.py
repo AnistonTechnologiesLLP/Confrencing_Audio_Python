@@ -433,6 +433,7 @@ def test_beameng_noise_suppression_steered_cfg(win):
     base = {"radius_m": 0.04}
     assert "post_nr" not in panel._beameng_steered_cfg(base)
     assert "mode" not in panel._beameng_steered_cfg(base)               # default: plain steered beam
+    assert "post_nr_engine" not in panel._beameng_steered_cfg(base)     # absent until post-NR is on
     panel.live_beameng_postnr.setChecked(True)
     assert panel._beameng_steered_cfg(base)["post_nr"] is True
     # the depth combo sets the suppression knobs (default Medium; Aggressive cuts deeper)
@@ -441,6 +442,11 @@ def test_beameng_noise_suppression_steered_cfg(win):
     cfg_a = panel._beameng_steered_cfg(base)
     assert cfg_a["post_nr_floor_db"] == -22.0 and cfg_a["post_nr_oversub"] == 2.0
     panel.live_beameng_nr_depth.setCurrentIndex(panel.live_beameng_nr_depth.findText("Medium"))
+    # the engine combo flows through: OCTOVOX OM-LSA cleaner by default, switchable to the light gate
+    assert panel._beameng_steered_cfg(base)["post_nr_engine"] == "omlsa"   # OCTOVOX cleaner is the default
+    panel.live_beameng_nr_engine.setCurrentIndex(panel.live_beameng_nr_engine.findData("gate"))
+    assert panel._beameng_steered_cfg(base)["post_nr_engine"] == "gate"
+    panel.live_beameng_nr_engine.setCurrentIndex(panel.live_beameng_nr_engine.findData("omlsa"))
     panel.live_beameng_adaptnull.setChecked(True)
     cfg = panel._beameng_steered_cfg(base)
     assert cfg["mode"] == cc.MODE_MVDR and cfg["auto_null"] is True and cfg["post_nr"] is True
@@ -450,3 +456,21 @@ def test_beameng_noise_suppression_steered_cfg(win):
     assert panel._beameng_steered_cfg(base)["mode"] == cc.MODE_SUPERDIRECTIVE   # seat-nulling alone
     panel.live_beameng_adaptnull.setChecked(True)
     assert panel._beameng_steered_cfg(base)["mode"] == cc.MODE_MVDR     # adaptive-null wins over seat-nulling
+
+
+def test_autosteer_has_its_own_octovox_cleaning_controls(win):
+    """Auto-steer exposes its OWN OCTOVOX-cleaning controls (Clean voice + Strength) in its section —
+    enabled only when auto-steer is the selected live mode, defaulting to Off (opt-in)."""
+    panel = win.panels["live"]
+    panel.live_beameng.setChecked(False)
+    panel.live_autosteer.setChecked(False)
+    assert not panel.live_autosteer_clean.isEnabled()       # no auto-steer → disabled
+    panel.live_autosteer.setChecked(True)                   # select auto-steer
+    assert panel.live_autosteer_clean.isEnabled() and panel.live_autosteer_depth.isEnabled()
+    assert panel.live_autosteer_clean.currentData() is None  # Off by default (opt-in)
+    panel.live_autosteer_clean.setCurrentIndex(panel.live_autosteer_clean.findData("omlsa"))
+    assert panel.live_autosteer_clean.currentData() == "omlsa"   # the OCTOVOX cleaner is selectable here
+    panel.live_beameng.setChecked(True)                     # switching modes is mutually exclusive
+    assert not panel.live_autosteer_clean.isEnabled()       # auto-steer deselected → its cleaner controls off
+    panel.live_beameng.setChecked(False)
+    panel.live_autosteer.setChecked(False)

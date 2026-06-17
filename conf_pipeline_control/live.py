@@ -29,6 +29,14 @@ from .audio import controls_available, missing_dependencies
 from .beamformer import BeamDesign
 from .control import MicController
 from .geometry import SOUND_SPEED_MPS, ArrayGeometry
+from .polaris_beamformer import (
+    DEFAULT_POST_NR_ENGINE,
+    DEFAULT_POST_NR_FLOOR_DB,
+    DEFAULT_POST_NR_FRAME,
+    DEFAULT_POST_NR_MINSTAT,
+    DEFAULT_POST_NR_OVERSUB,
+    DEFAULT_POST_NR_WARMUP_FRAMES,
+)
 from .steering import Direction
 
 _FRAME = 1024          # FFT length
@@ -59,6 +67,13 @@ class LiveBeamController(MicController):
         monitor: bool = False,
         output_device: Optional[int] = None,
         track_covariance: bool = False,
+        post_nr: bool = False,
+        post_nr_engine: str = DEFAULT_POST_NR_ENGINE,
+        post_nr_floor_db: float = DEFAULT_POST_NR_FLOOR_DB,
+        post_nr_oversub: float = DEFAULT_POST_NR_OVERSUB,
+        post_nr_frame: int = DEFAULT_POST_NR_FRAME,
+        post_nr_warmup_frames: int = DEFAULT_POST_NR_WARMUP_FRAMES,
+        post_nr_minstat: bool = DEFAULT_POST_NR_MINSTAT,
     ):
         super().__init__(geometry, n_channels=geometry.n_channels)
         self.device = device
@@ -68,6 +83,16 @@ class LiveBeamController(MicController):
         self.output_device = output_device     # None → system default output
         # opt-in spatial-covariance tap for DOA / auto-steer (off ⇒ zero overhead)
         self.track_covariance = track_covariance
+        # post-beam noise reducer on the mono output (the same engine the A/B BeamEngine uses), so the
+        # auto-steer / zone live paths get OCTOVOX-style cleaning too. OFF by default. "gate" = light
+        # spectral gate; "omlsa"/"wiener" = the OCTOVOX-derived StreamingCleaner. Built in _build_post_nr().
+        self.post_nr = bool(post_nr)
+        self._post_nr_engine = str(post_nr_engine)
+        self._post_nr_floor_db = float(post_nr_floor_db)
+        self._post_nr_oversub = float(post_nr_oversub)
+        self._post_nr_frame = int(post_nr_frame)
+        self._post_nr_warmup_frames = int(post_nr_warmup_frames)
+        self._post_nr_minstat = bool(post_nr_minstat)
         # Lazily bound in _open() (numpy / sounddevice objects) — typed Any so the
         # module stays importable + checkable without the [control] extra.
         self._cov: Any = None      # EMA of band covariance, (n_band, M, M) complex
@@ -87,6 +112,7 @@ class LiveBeamController(MicController):
         self._win: Any = None      # Hann window (numpy)
         self._inbuf: Any = None    # numpy (FRAME, M) sliding input
         self._ola: Any = None      # numpy (FRAME,) overlap-add tail
+        self._post_nr: Any = None  # post-beam noise reducer (StreamingCleaner / _PostNoiseSuppressor), or None
 
     # ---- weight computation (per FFT bin, broadband) ----
     def _compute_weights(self):
@@ -162,6 +188,25 @@ class LiveBeamController(MicController):
             w[active] = a0 / na                               # singular → DAS fallback
         return w
 
+    def _build_post_nr(self) -> None:
+        """Build the post-beam noise reducer (device-free, so it's unit-testable). Mirrors the engine
+        selection in :meth:`PolarisBeamformer._setup_runtime`: ``"omlsa"``/``"wiener"`` → the
+        OCTOVOX-derived :class:`StreamingCleaner`; ``"gate"`` → the light spectral gate. ``None`` if off."""
+        if not self.post_nr:
+            self._post_nr = None
+        elif self._post_nr_engine in ("omlsa", "wiener"):
+            from .streaming_cleaner import StreamingCleaner   # lazy: avoids a module-load import cycle
+            self._post_nr = StreamingCleaner(
+                self.samplerate, mode=self._post_nr_engine, frame=self._post_nr_frame,
+                gmin_db=self._post_nr_floor_db, warmup_frames=self._post_nr_warmup_frames,
+                minstat=self._post_nr_minstat)
+        else:
+            from .polaris_beamformer import _PostNoiseSuppressor
+            self._post_nr = _PostNoiseSuppressor(
+                self.samplerate, frame=self._post_nr_frame, floor_db=self._post_nr_floor_db,
+                oversub=self._post_nr_oversub, warmup_frames=self._post_nr_warmup_frames,
+                minstat=self._post_nr_minstat)
+
     # ---- lifecycle ----
     def _open(self) -> None:
         if not controls_available():
@@ -175,6 +220,7 @@ class LiveBeamController(MicController):
         self._inbuf = np.zeros((_FRAME, self.n_channels), dtype=float)
         self._ola = np.zeros(_FRAME, dtype=float)
         self._compute_weights()
+        self._build_post_nr()                  # fresh per session (rebuilt on each connect)
 
         if self.track_covariance:
             from .doa import DEFAULT_F_HI_HZ, DEFAULT_F_LO_HZ, band_indices
@@ -284,6 +330,12 @@ class LiveBeamController(MicController):
         self._ola[-_HOP:] = 0.0
         self._ola += y
         out = self._ola[:_HOP].copy()
+
+        # post-beam noise reduction (OCTOVOX OM-LSA cleaner / light gate) on the mono, before the meter
+        # and gain — so the meter, recording and monitor all reflect the cleaned voice. noise_gate=False:
+        # the minimum-statistics floor learns steady noise every frame without needing a VAD signal here.
+        if self._post_nr is not None:
+            out = self._post_nr.process(out, False)
 
         # metered level is PRE-gain (the base class re-applies gain + mute in
         # read_level, consistently with every backend).
