@@ -51,6 +51,14 @@ BLOCK_PARAM_SCHEMA = {
 }
 
 
+def set_danger(widget, on: bool = True) -> None:
+    """Mark/unmark a button as destructive (the QSS ``[danger="true"]`` variant) and re-polish so
+    the restyle takes on an already-shown widget (e.g. the Connect/Disconnect toggle)."""
+    widget.setProperty("danger", "true" if on else None)
+    widget.style().unpolish(widget)
+    widget.style().polish(widget)
+
+
 class _ValidateSignals(QObject):
     done = Signal(object)
     failed = Signal(str)

@@ -123,6 +123,37 @@ def test_array_bearing_settable_in_design_panel(win):
     assert cp.find_device(st.config, "A").bearing_deg == 90.0
 
 
+def test_destructive_buttons_carry_the_danger_style(win):
+    """Destructive actions get the QSS [danger] property so they read as destructive, not neutral —
+    Devices 'Remove selected', the selection editor 'Delete device', and the Route 'Remove' buttons."""
+    from PySide6.QtWidgets import QPushButton
+    st = win.state
+    st.set_config(cp.add_device(st.config, cp.create_microphone_array("A", "Array", position=Point2D(1.0, 1.0))))
+    design = win.panels["design"]
+    design._device_props(cp.find_device(st.config, "A"))       # build the selection editor (Delete device)
+    danger = {b.text() for b in design.findChildren(QPushButton) if b.property("danger") == "true"}
+    assert "Remove selected" in danger and "Delete device" in danger
+    # a neutral action must NOT be styled destructive
+    assert not any(b.property("danger") == "true" for b in design.findChildren(QPushButton)
+                   if b.text() == "Add")
+    route = win.panels["route"]
+    assert sum(b.property("danger") == "true" for b in route.findChildren(QPushButton)) >= 2  # 2x "Remove"
+
+
+def test_disconnect_button_flips_to_danger_while_a_session_runs(win):
+    """The Connect/Disconnect toggle is neutral while idle and reads destructive (danger) while a live
+    session runs — driven from the one chokepoint _notify_session_changed."""
+    import conf_pipeline_control as cc
+    panel = win.panels["live"]
+    assert not panel.live_connect.property("danger")           # idle -> 'Connect' -> neutral
+    panel._beam_engine = cc.BeamEngine(device=None)            # a running session (no start needed)
+    panel._notify_session_changed()
+    assert panel.live_connect.property("danger") == "true"     # 'Disconnect' -> danger
+    panel._beam_engine = None
+    panel._notify_session_changed()
+    assert not panel.live_connect.property("danger")           # back to neutral
+
+
 def test_canvas_click_cb_consumes_a_2d_click(win):
     """The opt-in click_cb fires with the clicked ROOM point on a 2D press; returning True consumes the
     click (skips tool handling), False lets it fall through to normal selection, and None (default) is a

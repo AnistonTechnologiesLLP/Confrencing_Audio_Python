@@ -38,6 +38,7 @@ from .common import (
     NoWheelDoubleSpinBox,
     NoWheelSpinBox,
     PanelBase,
+    set_danger,
     _ABWorker,
     _CalibWorker,
     _ProbeWorker,
@@ -1257,7 +1258,9 @@ class LivePanel(PanelBase):
             ctl.set_gain_db(float(v))
 
     def _notify_session_changed(self):
-        """Tell the shell (ModeBar live dot) the session state flipped."""
+        """Tell the shell (ModeBar live dot) the session state flipped, and mark the Connect/Disconnect
+        button destructive while a session runs (it reads 'Disconnect' then)."""
+        set_danger(self.live_connect, self._live_busy())
         w = self.window()
         if hasattr(w, "_live_session_changed"):
             w._live_session_changed(self._live_busy())

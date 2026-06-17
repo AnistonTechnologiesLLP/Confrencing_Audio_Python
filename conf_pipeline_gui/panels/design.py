@@ -89,6 +89,7 @@ class DesignPanel(PanelBase):
         lay.addWidget(self.dev_list, 1)
         row = QHBoxLayout()
         rm = QPushButton("Remove selected")
+        rm.setProperty("danger", "true")
         rm.clicked.connect(self._remove_selected_device)
         row.addWidget(rm)
         lay.addLayout(row)
@@ -264,6 +265,7 @@ class DesignPanel(PanelBase):
             self.sel_layout.addWidget(QLabel(f"Zone {sel['zone_id']} on {sel['array_id']}"))
             self._zone_props(sel["array_id"], sel["zone_id"])
             rm = QPushButton("Delete zone")
+            rm.setProperty("danger", "true")
             rm.clicked.connect(lambda: self.state.set_config(cp.remove_coverage_zone(cfg, sel["array_id"], sel["zone_id"])))
             self.sel_layout.addWidget(rm)
 
@@ -356,6 +358,7 @@ class DesignPanel(PanelBase):
             dsp.clicked.connect(lambda: self._win("_goto_mode", "route"))
             self.sel_layout.addWidget(dsp)
         rm = QPushButton("Delete device")
+        rm.setProperty("danger", "true")
         rm.clicked.connect(lambda: self.state.set_config(cp.remove_device(self.state.config, d.id)))
         self.sel_layout.addWidget(rm)
 
@@ -401,6 +404,7 @@ class DesignPanel(PanelBase):
             else:
                 self.sel_layout.addWidget(QLabel(f"  {a.label}: array unplaced"))
         rm = QPushButton("Delete talker")
+        rm.setProperty("danger", "true")
         rm.clicked.connect(lambda: self.state.set_config(cp.remove_talker(self.state.config, t.id)))
         self.sel_layout.addWidget(rm)
 

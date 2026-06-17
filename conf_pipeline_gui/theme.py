@@ -76,6 +76,10 @@ QPushButton:disabled {{ color: {faint}; }}
 QPushButton[accent="true"] {{ background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 {accent_bright}, stop:1 {accent}); color: {on_accent}; border: 1px solid {accent}; font-weight: 700; }}
 QPushButton[accent="true"]:hover {{ background: {accent_bright}; }}
 QPushButton[accent="true"]:pressed {{ background: {accent_press}; }}
+QPushButton[danger="true"] {{ background: {surface2}; color: {err}; border: 1px solid {err}; font-weight: 600; }}
+QPushButton[danger="true"]:hover {{ background: {err}; color: {on_accent}; }}
+QPushButton[danger="true"]:pressed {{ background: {err}; color: {on_accent}; }}
+QPushButton[danger="true"]:disabled {{ color: {faint}; border-color: {border}; background: {surface2}; }}
 
 QMenu {{ background: {elev}; color: {text}; border: 1px solid {border_strong}; border-radius: 9px; padding: 5px; }}
 QMenu::item {{ padding: 6px 24px 6px 12px; border-radius: 6px; }}
