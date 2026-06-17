@@ -9,7 +9,31 @@ the TS sibling is at matching v5 parity. The desktop app is presented as
 
 ## [Unreleased]
 
+## [1.18.0] - 2026-06-17
+
+Theme: **manual aiming, a visual-polish pass, and real-time noise suppression** (incl. the OCTOVOX
+OM-LSA cleaner) on the live POLARIS path — all on top of the v1.17.0 room-aware steering. No schema
+change (stays `CONFIG_VERSION` 5; TS sibling already at parity).
+
 ### Added
+- **OCTOVOX voice cleaner on the real-time output** (`conf_pipeline_control/streaming_cleaner.py`
+  `StreamingCleaner`; LIVE A/B card **"Cleaner"** picker; `post_nr_engine` knob; `--post-nr-engine` CLI) —
+  brings OCTOVOX's *cleaning* to the live path. The conferencing engine already beamforms the 8 capsules to
+  one mono voice in real time, so only the **single-channel noise reduction** is ported: a new post-beam
+  engine that runs OCTOVOX's decision-directed **OM-LSA** denoiser (Ephraim–Malah / Cohen 2003) frame-by-frame
+  at the existing `post_nr` seam. It's a **drop-in** for the light spectral gate — same
+  `process(block, noise_gate)`/`reset()` contract, same overlap-add + minimum-statistics floor — but swaps the
+  single-pole Wiener for the OM-LSA log-spectral-amplitude gain with a per-bin speech-presence floor, which is
+  more natural and stronger on non-stationary noise. Runs **on the audio thread** at 44.1 kHz (~12 ms added,
+  comfortably inside a ~100–150 ms conferencing budget); pure numpy, with a vendored `_exp1` exponential-integral
+  approximation standing in for `scipy.special.exp1`. Select it in the GUI "Cleaner" combo (**OCTOVOX cleaner
+  (OM-LSA)**, the default when the noise reducer is on; **Light gate (fast)** keeps the old behaviour), or via
+  `post_nr_engine="omlsa"|"wiener"|"gate"`. DeepFilterNet3 is deliberately **not** in the live path (it needs
+  48 kHz + torch and has no frame-streaming API), so it stays an offline / out-of-process path.
+  **The cleaner applies to the auto-steer path too**, not just the A/B engine: `LiveBeamController` (which
+  `AutoSteerController` wraps) gained the same `post_nr`/`post_nr_engine` knobs and runs the reducer on its
+  beam output, and the **Auto-steer** section now has its own **Clean voice** (Off / OCTOVOX cleaner / Light
+  gate) + **Strength** controls. (+25 tests.)
 - **Suppress steady fans / AC from the real-time output** (`PolarisBeamformer` post-NR + LIVE A/B card) —
   the post-beam noise suppressor now learns the steady background by **minimum statistics** (the per-bin
   running minimum of the smoothed power over a ~0.7 s window) instead of a VAD-gated EMA, so it removes

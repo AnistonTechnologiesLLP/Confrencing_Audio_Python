@@ -117,6 +117,10 @@ DEFAULT_POST_NR_MINSTAT_SUB = 8      # sliding window = this many sub-windows ..
 DEFAULT_POST_NR_MINSTAT_SUBLEN = 16  # ... × this many frames each (8×16 = 128 frames ≈ 0.7 s @ frame 512/256)
 DEFAULT_POST_NR_MINSTAT_BIAS = 1.5   # the minimum under-estimates the mean noise power → lift toward it
 DEFAULT_POST_NR_POWER_ALPHA = 0.8    # per-bin power-smoothing EMA feeding the minimum tracker
+# Which engine runs at the post-beam seam when post_nr is on. "gate" = the light single-pole spectral gate
+# (_PostNoiseSuppressor, the default — back-compat). "omlsa"/"wiener" = the OCTOVOX-derived decision-directed
+# StreamingCleaner (a stronger, more natural denoiser; see streaming_cleaner.StreamingCleaner).
+DEFAULT_POST_NR_ENGINE = "gate"      # "gate" | "omlsa" | "wiener"
 
 MODE_DELAYSUM = "delaysum"        # integer-sample time-domain delay-and-sum (default)
 MODE_FRACDELAY = "fracdelay"      # sub-sample (fractional) delay-and-sum via windowed-sinc FIR
@@ -974,6 +978,7 @@ class PolarisBeamformer(MicController):
         post_nr_frame: int = DEFAULT_POST_NR_FRAME,                     # NR STFT frame (latency ↔ freq res)
         post_nr_warmup_frames: int = DEFAULT_POST_NR_WARMUP_FRAMES,     # frames before NR engages
         post_nr_minstat: bool = DEFAULT_POST_NR_MINSTAT,                # min-statistics floor (VAD-free) vs gated EMA
+        post_nr_engine: str = DEFAULT_POST_NR_ENGINE,                   # "gate" | "omlsa" | "wiener" (OCTOVOX cleaner)
         output_callback: Optional[Callable[[Any], None]] = None,
         output_queue_size: int = 8,
         output_device: Optional[int] = None,
@@ -1055,6 +1060,7 @@ class PolarisBeamformer(MicController):
         self._post_nr_frame = int(post_nr_frame)
         self._post_nr_warmup_frames = int(post_nr_warmup_frames)
         self._post_nr_minstat = bool(post_nr_minstat)
+        self._post_nr_engine = str(post_nr_engine)
         self._post_nr: Optional[_PostNoiseSuppressor] = None
         self.output_device = output_device
         self.monitor = monitor
@@ -1432,10 +1438,22 @@ class PolarisBeamformer(MicController):
             self._lp_kernel = None
             self._lp_tail = None
         # post-beam noise suppressor (P3): built only when enabled (needs numpy); fresh per session.
-        self._post_nr = _PostNoiseSuppressor(
-            self.sample_rate, frame=self._post_nr_frame, floor_db=self._post_nr_floor_db,
-            oversub=self._post_nr_oversub, gain_alpha=self._post_nr_gain_alpha,
-            warmup_frames=self._post_nr_warmup_frames, minstat=self._post_nr_minstat) if self.post_nr else None
+        # Engine: "gate" = the light single-pole spectral gate (_PostNoiseSuppressor); "omlsa"/"wiener" =
+        # the OCTOVOX-derived decision-directed cleaner (StreamingCleaner) — a drop-in with the same
+        # process(block, noise_gate)/reset() contract, so process_block and reset_transient are untouched.
+        if not self.post_nr:
+            self._post_nr = None
+        elif self._post_nr_engine in ("omlsa", "wiener"):
+            from .streaming_cleaner import StreamingCleaner   # lazy: avoids a module-load import cycle
+            self._post_nr = StreamingCleaner(
+                self.sample_rate, mode=self._post_nr_engine, frame=self._post_nr_frame,
+                gmin_db=self._post_nr_floor_db, gain_alpha=self._post_nr_gain_alpha,
+                warmup_frames=self._post_nr_warmup_frames, minstat=self._post_nr_minstat)
+        else:
+            self._post_nr = _PostNoiseSuppressor(
+                self.sample_rate, frame=self._post_nr_frame, floor_db=self._post_nr_floor_db,
+                oversub=self._post_nr_oversub, gain_alpha=self._post_nr_gain_alpha,
+                warmup_frames=self._post_nr_warmup_frames, minstat=self._post_nr_minstat)
 
     # ---- external-feed seam (BeamEngine drives the DSP from a shared stream) ----
     def process_block(self, block: Any) -> Any:
@@ -1765,6 +1783,9 @@ def _demo(argv: Optional[Sequence[str]] = None) -> int:
                     help=f"post-NR Wiener over-subtraction strength (default {DEFAULT_POST_NR_OVERSUB})")
     ap.add_argument("--no-post-nr-minstat", dest="post_nr_minstat", action="store_false",
                     help="use the legacy VAD-gated noise floor instead of minimum statistics (default: min-stat)")
+    ap.add_argument("--post-nr-engine", choices=("gate", "omlsa", "wiener"), default=DEFAULT_POST_NR_ENGINE,
+                    help=f"post-NR engine: 'gate' light spectral gate, or the OCTOVOX-derived decision-directed "
+                         f"'omlsa'/'wiener' cleaner (default {DEFAULT_POST_NR_ENGINE})")
     ap.add_argument("--auto-null", action="store_true",
                     help="null detected interferers (the non-dominant talkers); superdirective/mvdr only")
     ap.add_argument("--monitor", action="store_true", help="play the mono output (use HEADPHONES)")
@@ -1799,6 +1820,7 @@ def _demo(argv: Optional[Sequence[str]] = None) -> int:
         agc_target_db=args.agc_target_db,
         post_nr=args.post_nr, post_nr_floor_db=args.post_nr_floor_db,
         post_nr_oversub=args.post_nr_oversub, post_nr_minstat=args.post_nr_minstat,
+        post_nr_engine=args.post_nr_engine,
         monitor=args.monitor, output_device=args.output_device,
         wait_for_device=args.wait, **bl_kw,
     )
@@ -1817,8 +1839,11 @@ def _demo(argv: Optional[Sequence[str]] = None) -> int:
     if bf.agc_target_db is not None:
         print(f"Output AGC: normalizing to {bf.agc_target_db:.0f} dBFS (±{DEFAULT_AGC_MAX_GAIN_DB:.0f} dB, holds in silence).")
     if bf.post_nr:
-        print(f"Post-beam NR: spectral gate, floor {bf._post_nr_floor_db:.0f} dB "
-              f"(frame {bf._post_nr_frame}; learns on noise-only frames). Local fallback for OCTOVOX.")
+        _eng = {"gate": "spectral gate (local fallback for OCTOVOX)",
+                "omlsa": "OCTOVOX cleaner — decision-directed OM-LSA",
+                "wiener": "OCTOVOX cleaner — decision-directed Wiener"}.get(bf._post_nr_engine, bf._post_nr_engine)
+        print(f"Post-beam NR: {_eng}, floor {bf._post_nr_floor_db:.0f} dB "
+              f"(frame {bf._post_nr_frame}; minimum-statistics floor).")
     if args.wait:
         print(f"Waiting for device {args.device} @ {args.rate:.0f} Hz (auto-reconnect on) ... Ctrl+C to stop.")
     else:
