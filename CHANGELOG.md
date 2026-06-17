@@ -9,6 +9,12 @@ the TS sibling is at matching v5 parity. The desktop app is presented as
 
 ## [Unreleased]
 
+## [1.18.0] - 2026-06-17
+
+Theme: **manual aiming, a visual-polish pass, and real-time noise suppression** (incl. the OCTOVOX
+OM-LSA cleaner) on the live POLARIS path — all on top of the v1.17.0 room-aware steering. No schema
+change (stays `CONFIG_VERSION` 5; TS sibling already at parity).
+
 ### Added
 - **OCTOVOX voice cleaner on the real-time output** (`conf_pipeline_control/streaming_cleaner.py`
   `StreamingCleaner`; LIVE A/B card **"Cleaner"** picker; `post_nr_engine` knob; `--post-nr-engine` CLI) —
