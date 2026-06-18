@@ -1405,7 +1405,9 @@ class LivePanel(PanelBase):
         self._push_locked_steering()                 # snap-steer: re-pin the locked seat if its bearing moved
         n_null = self._push_seat_nulls()             # room-aware: null the other seats (if enabled)
         aec_s = f"   ·   AEC {e.aec_erle_db:+.0f} dB" if self.live_beameng_aec.isChecked() else ""
-        aec_s += f"   ·   ~{e.estimated_latency_ms:.0f} ms"   # honest estimated end-to-end DSP latency
+        lat = getattr(e, "estimated_latency_ms", None)       # honest estimated end-to-end DSP latency
+        if lat is not None:
+            aec_s += f"   ·   ~{lat:.0f} ms"
         if loc.angle_deg is None and loc.xy is None:
             self.live_beameng_view.setText(f"[{loc.mode}] · listening — no source localized ·{aec_s}")
         else:
@@ -1437,7 +1439,9 @@ class LivePanel(PanelBase):
             [(d.azimuth_deg, d.salience_db, d.in_sector) for d in dets],
         )
         aec_s = f"   ·   AEC {a.aec_erle_db:+.0f} dB" if self.live_autosteer_aec.isChecked() else ""
-        aec_s += f"   ·   ~{a.estimated_latency_ms:.0f} ms"   # honest estimated end-to-end DSP latency
+        lat = getattr(a, "estimated_latency_ms", None)       # honest estimated end-to-end DSP latency
+        if lat is not None:
+            aec_s += f"   ·   ~{lat:.0f} ms"
         if not dets:
             self.live_autosteer_view.setText("· listening — no talker detected ·" + aec_s)
         else:
