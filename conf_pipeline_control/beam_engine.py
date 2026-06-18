@@ -242,6 +242,23 @@ class BeamEngine:
         """The far-end reference source the AEC opened (empty if AEC off / no source)."""
         return self._steered.aec_ref_source
 
+    # ---- A/B proof + latency (steered back-end) ----
+    def start_ab_capture(self, seconds: float = 8.0) -> Any:
+        """Arm an A/B proof capture on the steered back-end (raw beam vs cleaned)."""
+        return self._steered.start_ab_capture(seconds)
+
+    @property
+    def ab_capture(self) -> Any:
+        return self._steered.ab_capture
+
+    def active_cleaning_stages(self) -> str:
+        return self._steered.active_cleaning_stages()
+
+    @property
+    def estimated_latency_ms(self) -> float:
+        """Honest estimated DSP latency (ms) of the steered back-end."""
+        return self._steered.estimated_latency_ms
+
     # ---- location ----
     @property
     def current_location(self) -> Location:

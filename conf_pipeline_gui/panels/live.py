@@ -88,6 +88,8 @@ class LivePanel(PanelBase):
         self._autosteer = None           # AutoSteerController while auto-following talkers
         self._beam_engine = None         # BeamEngine while running the steered/grid A/B
         self._beameng_loc = None         # last BeamEngine current_location (for the overlay tick)
+        self._ab_cap = None              # armed ABCapture during a running A/B proof, or None
+        self._ab_obj = None              # the live object (engine/autosteer/ctrl) the A/B capture is on
         self._session_array_id = None    # the array the running session was started with
         self._live_seat = None           # SeatMatch for the dominant talker (room-aware readout)
         self._beameng_locked_seat = None  # seat_id the steered beam is pinned to (snap-steer), or None
@@ -596,6 +598,17 @@ class LivePanel(PanelBase):
         row.addWidget(self.live_gain, 1)
         row.addWidget(self.live_gain_lbl)
         v.addLayout(row)
+
+        self.live_abproof_btn = QPushButton("Capture A/B proof (raw vs cleaned)")
+        self.live_abproof_btn.setToolTip(
+            "Record ~8 s of the beam BOTH ways at once — raw vs the live cleaners (AEC / dereverb / AI "
+            "cleaner) — measure how much quieter the background got (dB), and export both clips + the "
+            "numbers. Transparent proof you can run in the customer's own room. Needs a live beam connected "
+            "(A/B engine, auto-steer, or zone)."
+        )
+        self.live_abproof_btn.setEnabled(False)
+        self.live_abproof_btn.clicked.connect(self._capture_ab_proof)
+        v.addWidget(self.live_abproof_btn)
 
         self.live_status = QLabel("Disconnected.")
         self.live_status.setWordWrap(True)
@@ -1378,6 +1391,7 @@ class LivePanel(PanelBase):
         self._push_locked_steering()                 # snap-steer: re-pin the locked seat if its bearing moved
         n_null = self._push_seat_nulls()             # room-aware: null the other seats (if enabled)
         aec_s = f"   ·   AEC {e.aec_erle_db:+.0f} dB" if self.live_beameng_aec.isChecked() else ""
+        aec_s += f"   ·   ~{e.estimated_latency_ms:.0f} ms"   # honest estimated end-to-end DSP latency
         if loc.angle_deg is None and loc.xy is None:
             self.live_beameng_view.setText(f"[{loc.mode}] · listening — no source localized ·{aec_s}")
         else:
@@ -1409,6 +1423,7 @@ class LivePanel(PanelBase):
             [(d.azimuth_deg, d.salience_db, d.in_sector) for d in dets],
         )
         aec_s = f"   ·   AEC {a.aec_erle_db:+.0f} dB" if self.live_autosteer_aec.isChecked() else ""
+        aec_s += f"   ·   ~{a.estimated_latency_ms:.0f} ms"   # honest estimated end-to-end DSP latency
         if not dets:
             self.live_autosteer_view.setText("· listening — no talker detected ·" + aec_s)
         else:
@@ -1545,10 +1560,50 @@ class LivePanel(PanelBase):
             "connected": True,
         })
 
+    # ---- A/B proof (raw beam vs cleaned) ----
+    def _ab_target(self):
+        """The live object that can capture an A/B proof (A/B engine / auto-steer / zone controller).
+        The OCTOVOX CleanMonitor path has no live cleaners to tap, so it's excluded."""
+        for obj in (self._beam_engine, self._autosteer, self._live_ctl):
+            if obj is not None and hasattr(obj, "start_ab_capture"):
+                return obj
+        return None
+
+    def _capture_ab_proof(self):
+        """Arm a ~8 s raw-vs-cleaned capture on the running beam; the meter tick finalizes + exports it."""
+        obj = self._ab_target()
+        if obj is None:
+            self.live_status.setText("Connect a beam (A/B engine / auto-steer / zone) first, with cleaning on.")
+            return
+        self._ab_obj = obj
+        self._ab_cap = obj.start_ab_capture(8.0)
+        self.live_abproof_btn.setEnabled(False)
+        self.live_status.setText("A/B proof: capturing ~8 s of raw-vs-cleaned — let the room run / speak…")
+
+    def _poll_ab_proof(self):
+        cap = self._ab_cap
+        if cap is None or not cap.done:
+            return
+        obj, self._ab_cap = self._ab_obj, None
+        self._ab_obj = None
+        self.live_abproof_btn.setEnabled(self._ab_target() is not None)
+        res = cap.finalize(erle_db=getattr(obj, "aec_erle_db", 0.0),
+                           stages=obj.active_cleaning_stages() if obj is not None else "")
+        out_dir = QFileDialog.getExistingDirectory(self, f"A/B proof: {res.headline()} — save clips + numbers to…")
+        if not out_dir:
+            self.live_status.setText(f"A/B proof: {res.headline()} (not saved).")
+            return
+        import conf_pipeline_control as cc
+
+        cc.write_ab_proof(res, out_dir)
+        self.live_status.setText(f"A/B proof saved · {res.headline()} → {out_dir}")
+
     def _tick_live_meter(self):
         """Update the level meter on a dB scale (−60 dB → 0 %, 0 dB → 100 %), so
         normal speech picked up by a ceiling array is clearly visible rather than
         a sliver on a linear scale."""
+        self._poll_ab_proof()                # finalize + export an A/B proof once its capture completes
+        self.live_abproof_btn.setEnabled(self._ab_cap is None and self._ab_target() is not None)
         self._live_seat = None               # only the DOA paths below re-resolve a seat
         if self._beam_engine is not None:
             self._tick_beameng()

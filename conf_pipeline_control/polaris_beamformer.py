@@ -1091,6 +1091,7 @@ class PolarisBeamformer(MicController):
         self._aec_ref_device = aec_ref_device
         self._aec: Any = None
         self._ref_capture: Any = None
+        self._ab_capture: Any = None              # armed A/B proof capture (raw-vs-cleaned), or None
         self.output_device = output_device
         self.monitor = monitor
         # device supervision (opt-in): wait for the array to appear, auto-reconnect if it drops
@@ -1511,6 +1512,8 @@ class PolarisBeamformer(MicController):
         np = self._np
         with self._beam_lock:
             mono = self._beam.process(block)
+        cap = self._ab_capture                        # A/B proof: snapshot the RAW beam before any cleaner
+        raw_ab = mono if (cap is not None and not cap.done) else None
         if self._aec is not None:
             rc = self._ref_capture                    # read once: teardown may null it on the control thread
             ref = rc.recent(mono.shape[0]) if rc is not None else None
@@ -1524,6 +1527,8 @@ class PolarisBeamformer(MicController):
             mono = self._dereverb.process(mono, self._noise_gate)  # suppress late reverb BEFORE the noise reducer
         if self._post_nr is not None:
             mono = self._post_nr.process(mono, self._noise_gate)   # spectral-gate NR before AGC (stable floor)
+        if raw_ab is not None:
+            cap.feed(raw_ab, mono)                    # A/B proof: raw beam vs the cleaned (pre-AGC) mono
         if self._agc_gain is not None:
             mono = self._apply_agc(mono)              # target-loudness normalize (before the linear band-limit)
         if self._lp_kernel is not None:
@@ -1588,6 +1593,51 @@ class PolarisBeamformer(MicController):
     def aec_ref_source(self) -> str:
         """Human-readable far-end reference source label (empty if none/off)."""
         return self._ref_capture.source if self._ref_capture is not None else ""
+
+    # ---- A/B proof capture + latency read-out ----
+    def start_ab_capture(self, seconds: float = 8.0) -> Any:
+        """Arm an A/B proof capture: process_block then feeds the raw beam + the cleaned mono until
+        ``seconds`` are buffered (``ab_capture.done``). Returns the :class:`ABCapture`."""
+        from .ab_capture import ABCapture
+
+        cap = ABCapture(self.sample_rate, seconds=seconds)
+        self._ab_capture = cap
+        return cap
+
+    @property
+    def ab_capture(self) -> Any:
+        """The armed A/B proof capture (or None)."""
+        return self._ab_capture
+
+    def active_cleaning_stages(self) -> str:
+        """Human-readable list of the cleaners currently engaged (for the A/B proof header)."""
+        names = []
+        if self._aec is not None:
+            names.append("AEC")
+        if self._dereverb is not None:
+            names.append("dereverb")
+        if self._post_nr is not None:
+            names.append("AI cleaner" if getattr(self._post_nr, "mode", "gate") in ("omlsa", "wiener")
+                         else "noise gate")
+        return " + ".join(names)
+
+    @property
+    def estimated_latency_ms(self) -> float:
+        """Honest *estimated* end-to-end DSP latency (ms), summed from the active stages: one input block,
+        the freq-domain beam STFT frame (freq-domain modes only), one analysis frame per engaged cleaner,
+        and the band-limit FIR group delay. Excludes OS/device buffering."""
+        sr = self.sample_rate or 44100.0
+        ms = 1000.0 / sr
+        lat = float(self.blocksize) * ms                         # one input block of buffering
+        if self.mode in (MODE_SUPERDIRECTIVE, MODE_MVDR):        # freq-domain beam ≈ one STFT frame
+            lat += float(self.nfft) * ms
+        for stage in (self._aec, self._dereverb, self._post_nr):
+            if stage is not None:
+                lat += float(getattr(stage, "_F", 0)) * ms       # OLA framing latency (~one frame)
+        lp = getattr(self, "_lp_kernel", None)                   # only allocated once _setup_runtime ran
+        if lp is not None:
+            lat += (len(lp) - 1) / 2.0 * ms                      # FIR group delay
+        return lat
 
     def reset_transient(self) -> None:
         """Wipe per-mode transient state so a re-activated beam doesn't replay stale

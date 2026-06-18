@@ -138,6 +138,7 @@ class LiveBeamController(MicController):
         self._dereverb: Any = None # real-time dereverb (StreamingDereverb), runs before the noise reducer, or None
         self._aec: Any = None      # live echo canceller (StreamingAec), runs before dereverb, or None
         self._ref_capture: Any = None  # far-end reference source (ReferenceCapture) for the AEC, or None
+        self._ab_capture: Any = None   # armed A/B proof capture (raw-vs-cleaned), or None
 
     # ---- weight computation (per FFT bin, broadband) ----
     def _compute_weights(self):
@@ -266,6 +267,43 @@ class LiveBeamController(MicController):
         """Live AEC echo-return-loss-enhancement (dB); 0 when AEC is off or no echo seen."""
         return float(self._aec.erle_db) if self._aec is not None else 0.0
 
+    # ---- A/B proof capture + latency read-out ----
+    def start_ab_capture(self, seconds: float = 8.0) -> Any:
+        """Arm an A/B proof capture: _process_block then feeds the raw beam + cleaned mono until
+        ``seconds`` are buffered. Returns the :class:`ABCapture`."""
+        from .ab_capture import ABCapture
+
+        cap = ABCapture(self.samplerate, seconds=seconds)
+        self._ab_capture = cap
+        return cap
+
+    @property
+    def ab_capture(self) -> Any:
+        return self._ab_capture
+
+    def active_cleaning_stages(self) -> str:
+        names = []
+        if self._aec is not None:
+            names.append("AEC")
+        if self._dereverb is not None:
+            names.append("dereverb")
+        if self._post_nr is not None:
+            names.append("AI cleaner" if getattr(self._post_nr, "mode", "gate") in ("omlsa", "wiener")
+                         else "noise gate")
+        return " + ".join(names)
+
+    @property
+    def estimated_latency_ms(self) -> float:
+        """Honest *estimated* DSP latency (ms): one input hop + the freq-domain beam OLA frame + one
+        analysis frame per engaged cleaner. Excludes OS/device buffering."""
+        sr = self.samplerate or 44100.0
+        ms = 1000.0 / sr
+        lat = (_HOP + _FRAME) * ms                               # input hop + beam overlap-add frame
+        for stage in (self._aec, self._dereverb, self._post_nr):
+            if stage is not None:
+                lat += float(getattr(stage, "_F", 0)) * ms
+        return float(lat)
+
     # ---- lifecycle ----
     def _open(self) -> None:
         if not controls_available():
@@ -392,6 +430,9 @@ class LiveBeamController(MicController):
         self._ola += y
         out = self._ola[:_HOP].copy()
 
+        cap = self._ab_capture                        # A/B proof: snapshot the RAW beam before any cleaner
+        raw_ab = out if (cap is not None and not cap.done) else None
+
         # post-beam enhancement on the mono, before the meter and gain — so the meter, recording and monitor
         # all reflect the cleaned voice. Order: AEC → dereverb → denoise. noise_gate=False: no VAD on this
         # path, so the AEC relies on its own far-end-activity gate and the min-statistics NR floor.
@@ -403,6 +444,8 @@ class LiveBeamController(MicController):
             out = self._dereverb.process(out, False)
         if self._post_nr is not None:
             out = self._post_nr.process(out, False)
+        if raw_ab is not None:
+            cap.feed(raw_ab, out)                     # A/B proof: raw beam vs the cleaned (pre-gain) mono
 
         # metered level is PRE-gain (the base class re-applies gain + mute in
         # read_level, consistently with every backend).

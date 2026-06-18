@@ -10,6 +10,15 @@ the TS sibling is at matching v5 parity. The desktop app is presented as
 ## [Unreleased]
 
 ### Added
+- **A/B proof & measurement tool + live latency read-out** (`conf_pipeline_control.ab_capture.ABCapture`;
+  a "Capture A/B proof (raw vs cleaned)" button in the LIVE transport; `estimated_latency_ms`) — the
+  transparency moat: capture the beamformed mono **raw vs cleaned simultaneously** (a tap in `process_block`
+  feeds the pre-cleaner and post-cleaner mono from the *same* audio), measure how much **quieter the
+  background got** (noise-bed dB, + broadband RMS, + ERLE when AEC is on), and **one-click export** both clips
+  + the numbers (`ab_raw.wav` / `ab_clean.wav` / `ab_proof.txt`). Turns "trust our AI cleaning" into proof an
+  integrator can run in the customer's own room. Works on any live beam (A/B engine / auto-steer / zone);
+  reuses the `ab_test` WAV/`rms_db` pattern. Plus an honest **estimated end-to-end DSP latency** read-out
+  (`~N ms`, summed from the active stage frames) next to the live ERLE. (+13 tests.)
 - **Live acoustic echo cancellation (AEC)** (`conf_pipeline_control.streaming_aec.StreamingAec` +
   `reference_capture.ReferenceCapture`; `aec` knob on `PolarisBeamformer` / `LiveBeamController` /
   `AutoSteerController`; GUI **"Echo cancel"** toggle in the A/B-engine and Auto-steer cards + a live ERLE-dB

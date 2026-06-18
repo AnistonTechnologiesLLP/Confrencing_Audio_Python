@@ -115,6 +115,7 @@ from .polaris_beamformer import (  # noqa: F401
 from .streaming_cleaner import StreamingCleaner, StreamingDereverb  # noqa: F401  (OCTOVOX-derived live cleaner + dereverb)
 from .streaming_aec import StreamingAec  # noqa: F401  (streaming partitioned-block echo canceller)
 from .reference_capture import ReferenceCapture  # noqa: F401  (far-end loopback reference for live AEC)
+from .ab_capture import ABCapture, ABProofResult, write_ab_proof  # noqa: F401  (live raw-vs-cleaned proof tool)
 from .virtual_mic_grid import VirtualMicGrid  # noqa: F401  (optional module — safe to delete)
 from .beam_engine import BeamEngine, Location  # noqa: F401  (optional A/B wrapper — safe to delete)
 
@@ -143,7 +144,7 @@ __all__ = [
     "AutoSteerController", "SectorConfig",
     "Tracker", "ValueSmoother", "ExponentialTracker", "AlphaBetaTracker",
     "PolarisBeamformer", "DoaReading", "DeviceConfigError", "StreamingCleaner", "StreamingDereverb",
-    "StreamingAec",
+    "StreamingAec", "ReferenceCapture", "ABCapture", "ABProofResult", "write_ab_proof",
     "VirtualMicGrid",
     "BeamEngine", "Location",
     "MicController", "MicState", "SimulatedMicController",

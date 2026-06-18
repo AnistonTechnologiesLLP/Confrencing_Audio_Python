@@ -521,3 +521,12 @@ def test_listening_mode_selector_drives_mode_and_cards(win):
                 or panel.live_octovox.isChecked())
     panel.live_autosteer.setChecked(False)
     panel.live_beameng.setChecked(False)
+
+
+def test_ab_proof_button_present_and_gated(win):
+    """The A/B-proof capture button exists and is disabled until a tappable live beam is connected
+    (no session → _ab_target() is None)."""
+    panel = win.panels["live"]
+    assert hasattr(panel, "live_abproof_btn")
+    assert panel._ab_target() is None                    # no live engine/autosteer/zone session
+    assert not panel.live_abproof_btn.isEnabled()        # gated off with nothing connected

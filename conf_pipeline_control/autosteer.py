@@ -173,6 +173,21 @@ class AutoSteerController:
         """Live AEC echo-return-loss-enhancement (dB); 0 when AEC is off or no echo seen."""
         return self.ctrl.aec_erle_db
 
+    def start_ab_capture(self, seconds: float = 8.0):
+        """Arm an A/B proof capture on the wrapped controller (raw beam vs cleaned)."""
+        return self.ctrl.start_ab_capture(seconds)
+
+    @property
+    def ab_capture(self):
+        return self.ctrl.ab_capture
+
+    def active_cleaning_stages(self) -> str:
+        return self.ctrl.active_cleaning_stages()
+
+    @property
+    def estimated_latency_ms(self) -> float:
+        return self.ctrl.estimated_latency_ms
+
     # ---- control loop ----
     def _loop(self) -> None:  # pragma: no cover (timing/thread)
         period = 1.0 / self.update_hz

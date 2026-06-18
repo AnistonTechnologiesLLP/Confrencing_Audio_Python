@@ -399,3 +399,39 @@ def test_live_controller_and_autosteer_forward_aec():
     assert a.ctrl.aec is True and a.ctrl._aec_n_taps == 20
     a.ctrl._build_post_nr()
     assert isinstance(a.ctrl._aec, StreamingAec)
+
+
+# --------------------------------------------------------------------------- #
+# A/B proof capture + latency read-out (Phase 1b / 1c)
+# --------------------------------------------------------------------------- #
+def test_engine_ab_capture_feeds_and_finalizes():
+    bf = PolarisBeamformer(device=None, post_nr=True, post_nr_engine="omlsa", post_nr_warmup_frames=2,
+                           dereverb=True)
+    bf._setup_runtime()
+    cap = bf.start_ab_capture(0.5)
+    assert bf.ab_capture is cap
+    rng = np.random.default_rng(60)
+    n_blocks = int(0.6 * bf.sample_rate / bf.blocksize) + 2
+    for _ in range(n_blocks):
+        bf.process_block((0.1 * rng.standard_normal((bf.blocksize, bf.n_channels))).astype(float))
+    assert cap.done
+    res = cap.finalize(stages=bf.active_cleaning_stages())
+    assert res.raw.shape[0] > 0 and res.clean.shape[0] == res.raw.shape[0]
+    assert "dereverb" in res.stages and "AI cleaner" in res.stages
+
+
+def test_engine_estimated_latency_ms_sums_active_stages():
+    bare = PolarisBeamformer(device=None)                          # no cleaners, time-domain beam
+    bare._setup_runtime()
+    full = PolarisBeamformer(device=None, post_nr=True, dereverb=True, aec=True, post_nr_warmup_frames=2)
+    full._setup_runtime()
+    assert full.estimated_latency_ms > bare.estimated_latency_ms > 0.0   # each engaged stage adds latency
+
+
+def test_beamengine_and_autosteer_expose_ab_and_latency():
+    eng = cc.BeamEngine(device=None, fs=44100.0, mode="steered", steered_cfg={"post_nr": True})
+    assert eng.estimated_latency_ms > 0.0                          # works pre-setup (block + beam estimate)
+    assert hasattr(eng, "start_ab_capture") and eng.ab_capture is None
+    sector = cc.SectorConfig(center_deg=0.0, half_width_deg=60.0)
+    a = AutoSteerController(_polaris_geometry(), sector, samplerate=44100.0, post_nr=True)
+    assert a.estimated_latency_ms > 0.0 and hasattr(a, "start_ab_capture")
