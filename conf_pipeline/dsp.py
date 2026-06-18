@@ -11,7 +11,6 @@ from .model import (
     NLP_LEVELS,
     AutomixerChannel,
     AutomixerConfig,
-    Crosspoint,
     MuteLink,
     NlpLevel,
     Processor,

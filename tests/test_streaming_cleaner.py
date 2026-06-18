@@ -18,7 +18,6 @@ np = pytest.importorskip("numpy")
 
 import conf_pipeline_control as cc
 import conf_pipeline_control.polaris_beamformer as pb
-import conf_pipeline_control.streaming_cleaner as sc
 from conf_pipeline_control.autosteer import AutoSteerController
 from conf_pipeline_control.live import LiveBeamController
 from conf_pipeline_control.polaris_beamformer import PolarisBeamformer

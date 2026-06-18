@@ -830,7 +830,6 @@ class _PostNoiseSuppressor:
 
     def _gain(self, X: Any) -> Any:
         """Per-bin Wiener gain lifted to the floor, frequency- then temporally-smoothed."""
-        import numpy as np
 
         P = X.real * X.real + X.imag * X.imag                  # |X|² instantaneous power
         n2 = self._noise_mag * self._noise_mag                 # noise power estimate

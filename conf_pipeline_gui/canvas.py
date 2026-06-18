@@ -2,15 +2,13 @@
 from __future__ import annotations
 
 import math
-from typing import Optional
 
 from PySide6.QtCore import QPointF, QRectF, Qt
 from PySide6.QtGui import QBrush, QColor, QFont, QPainter, QPainterPath, QPen, QPolygonF
 from PySide6.QtWidgets import QWidget
 
 import conf_pipeline as cp
-from conf_pipeline import matrix as mx
-from conf_pipeline.angles import Point3D, steering_angles
+from conf_pipeline.angles import Point3D
 from conf_pipeline.model import Point2D, RectShape, default_elevation
 
 from .state import AppState

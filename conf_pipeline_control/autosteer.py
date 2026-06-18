@@ -21,7 +21,6 @@ importing this module without the ``[control]`` extra is fine.
 from __future__ import annotations
 
 import threading
-import time
 from dataclasses import dataclass
 from typing import Optional
 

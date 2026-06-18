@@ -1,5 +1,4 @@
 """Geometric coverage simulation: mic pickup, camera FOV + occlusion, speaker cone."""
-import math
 
 import conf_pipeline as cp
 from conf_pipeline import coverage_sim as cs

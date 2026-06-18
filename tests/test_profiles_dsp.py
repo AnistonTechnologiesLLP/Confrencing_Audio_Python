@@ -3,7 +3,7 @@ import json
 import pytest
 
 import conf_pipeline as cp
-from conf_pipeline.model import AecConfig, DspBlock, MuteLink
+from conf_pipeline.model import AecConfig, DspBlock
 
 
 def codes(issues):
