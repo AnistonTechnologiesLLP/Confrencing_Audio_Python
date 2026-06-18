@@ -5,7 +5,6 @@ gate + migration, the camera/speaker device profiles, the furniture catalog
 resolvers, and the shared geometry helpers (point_in_sector / obb_corners).
 """
 import json
-import math
 
 import pytest
 

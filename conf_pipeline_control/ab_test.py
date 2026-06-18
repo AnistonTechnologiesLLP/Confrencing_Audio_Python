@@ -11,7 +11,7 @@ Offline whole-clip processing — no latency concerns, highest quality.
 from __future__ import annotations
 
 import wave
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Optional
 
 from .beamformer import (
@@ -19,12 +19,10 @@ from .beamformer import (
     MODE_SUPERDIRECTIVE,
     design_from_bearings,
     design_zone_beams,
-    directivity_index_db,
     talker_leakage_db,
-    white_noise_gain_db,
 )
 from .geometry import SOUND_SPEED_MPS, ArrayGeometry
-from .live import _FRAME, _HOP, LiveBeamController
+from .live import LiveBeamController
 
 _AB_FRAME = 2048
 _AB_HOP = 1024

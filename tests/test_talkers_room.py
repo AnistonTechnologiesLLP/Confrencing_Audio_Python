@@ -4,7 +4,7 @@ import pytest
 
 import conf_pipeline as cp
 from conf_pipeline.angles import Point3D, steering_angles
-from conf_pipeline.coverage import add_coverage_zone, create_microphone_array, dynamic_zone, exclusion_zone
+from conf_pipeline.coverage import create_microphone_array, dynamic_zone, exclusion_zone
 from conf_pipeline.model import Point2D, RectShape
 
 

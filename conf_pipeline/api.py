@@ -48,7 +48,6 @@ from .model import (
     point_in_shape,
     to_jsonable,
 )
-from .devices import create_camera
 from .furniture import furniture_type
 
 # --------------------------------------------------------------------------- #

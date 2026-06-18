@@ -26,7 +26,7 @@ from ..model import (
     point_in_polygon,
 )
 from . import scoring
-from .types import Candidate, Heatmap, PlacementScore, Recommendation, SimParams
+from .types import Heatmap, PlacementScore, Recommendation, SimParams
 
 
 # --------------------------------------------------------------------------- #

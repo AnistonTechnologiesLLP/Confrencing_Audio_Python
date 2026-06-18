@@ -16,7 +16,7 @@ physics, not a limitation of this code.
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 # Speed of sound in air at ~20 °C, m/s. The beam geometry scales with c/f.
 SOUND_SPEED_MPS = 343.0

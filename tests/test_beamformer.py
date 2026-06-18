@@ -1,5 +1,4 @@
 """Beamformer design math (pure stdlib complex; no numpy, no hardware)."""
-import cmath
 import math
 
 import pytest

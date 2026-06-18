@@ -22,7 +22,6 @@ from __future__ import annotations
 
 import importlib.util
 import math
-from typing import Optional
 
 from ..model import Point2D, SystemConfig, find_talker
 from .scoring import _critical_distance, drr_db

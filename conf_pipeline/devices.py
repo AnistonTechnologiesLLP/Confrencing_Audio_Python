@@ -1,7 +1,6 @@
 """Generic device factories (modeled on common conferencing behavior)."""
 from __future__ import annotations
 
-from typing import Optional
 
 from . import matrix as mx
 from .model import (
