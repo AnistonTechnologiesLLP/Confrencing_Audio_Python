@@ -118,6 +118,28 @@ class LivePanel(PanelBase):
         self.live_avail_lbl.setWordWrap(True)
         lay.addWidget(self.live_avail_lbl)
 
+        # --- LISTENING MODE: one high-level selector that drives the live mode + sensible defaults and
+        # collapses the irrelevant cards ("invisible by default"). "Manual (advanced)" reveals every card.
+        # Default "Whole table" maps to today's zone default, so it changes nothing until the user picks. ---
+        lm_row = QHBoxLayout()
+        self.live_listening_mode = QComboBox()
+        self.live_listening_mode.addItem("Follow the room (auto-steer)", "follow")
+        self.live_listening_mode.addItem("Lock to a seat", "seat")
+        self.live_listening_mode.addItem("Whole table", "table")
+        self.live_listening_mode.addItem("Clean audio (hands-off)", "clean")
+        self.live_listening_mode.addItem("Manual (advanced)", "manual")
+        self.live_listening_mode.setToolTip(
+            "Pick how the room is heard; the panel selects the right engine + sensible defaults and hides the "
+            "rest. 'Clean audio (hands-off)' follows talkers and turns on AI voice cleaning. "
+            "'Manual (advanced)' shows every control. Choose before Connect."
+        )
+        self.live_listening_mode.setCurrentIndex(2)          # "Whole table" = today's default (no behaviour change)
+        self.live_listening_mode.currentIndexChanged.connect(
+            lambda *_a: None if self._refreshing else self._on_listening_mode_changed())
+        lm_row.addWidget(QLabel("Listening mode"))
+        lm_row.addWidget(self.live_listening_mode, 1)
+        lay.addLayout(lm_row)
+
         # --- HARDWARE: array, audio device, capsules ---
         hw = Card("Hardware — array & audio device")
         gf = QFormLayout()
@@ -507,6 +529,9 @@ class LivePanel(PanelBase):
         ov.body_lay.addLayout(ovf)
         lay.addWidget(ov)
 
+        # keep card refs so the Listening-mode selector can collapse the irrelevant ones
+        self._live_cards = {"hw": hw, "beam": beam, "steer": steer, "eng": eng, "ov": ov}
+
         lay.addStretch(1)
 
         # Stop combos from demanding their full content width (long OS device
@@ -577,6 +602,41 @@ class LivePanel(PanelBase):
         if self._autosteer is not None:
             return self._autosteer.ctrl
         return self._live_ctl
+
+    def _on_listening_mode_changed(self) -> None:
+        """Drive the live mode + sensible defaults from the single high-level selector, and collapse the
+        cards that don't apply. A convenience facade over the existing mode checkboxes — 'Manual (advanced)'
+        leaves the checkboxes alone and reveals every card. Ignored mid-session (modes are fixed at Connect)."""
+        if self._live_busy():
+            return
+        mode = self.live_listening_mode.currentData()
+        # set the underlying mode checkbox(es); their toggled handlers enforce mutual exclusion + enabling
+        if mode in ("follow", "clean"):
+            self.live_autosteer.setChecked(True)
+        elif mode == "seat":
+            self.live_beameng.setChecked(True)
+            i = self.live_beameng_mode.findData("steered")
+            if i >= 0:
+                self.live_beameng_mode.setCurrentIndex(i)
+        elif mode == "table":
+            self.live_autosteer.setChecked(False)
+            self.live_beameng.setChecked(False)
+            self.live_octovox.setChecked(False)
+        # "Clean audio (hands-off)" = follow the room + AI voice cleaning on
+        if mode == "clean":
+            i = self.live_autosteer_clean.findData("omlsa")
+            if i >= 0:
+                self.live_autosteer_clean.setCurrentIndex(i)
+        # show only the cards relevant to the chosen mode ("manual" shows all)
+        show = {
+            "follow": {"hw", "steer"},
+            "clean": {"hw", "steer"},
+            "seat": {"hw", "eng"},
+            "table": {"hw", "beam"},
+            "manual": {"hw", "beam", "steer", "eng", "ov"},
+        }.get(mode, {"hw", "beam"})
+        for key, card in self._live_cards.items():
+            card.set_open(key in show)
 
     def _sync_autosteer_nr_enabled(self) -> None:
         """Enable auto-steer's own OCTOVOX-cleaning controls when auto-steer is selected and not yet

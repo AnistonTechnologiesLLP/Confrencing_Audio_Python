@@ -480,3 +480,38 @@ def test_autosteer_has_its_own_octovox_cleaning_controls(win):
     assert not panel.live_autosteer_clean.isEnabled()       # auto-steer deselected → its cleaner controls off
     panel.live_beameng.setChecked(False)
     panel.live_autosteer.setChecked(False)
+
+
+def test_listening_mode_selector_drives_mode_and_cards(win):
+    """The high-level 'Listening mode' selector configures the underlying live mode and collapses the
+    irrelevant cards ('invisible by default'); 'Manual (advanced)' reveals every card."""
+    panel = win.panels["live"]
+    cards = panel._live_cards
+
+    def pick(data):
+        panel.live_listening_mode.setCurrentIndex(panel.live_listening_mode.findData(data))
+
+    assert panel.live_listening_mode.currentData() == "table"     # default = today's zone behaviour
+
+    pick("follow")
+    assert panel.live_autosteer.isChecked() and not panel.live_beameng.isChecked()
+    assert not cards["steer"].body.isHidden()                     # the auto-steer card is revealed...
+    assert cards["beam"].body.isHidden() and cards["eng"].body.isHidden()   # ...and the rest collapsed
+
+    pick("seat")
+    assert panel.live_beameng.isChecked() and not panel.live_autosteer.isChecked()
+    assert panel.live_beameng_mode.currentData() == "steered"
+    assert not cards["eng"].body.isHidden() and cards["steer"].body.isHidden()
+
+    pick("clean")                                                  # hands-off = follow + AI voice cleaning on
+    assert panel.live_autosteer.isChecked() and panel.live_autosteer_clean.currentData() == "omlsa"
+    assert not cards["steer"].body.isHidden()
+
+    pick("manual")
+    assert all(not c.body.isHidden() for c in cards.values())      # everything revealed
+
+    pick("table")
+    assert not (panel.live_autosteer.isChecked() or panel.live_beameng.isChecked()
+                or panel.live_octovox.isChecked())
+    panel.live_autosteer.setChecked(False)
+    panel.live_beameng.setChecked(False)
