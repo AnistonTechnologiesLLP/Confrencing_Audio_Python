@@ -7,6 +7,7 @@ Sections reuse the existing engine functions (routing, validation, coverage).
 from __future__ import annotations
 
 import html
+from dataclasses import dataclass
 
 from .api import talker_coverage
 from .coverage_check import coverage_report, zone_coverage_report
@@ -21,6 +22,166 @@ def design_report(config: SystemConfig, fmt: str = "markdown") -> str:
     if fmt == "html":
         return _md_to_html(_markdown(config))
     raise ValueError(f"Unknown report format: {fmt!r} (expected 'markdown' or 'html').")
+
+
+# --------------------------------------------------------------------------- #
+# Commissioning / as-built report (design report + measured live state)
+# --------------------------------------------------------------------------- #
+@dataclass(frozen=True)
+class CommissioningInfo:
+    """Runtime / measured state captured during commissioning, layered onto the
+    pure :class:`SystemConfig` design report. Every field is optional — a report
+    built from a default ``CommissioningInfo()`` is just the as-built config plus
+    a sign-off checklist (the honest "we never went live" case). The GUI fills
+    these from the running engine; the pure library never reads a clock or device.
+
+    ``silent_capsules`` is ``None`` when capsule health was never probed, ``()``
+    when probed and all live, or the 1-based indices found silent. Latency is
+    always framed as *estimated* (summed from stage constants, not measured)."""
+    site: str = ""
+    commissioned_by: str = ""
+    date: str = ""
+    notes: str = ""
+    listening_mode: str = ""
+    estimated_latency_ms: float | None = None
+    latency_target_ms: float = 150.0
+    active_cleaning_stages: str = ""
+    aec_ref_source: str = ""
+    aec_erle_db: float | None = None
+    bed_reduction_db: float | None = None      # A/B proof: how much quieter the background got
+    rms_reduction_db: float | None = None      # A/B proof: broadband level delta
+    front_offset_deg: float | None = None
+    silent_capsules: tuple[int, ...] | None = None
+
+
+def commissioning_report(
+    config: SystemConfig, info: CommissioningInfo | None = None, fmt: str = "markdown"
+) -> str:
+    """An integrator deliverable: the as-built configuration plus the measured
+    live state (estimated latency, AEC/ERLE, A/B noise-bed proof, capsule health,
+    front calibration) and a derived pass/fail sign-off checklist."""
+    info = info or CommissioningInfo()
+    md = _commission_markdown(config, info)
+    if fmt == "markdown":
+        return md
+    if fmt == "html":
+        return _md_to_html(md)
+    raise ValueError(f"Unknown report format: {fmt!r} (expected 'markdown' or 'html').")
+
+
+def _commission_markdown(config: SystemConfig, info: CommissioningInfo) -> str:
+    return "\n\n".join(
+        s for s in (
+            _commission_header(config, info),
+            _commission_room(config),
+            _device_section(config),
+            _routing_section(config),
+            _aec_section(config),
+            _coverage_section(config),
+            _coverage_areas_section(config),
+            _control_section(config),
+            _commission_measurements(info),
+            _commission_health(info),
+            _validation_section(config),
+            _commission_signoff(config, info),
+        ) if s
+    )
+
+
+def _commission_header(config: SystemConfig, info: CommissioningInfo) -> str:
+    name = config.metadata.get("name", "Untitled")
+    lines = [f"# Commissioning report — {name}", ""]
+    for label, val in (("Site", info.site), ("Commissioned by", info.commissioned_by), ("Date", info.date)):
+        lines.append(f"- {label}: {val or '—'}")
+    if info.listening_mode:
+        lines.append(f"- Listening mode: {info.listening_mode}")
+    if info.notes:
+        lines.append(f"- Notes: {info.notes}")
+    return "\n".join(lines)
+
+
+def _commission_room(config: SystemConfig) -> str:
+    return "\n".join(["## Room", *_room_facts(config)])
+
+
+def _commission_measurements(info: CommissioningInfo) -> str:
+    lines = []
+    if info.estimated_latency_ms is not None:
+        within = "within" if info.estimated_latency_ms <= info.latency_target_ms else "ABOVE"
+        lines.append(
+            f"- Estimated end-to-end latency: ~{info.estimated_latency_ms:.0f} ms "
+            f"({within} the ≤ {info.latency_target_ms:.0f} ms target)"
+        )
+    if info.active_cleaning_stages:
+        lines.append(f"- Active cleaning: {info.active_cleaning_stages}")
+    if info.aec_ref_source:
+        lines.append(f"- AEC reference source: {info.aec_ref_source}")
+    if info.aec_erle_db is not None:
+        lines.append(f"- AEC echo reduction (ERLE): {info.aec_erle_db:.1f} dB")
+    if info.bed_reduction_db is not None:
+        lines.append(f"- Background-noise reduction (A/B proof): {info.bed_reduction_db:.1f} dB quieter")
+    if info.rms_reduction_db is not None:
+        lines.append(f"- Broadband level change (A/B proof): {info.rms_reduction_db:.1f} dB")
+    if not lines:
+        return ""
+    return "\n".join(["## Live measurements", *lines])
+
+
+def _commission_health(info: CommissioningInfo) -> str:
+    lines = []
+    if info.front_offset_deg is not None:
+        lines.append(f"- Front calibration offset: {info.front_offset_deg:+.0f}°")
+    if info.silent_capsules is not None:
+        if info.silent_capsules:
+            lines.append("- Silent / disabled capsules: " + ", ".join(str(c) for c in info.silent_capsules))
+        else:
+            lines.append("- Capsule health: all capsules active")
+    if not lines:
+        return ""
+    return "\n".join(["## Health & calibration", *lines])
+
+
+def _commission_signoff(config: SystemConfig, info: CommissioningInfo) -> str:
+    """A derived pass/fail checklist — the integrator's at-a-glance acceptance
+    view — plus a hand-signed form. Each check is computed from the config /
+    validation / measured info, never assumed passing."""
+    res = validate(config)
+    mics = [d for d in config.devices if is_mic_device(d)]
+    checks: list[tuple[bool, str]] = [
+        (config.room is not None and bool(config.room.vertices), "Room geometry defined"),
+        (bool(mics), "At least one microphone / array present"),
+    ]
+    if config.talkers:
+        rep = coverage_report(config)
+        checks.append((not rep.uncovered, f"All talkers within coverage ({len(rep.covered)}/{len(config.talkers)})"))
+    aec_mics = [m for m in mics if m.aec.enabled]
+    if aec_mics:
+        checks.append((all(m.aec.reference_bus_id for m in aec_mics),
+                       "AEC reference assigned for every echo-cancelling mic"))
+    checks.append((not res.errors,
+                   f"No configuration errors ({len(res.errors)} error(s), {len(res.warnings)} warning(s))"))
+    if info.estimated_latency_ms is not None:
+        checks.append((info.estimated_latency_ms <= info.latency_target_ms,
+                       f"Estimated latency within target (~{info.estimated_latency_ms:.0f} ms ≤ {info.latency_target_ms:.0f} ms)"))
+    if info.bed_reduction_db is not None:
+        checks.append((info.bed_reduction_db > 0,
+                       f"Noise reduction verified by A/B proof ({info.bed_reduction_db:.1f} dB quieter)"))
+    if info.silent_capsules is not None:
+        checks.append((not info.silent_capsules, "All capsules active (no silent capsules)"))
+
+    passed = sum(1 for ok, _ in checks if ok)
+    lines = ["## Commissioning sign-off", ""]
+    lines += [f"- [{'x' if ok else ' '}] {label}" for ok, label in checks]
+    lines += ["", f"Checks passing: {passed}/{len(checks)}.", ""]
+    lines += [
+        "| Field | |",
+        "| --- | --- |",
+        f"| Commissioned by | {info.commissioned_by or '________________'} |",
+        "| Signature | ________________ |",
+        f"| Date | {info.date or '________________'} |",
+        "| Customer sign-off | ________________ |",
+    ]
+    return "\n".join(lines)
 
 
 # --------------------------------------------------------------------------- #
@@ -41,19 +202,22 @@ def _markdown(config: SystemConfig) -> str:
     )
 
 
-def _room_section(config: SystemConfig) -> str:
-    name = config.metadata.get("name", "Untitled")
-    lines = [f"# Design report — {name}", ""]
+def _room_facts(config: SystemConfig) -> list[str]:
     room = config.room
     if room is not None and room.vertices:
         from .sim import estimated_rt60  # lazy: keep report import light
         xs = [v.x for v in room.vertices]
         ys = [v.y for v in room.vertices]
-        lines.append(f"- Room: {max(xs) - min(xs):.1f} × {max(ys) - min(ys):.1f} × {room.height:.1f} m")
-        lines.append(f"- Estimated RT60: {estimated_rt60(config):.2f} s")
-    else:
-        lines.append("- Room: not defined")
-    return "\n".join(lines)
+        return [
+            f"- Room: {max(xs) - min(xs):.1f} × {max(ys) - min(ys):.1f} × {room.height:.1f} m",
+            f"- Estimated RT60: {estimated_rt60(config):.2f} s",
+        ]
+    return ["- Room: not defined"]
+
+
+def _room_section(config: SystemConfig) -> str:
+    name = config.metadata.get("name", "Untitled")
+    return "\n".join([f"# Design report — {name}", "", *_room_facts(config)])
 
 
 def _device_section(config: SystemConfig) -> str:

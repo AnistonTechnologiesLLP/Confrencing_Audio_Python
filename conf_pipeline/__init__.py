@@ -202,7 +202,7 @@ from .seat_mapper import (  # noqa: F401
 )
 
 # ---- design report export ----
-from .report import design_report  # noqa: F401
+from .report import CommissioningInfo, commissioning_report, design_report  # noqa: F401
 
 # ---- placement simulation / recommendation ----
 from .sim import (  # noqa: F401

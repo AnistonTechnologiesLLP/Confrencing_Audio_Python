@@ -224,6 +224,8 @@ class MainWindow(QMainWindow):
         self.recent_menu.aboutToShow.connect(self._fill_recent_menu)
         m.addAction("Export config…", self._export)
         m.addAction("Export design report…", self._export_report)
+        a_comm = m.addAction("Export commissioning report…", self._export_commissioning)
+        a_comm.setToolTip("As-built config + measured live state (latency, AEC/ERLE, A/B noise proof) + sign-off")
         m.addSeparator()
 
         self.act_optimize = QAction("✨ Optimize room", self)
@@ -574,6 +576,17 @@ class MainWindow(QMainWindow):
         with open(path, "w", encoding="utf-8") as f:
             f.write(cp.design_report(self.state.config, fmt))
         self.toast("Report exported")
+
+    def _export_commissioning(self):
+        path, sel = QFileDialog.getSaveFileName(self, "Export commissioning report", "commissioning-report.md",
+                                                "Markdown (*.md);;HTML (*.html)")
+        if not path:
+            return
+        fmt = "html" if (path.lower().endswith(".html") or "html" in sel.lower()) else "markdown"
+        info = self.panels["live"].commissioning_info()
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(cp.commissioning_report(self.state.config, info, fmt))
+        self.toast("Commissioning report exported")
 
     def _import(self):
         path, _ = QFileDialog.getOpenFileName(self, "Import config", "", "JSON (*.json)")

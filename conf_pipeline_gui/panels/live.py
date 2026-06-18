@@ -90,6 +90,8 @@ class LivePanel(PanelBase):
         self._beameng_loc = None         # last BeamEngine current_location (for the overlay tick)
         self._ab_cap = None              # armed ABCapture during a running A/B proof, or None
         self._ab_obj = None              # the live object (engine/autosteer/ctrl) the A/B capture is on
+        self._ab_last = None             # last finalized ABProofResult (for the commissioning report)
+        self._caps_probed = False        # True once Detect-silent has measured the capsules this session
         self._session_array_id = None    # the array the running session was started with
         self._live_seat = None           # SeatMatch for the dominant talker (room-aware readout)
         self._beameng_locked_seat = None  # seat_id the steered beam is pinned to (snap-steer), or None
@@ -875,6 +877,7 @@ class LivePanel(PanelBase):
     def _on_probe_done(self, rms):
         self.live_detect.setEnabled(True)
         self._probe_workers.clear()
+        self._caps_probed = True
         dbs = [20.0 * math.log10(r + 1e-12) for r in rms]
         mx = max(dbs) if dbs else -120.0
         # active = within 20 dB of the loudest capsule and above an absolute floor;
@@ -1560,6 +1563,40 @@ class LivePanel(PanelBase):
             "connected": True,
         })
 
+    # ---- commissioning snapshot (for the as-built report) ----
+    def commissioning_info(self):
+        """Snapshot the live / measured state for a commissioning report (control
+        thread). Reads the running beam's estimated latency, AEC/ERLE + reference,
+        the last A/B noise proof, the front-offset calibration, and capsule health.
+        Any field with no live source is left None so the report omits it honestly."""
+        from datetime import datetime
+
+        from conf_pipeline.report import CommissioningInfo
+
+        obj = self._ab_target()                               # running beam (A/B engine / auto-steer / zone), or None
+        latency = getattr(obj, "estimated_latency_ms", None) if obj is not None else None
+        stages = obj.active_cleaning_stages() if obj is not None else ""
+        ref = getattr(obj, "aec_ref_source", "") if obj is not None else ""
+        erle = getattr(obj, "aec_erle_db", None) if obj is not None else None
+        if erle is not None and erle <= 0.0:                  # 0 dB ERLE == AEC idle / no echo — not worth reporting
+            erle = None
+        last = self._ab_last
+        silent = None
+        if self._caps_probed:
+            silent = tuple(i + 1 for i, cb in enumerate(self.live_caps) if not cb.isChecked())
+        return CommissioningInfo(
+            date=datetime.now().strftime("%Y-%m-%d"),
+            listening_mode=self.live_listening_mode.currentText(),
+            estimated_latency_ms=latency,
+            active_cleaning_stages=stages,
+            aec_ref_source=ref,
+            aec_erle_db=erle,
+            bed_reduction_db=(last.bed_reduction_db if last is not None else None),
+            rms_reduction_db=(last.rms_reduction_db if last is not None else None),
+            front_offset_deg=float(self.live_front_offset.value()),
+            silent_capsules=silent,
+        )
+
     # ---- A/B proof (raw beam vs cleaned) ----
     def _ab_target(self):
         """The live object that can capture an A/B proof (A/B engine / auto-steer / zone controller).
@@ -1589,6 +1626,7 @@ class LivePanel(PanelBase):
         self.live_abproof_btn.setEnabled(self._ab_target() is not None)
         res = cap.finalize(erle_db=getattr(obj, "aec_erle_db", 0.0),
                            stages=obj.active_cleaning_stages() if obj is not None else "")
+        self._ab_last = res              # keep the latest proof for the commissioning report
         out_dir = QFileDialog.getExistingDirectory(self, f"A/B proof: {res.headline()} — save clips + numbers to…")
         if not out_dir:
             self.live_status.setText(f"A/B proof: {res.headline()} (not saved).")

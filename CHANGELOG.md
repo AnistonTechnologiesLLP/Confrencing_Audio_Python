@@ -10,6 +10,16 @@ the TS sibling is at matching v5 parity. The desktop app is presented as
 ## [Unreleased]
 
 ### Added
+- **Commissioning / as-built report** (`conf_pipeline.commissioning_report` + `CommissioningInfo`; an
+  "Export commissioning report…" menu action) — the integrator-deliverable moat. Layers the measured **live
+  state** onto the existing as-built design report: the honest **estimated latency** (`~N ms`, framed against
+  the ≤ 150 ms target), the active **AI cleaning** stages, the **AEC reference + ERLE**, and the **A/B
+  noise-proof** headline ("N dB quieter"), plus **capsule health** (silent-capsule list) and **front
+  calibration**. Ends with a **derived pass/fail sign-off checklist** (room defined, coverage, AEC refs, no
+  config errors, latency-in-target, noise-reduction-verified, capsules-live — each computed, never assumed) and
+  a hand-signed acceptance form. Markdown or HTML, escaped; pure over `(config, info)` so it's fully testable —
+  the GUI snapshots the running engine into `CommissioningInfo`, the library never reads a clock or a device.
+  (+11 tests.)
 - **A/B proof & measurement tool + live latency read-out** (`conf_pipeline_control.ab_capture.ABCapture`;
   a "Capture A/B proof (raw vs cleaned)" button in the LIVE transport; `estimated_latency_ms`) — the
   transparency moat: capture the beamformed mono **raw vs cleaned simultaneously** (a tap in `process_block`

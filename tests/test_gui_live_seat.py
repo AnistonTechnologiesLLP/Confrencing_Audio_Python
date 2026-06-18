@@ -530,3 +530,40 @@ def test_ab_proof_button_present_and_gated(win):
     assert hasattr(panel, "live_abproof_btn")
     assert panel._ab_target() is None                    # no live engine/autosteer/zone session
     assert not panel.live_abproof_btn.isEnabled()        # gated off with nothing connected
+
+
+def test_commissioning_info_snapshot_offline(win):
+    """commissioning_info() reports config/widget state with no engine connected:
+    a date + listening mode + front offset, and None for every live measurement."""
+    panel = win.panels["live"]
+    info = panel.commissioning_info()
+    assert info.date and info.listening_mode                 # always present (widget + clock)
+    assert info.estimated_latency_ms is None and info.aec_erle_db is None
+    assert info.bed_reduction_db is None
+    assert info.silent_capsules is None                      # never probed this session
+    assert info.front_offset_deg == float(panel.live_front_offset.value())
+
+
+def test_commissioning_info_reads_probe_and_ab_proof(win):
+    """After a capsule probe + a finalized A/B proof, the snapshot carries the
+    silent-capsule list and the noise-bed reduction into the report."""
+    panel = win.panels["live"]
+    panel._caps_probed = True
+    panel.live_caps[4].setChecked(False)                     # capsule 5 silent
+
+    class _Res:                                              # stand-in ABProofResult
+        bed_reduction_db = 21.7
+        rms_reduction_db = 8.0
+    panel._ab_last = _Res()
+    info = panel.commissioning_info()
+    assert info.silent_capsules == (5,)
+    assert info.bed_reduction_db == 21.7 and info.rms_reduction_db == 8.0
+    md = cp.commissioning_report(win.state.config, info)
+    assert "Silent / disabled capsules: 5" in md and "21.7 dB quieter" in md
+
+
+def test_export_commissioning_action_in_menu(win):
+    """The app menu exposes the commissioning-report export, wired to the handler."""
+    assert hasattr(win, "_export_commissioning")
+    titles = [a.text() for a in win._build_app_menu().actions()]
+    assert any("commissioning report" in t.lower() for t in titles)
