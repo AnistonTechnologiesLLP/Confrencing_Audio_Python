@@ -9,17 +9,31 @@ are carried across blocks (overlap-add STFT, same Hann 50 %-hop machinery as the
 post-beam cleaners).
 
 ``process(mic_block, ref_block, near_end_active) -> cancelled_block``. The adaptive
-update is **gated to far-end-only frames** (reference active AND near-end silent),
-so the filter converges on the echo path and does NOT chase near-end speech during
-double-talk; the leaky, magnitude-clipped update keeps it stable either way. When
-the reference is silent or ``None`` it is a clean PASS-THROUGH — it never fabricates
-cancellation. :attr:`erle_db` is a live echo-return-loss-enhancement readout.
+update is **gated to far-end-active frames** (``rpow > ref_floor``) and the
+leaky, magnitude-clipped NLMS keeps the filter bounded during double-talk. The
+``near_end_active`` flag (default ``False``) is an OPTIONAL freeze for a caller that
+has a TRUE near-end voice detector — **do NOT** wire it to a DOA/energy VAD that also
+sees the loudspeaker echo, or it would freeze adaptation on far-end-only echo (the
+case it most needs to learn). A residual/coherence-based double-talk detector inside
+``process`` is the documented upgrade; today double-talk robustness rests on the
+leak + ±10 magnitude clip alone. When the reference is silent or ``None`` the filter
+output decays toward zero as the reference FIFO empties, so it does NOT fabricate
+cancellation — but note it is still an overlap-add reconstruction of the mic (one
+analysis frame of fixed latency, plus a ``K``-hop tail where the FIFO still holds the
+last non-silent reference), not a byte-identical bypass. :attr:`erle_db` is a live
+echo-return-loss readout (an EMA over far-end-active frames; it is a rough indicator,
+not gated on whether real cancellation occurred, so it reads optimistically during
+double-talk).
 
 It runs at the post-beam seam **before** dereverb/cleaner (AEC → dereverb → denoise
-→ AGC). **Single-beam tradeoff:** textbook AEC runs per-mic *before* the beam (the
-echo couples into every capsule); this cancels on the beamformed mono — the
-pragmatic seam for a one-beam engine, but it sees a beam that may re-steer during a
-call. It is a solid first opt-in stage; per-mic pre-beam AEC is the future upgrade.
+→ AGC), and adds ~one analysis frame of latency (``_outq`` is primed with a full
+frame ``F``, not one hop). **Single-beam tradeoff:** textbook AEC runs per-mic
+*before* the beam (the echo couples into every capsule); this cancels on the
+beamformed mono — the pragmatic seam for a one-beam engine, but it sees a beam that
+may re-steer during a call. **Alignment:** the reference and mic are separate audio
+clocks (see :mod:`reference_capture`); the multi-tap filter absorbs a bounded
+playout delay but there is no bulk-delay estimation or clock-drift compensation yet.
+A solid first opt-in stage; per-mic pre-beam AEC + a real DTD are the future upgrades.
 
 Pure numpy (no scipy / torch), so it runs on the realtime audio thread.
 """
@@ -70,6 +84,7 @@ class StreamingAec:
         self._mic_pow = 0.0                              # ERLE EMA accumulators (echo-present frames only)
         self._err_pow = 0.0
         self._n_obs = 0
+        self._erle_db = 0.0                              # cached dB, recomputed under the lock in process()
 
     def reset(self) -> None:
         with self._lock:
@@ -77,12 +92,9 @@ class StreamingAec:
 
     @property
     def erle_db(self) -> float:
-        """Echo-return-loss-enhancement (dB), EMA over echo-present frames; 0 until any echo is seen."""
-        import numpy as np
-
-        if self._n_obs == 0 or self._mic_pow <= 0.0:
-            return 0.0
-        return float(10.0 * np.log10((self._mic_pow + 1e-20) / (self._err_pow + 1e-20)))
+        """Echo-return-loss (dB), EMA over far-end-active frames; a single atomic read of the value cached
+        by :meth:`process` under the lock (no cross-thread tear). 0 until any echo is seen."""
+        return self._erle_db
 
     def process(self, mic_block: Any, ref_block: Any, near_end_active: bool = False) -> Any:
         """Cancel far-end echo from ``mic_block`` using ``ref_block`` (same length, time-aligned).
@@ -132,6 +144,8 @@ class StreamingAec:
                     self._mic_pow = a * self._mic_pow + (1.0 - a) * float(np.mean(np.abs(Mt) ** 2))
                     self._err_pow = a * self._err_pow + (1.0 - a) * float(np.mean(np.abs(e) ** 2))
                     self._n_obs += 1
+                    self._erle_db = float(10.0 * np.log10(  # cache under the lock → atomic, tear-free read
+                        (self._mic_pow + 1e-20) / (self._err_pow + 1e-20))) if self._mic_pow > 0.0 else 0.0
                 y = np.fft.irfft(e, n=F)
                 self._ola[:-H] = self._ola[H:]
                 self._ola[-H:] = 0.0

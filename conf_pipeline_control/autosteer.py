@@ -87,6 +87,10 @@ class AutoSteerController:
         dereverb_t60: float = DEFAULT_DEREVERB_T60,
         dereverb_beta: float = DEFAULT_DEREVERB_BETA,
         dereverb_gmin_db: float = DEFAULT_DEREVERB_GMIN_DB,
+        aec: bool = False,
+        aec_n_taps: int = 16,
+        aec_mu: float = 0.3,
+        aec_ref_device: Optional[int] = None,
     ):
         self.geometry = geometry
         self.sector = sector
@@ -120,6 +124,10 @@ class AutoSteerController:
             dereverb_t60=dereverb_t60,
             dereverb_beta=dereverb_beta,
             dereverb_gmin_db=dereverb_gmin_db,
+            aec=aec,
+            aec_n_taps=aec_n_taps,
+            aec_mu=aec_mu,
+            aec_ref_device=aec_ref_device,
         )
         self._thread: Optional[threading.Thread] = None
         self._stop = threading.Event()
@@ -159,6 +167,11 @@ class AutoSteerController:
 
     def read_level(self) -> float:
         return self.ctrl.read_level()
+
+    @property
+    def aec_erle_db(self) -> float:
+        """Live AEC echo-return-loss-enhancement (dB); 0 when AEC is off or no echo seen."""
+        return self.ctrl.aec_erle_db
 
     # ---- control loop ----
     def _loop(self) -> None:  # pragma: no cover (timing/thread)

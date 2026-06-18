@@ -15,7 +15,7 @@ dependencies = ["PySide6>=6.6"]
 dev = ["pytest>=7", "pytest-cov>=4", "mypy>=1.8"]   # exact pins: requirements-dev.txt
 sim = ["numpy>=1.24"]                                        # far-field validation backend
 sim-rir = ["pyroomacoustics>=0.7", "numpy>=1.24", "scipy>=1.7"]  # image-source RIR backend
-control = ["numpy>=1.24", "sounddevice>=0.4"]               # live host-side beamforming of a real array
+control = ["numpy>=1.24", "sounddevice>=0.4", "scipy>=1.7"]  # live host-side beamforming; scipy = AEC reference resampling
 octovox = ["numpy>=1.24", "sounddevice>=0.4", "requests>=2.25", "scipy>=1.7"]  # bridge to the OCTOVOX cleaning server
 
 [project.scripts]

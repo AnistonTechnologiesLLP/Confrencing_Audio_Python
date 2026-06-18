@@ -21,6 +21,7 @@ import conf_pipeline_control.polaris_beamformer as pb
 from conf_pipeline_control.autosteer import AutoSteerController
 from conf_pipeline_control.live import LiveBeamController
 from conf_pipeline_control.polaris_beamformer import PolarisBeamformer
+from conf_pipeline_control.streaming_aec import StreamingAec
 from conf_pipeline_control.streaming_cleaner import StreamingCleaner, StreamingDereverb, _exp1
 
 _GMIN = 10.0 ** (-18.0 / 20.0)            # default gmin_db = -18 dB → linear OM-LSA floor
@@ -357,3 +358,44 @@ def test_live_controller_and_autosteer_forward_dereverb():
     assert a.ctrl.dereverb is True
     a.ctrl._build_post_nr()
     assert isinstance(a.ctrl._dereverb, StreamingDereverb)
+
+
+# --------------------------------------------------------------------------- #
+# Live AEC wiring (engine-level; the DSP itself is in test_streaming_aec.py)
+# --------------------------------------------------------------------------- #
+def test_engine_aec_builds_and_runs_passthrough_without_reference():
+    bf = PolarisBeamformer(device=None, aec=True, aec_n_taps=12)
+    bf._setup_runtime()                                        # builds the AEC; no ref stream opened (device-free)
+    assert isinstance(bf._aec, StreamingAec) and bf._ref_capture is None
+    rng = np.random.default_rng(40)
+    out = bf.process_block((0.1 * rng.standard_normal((bf.blocksize, bf.n_channels))).astype(float))
+    assert out.shape == (bf.blocksize,) and bool(np.all(np.isfinite(out)))   # no ref → clean pass-through
+    assert bf.aec_erle_db == 0.0
+
+
+def test_engine_aec_off_builds_none():
+    bf = PolarisBeamformer(device=None)                        # aec defaults False
+    bf._setup_runtime()
+    assert bf._aec is None and bf.aec_erle_db == 0.0
+
+
+def test_engine_reset_transient_resets_aec_in_place():
+    bf = PolarisBeamformer(device=None, beam_bandlimit_hz=None, aec=True, aec_n_taps=12)
+    bf._setup_runtime()
+    aec = bf._aec
+    rng = np.random.default_rng(41)
+    for _ in range(6):
+        bf.process_block((0.1 * rng.standard_normal((bf.blocksize, bf.n_channels))).astype(float))
+    bf.reset_transient()
+    assert bf._aec is aec and aec._n_obs == 0                  # reset in place
+
+
+def test_live_controller_and_autosteer_forward_aec():
+    bf = LiveBeamController(_polaris_geometry(), aec=True)
+    bf._build_post_nr()
+    assert isinstance(bf._aec, StreamingAec)
+    sector = cc.SectorConfig(center_deg=0.0, half_width_deg=60.0)
+    a = AutoSteerController(_polaris_geometry(), sector, samplerate=44100.0, aec=True, aec_n_taps=20)
+    assert a.ctrl.aec is True and a.ctrl._aec_n_taps == 20
+    a.ctrl._build_post_nr()
+    assert isinstance(a.ctrl._aec, StreamingAec)

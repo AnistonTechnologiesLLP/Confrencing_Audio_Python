@@ -351,6 +351,15 @@ class LivePanel(PanelBase):
         )
         self.live_autosteer_dereverb.setEnabled(False)       # enabled when auto-steer is ticked (pre-connect)
         asf.addRow("Dereverb", self.live_autosteer_dereverb)
+        self.live_autosteer_aec = QCheckBox("Cancel echo (needs far-end playout)")
+        self.live_autosteer_aec.setToolTip(
+            "Cancel the room's loudspeaker echo from the followed talker using the PC's playback (the far-end "
+            "/ Zoom-Teams downlink) as the reference — captured automatically via WASAPI loopback or Stereo "
+            "Mix. Only helps when the room plays far-end audio through speakers; otherwise it's a no-op. "
+            "Fixed at Connect."
+        )
+        self.live_autosteer_aec.setEnabled(False)
+        asf.addRow("Echo cancel", self.live_autosteer_aec)
         self.live_calib_btn = QPushButton("Calibrate front (talk from the front, then click)")
         self.live_calib_btn.setToolTip(
             "Records a few seconds while someone talks from your desk's 'front', measures "
@@ -448,6 +457,15 @@ class LivePanel(PanelBase):
         )
         self.live_beameng_dereverb.setEnabled(False)         # enabled when the engine is ticked
         ef.addRow("Dereverb", self.live_beameng_dereverb)
+        self.live_beameng_aec = QCheckBox("Cancel echo (needs far-end playout)")
+        self.live_beameng_aec.setToolTip(
+            "Cancel the room's loudspeaker echo from the beam output using the PC's playback (the far-end / "
+            "Zoom-Teams downlink) as the reference — captured automatically via WASAPI loopback or Stereo Mix. "
+            "Only helps when the room plays far-end audio through speakers; otherwise it's a no-op. Fixed at "
+            "Connect."
+        )
+        self.live_beameng_aec.setEnabled(False)              # enabled when the engine is ticked
+        ef.addRow("Echo cancel", self.live_beameng_aec)
         self.live_beameng_adaptnull = QCheckBox("Adaptive null (learn room noise)")
         self.live_beameng_adaptnull.setToolTip(
             "Make the steered beam data-adaptive (MVDR): measure the room's noise field during pauses and "
@@ -645,6 +663,7 @@ class LivePanel(PanelBase):
         self.live_autosteer_clean.setEnabled(on)
         self.live_autosteer_depth.setEnabled(on)
         self.live_autosteer_dereverb.setEnabled(on)
+        self.live_autosteer_aec.setEnabled(on)
 
     def _on_autosteer_toggled(self):
         """Enable the sector controls only when auto-steer is selected."""
@@ -669,6 +688,7 @@ class LivePanel(PanelBase):
         self.live_beameng_nr_depth.setEnabled(on)
         self.live_beameng_nr_engine.setEnabled(on)
         self.live_beameng_dereverb.setEnabled(on)
+        self.live_beameng_aec.setEnabled(on)
         self.live_beameng_adaptnull.setEnabled(on)
         if on:
             self.live_autosteer.setChecked(False)
@@ -1083,6 +1103,7 @@ class LivePanel(PanelBase):
                 post_nr_engine=clean or "gate",
                 post_nr_floor_db=nr_floor_db, post_nr_oversub=nr_oversub,
                 dereverb=self.live_autosteer_dereverb.isChecked(),      # real-time room-echo suppression
+                aec=self.live_autosteer_aec.isChecked(),                # cancel far-end loudspeaker echo
             )
             ctrl.ctrl.set_gain_db(float(self.live_gain.value()))
             ctrl.start()
@@ -1120,6 +1141,8 @@ class LivePanel(PanelBase):
             cfg["post_nr_engine"] = self.live_beameng_nr_engine.currentData()   # AI OM-LSA cleaner vs light gate
         if self.live_beameng_dereverb.isChecked():
             cfg["dereverb"] = True                    # real-time late-reverb suppression before the cleaner
+        if self.live_beameng_aec.isChecked():
+            cfg["aec"] = True                         # cancel far-end loudspeaker echo (loopback reference)
         return cfg
 
     def _beameng_connect(self):
@@ -1164,6 +1187,7 @@ class LivePanel(PanelBase):
         self.live_beameng_nr_depth.setEnabled(False)
         self.live_beameng_nr_engine.setEnabled(False)
         self.live_beameng_dereverb.setEnabled(False)
+        self.live_beameng_aec.setEnabled(False)
         self.live_beameng_adaptnull.setEnabled(False)
         self._refresh_beameng_lockseat()                # populate Follow / Manual angle / seats
         steered = self._beameng_mode() == "steered"
@@ -1353,8 +1377,9 @@ class LivePanel(PanelBase):
                                              [(loc.angle_deg, 1.0, True)])
         self._push_locked_steering()                 # snap-steer: re-pin the locked seat if its bearing moved
         n_null = self._push_seat_nulls()             # room-aware: null the other seats (if enabled)
+        aec_s = f"   ·   AEC {e.aec_erle_db:+.0f} dB" if self.live_beameng_aec.isChecked() else ""
         if loc.angle_deg is None and loc.xy is None:
-            self.live_beameng_view.setText(f"[{loc.mode}] · listening — no source localized ·")
+            self.live_beameng_view.setText(f"[{loc.mode}] · listening — no source localized ·{aec_s}")
         else:
             ang = "  -- " if loc.angle_deg is None else f"{loc.angle_deg:5.0f}°"
             xy = "" if loc.xy is None else f"  ({loc.xy[0]:+.2f}, {loc.xy[1]:+.2f}) m"
@@ -1368,7 +1393,7 @@ class LivePanel(PanelBase):
             else:
                 lock_s = ""
             self.live_beameng_view.setText(
-                f"[{loc.mode}] {ang}{xy}  ·  conf {loc.confidence:.0%}{self._seat_suffix()}{lock_s}{null_s}")
+                f"[{loc.mode}] {ang}{xy}  ·  conf {loc.confidence:.0%}{self._seat_suffix()}{lock_s}{null_s}{aec_s}")
         if e.error:
             self.live_status.setText(f"A/B engine: {e.error[:60]}")
 
@@ -1383,12 +1408,13 @@ class LivePanel(PanelBase):
             self.state.config, self._session_array_id,
             [(d.azimuth_deg, d.salience_db, d.in_sector) for d in dets],
         )
+        aec_s = f"   ·   AEC {a.aec_erle_db:+.0f} dB" if self.live_autosteer_aec.isChecked() else ""
         if not dets:
-            self.live_autosteer_view.setText("· listening — no talker detected ·")
+            self.live_autosteer_view.setText("· listening — no talker detected ·" + aec_s)
         else:
             parts = [f"{'IN ' if d.in_sector else 'out'} {d.azimuth_deg:.0f}° ({d.salience_db:.0f}dB)" for d in dets]
             n_in = sum(1 for d in dets if d.in_sector)
-            self.live_autosteer_view.setText(f"{n_in} in-area  |  " + "   ".join(parts) + self._seat_suffix())
+            self.live_autosteer_view.setText(f"{n_in} in-area  |  " + "   ".join(parts) + self._seat_suffix() + aec_s)
         if a.error:
             self.live_status.setText(f"Auto-steer: {a.error[:60]}")
 
@@ -1406,6 +1432,7 @@ class LivePanel(PanelBase):
             self.live_beameng_nr_depth.setEnabled(self.live_beameng.isChecked())
             self.live_beameng_nr_engine.setEnabled(self.live_beameng.isChecked())
             self.live_beameng_dereverb.setEnabled(self.live_beameng.isChecked())
+            self.live_beameng_aec.setEnabled(self.live_beameng.isChecked())
             self.live_beameng_adaptnull.setEnabled(self.live_beameng.isChecked())
             self.live_beameng_lockseat.setEnabled(False)        # snap-steer needs a running engine
             self.live_beameng_lockseat.blockSignals(True)

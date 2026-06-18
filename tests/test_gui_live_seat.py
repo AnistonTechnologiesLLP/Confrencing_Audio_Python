@@ -452,6 +452,11 @@ def test_beameng_noise_suppression_steered_cfg(win):
     panel.live_beameng_dereverb.setChecked(True)
     assert panel._beameng_steered_cfg(base)["dereverb"] is True
     panel.live_beameng_dereverb.setChecked(False)
+    # live AEC (echo cancellation) is its own independent toggle that flows to the steered cfg
+    assert "aec" not in panel._beameng_steered_cfg(base)
+    panel.live_beameng_aec.setChecked(True)
+    assert panel._beameng_steered_cfg(base)["aec"] is True
+    panel.live_beameng_aec.setChecked(False)
     panel.live_beameng_adaptnull.setChecked(True)
     cfg = panel._beameng_steered_cfg(base)
     assert cfg["mode"] == cc.MODE_MVDR and cfg["auto_null"] is True and cfg["post_nr"] is True
@@ -473,6 +478,7 @@ def test_autosteer_has_its_own_octovox_cleaning_controls(win):
     panel.live_autosteer.setChecked(True)                   # select auto-steer
     assert panel.live_autosteer_clean.isEnabled() and panel.live_autosteer_depth.isEnabled()
     assert panel.live_autosteer_dereverb.isEnabled()        # dereverb toggle reachable in auto-steer
+    assert panel.live_autosteer_aec.isEnabled()             # echo-cancel toggle reachable in auto-steer
     assert panel.live_autosteer_clean.currentData() is None  # Off by default (opt-in)
     panel.live_autosteer_clean.setCurrentIndex(panel.live_autosteer_clean.findData("omlsa"))
     assert panel.live_autosteer_clean.currentData() == "omlsa"   # the OCTOVOX cleaner is selectable here

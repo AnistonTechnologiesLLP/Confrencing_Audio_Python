@@ -81,6 +81,10 @@ class LiveBeamController(MicController):
         dereverb_t60: float = DEFAULT_DEREVERB_T60,
         dereverb_beta: float = DEFAULT_DEREVERB_BETA,
         dereverb_gmin_db: float = DEFAULT_DEREVERB_GMIN_DB,
+        aec: bool = False,
+        aec_n_taps: int = 16,
+        aec_mu: float = 0.3,
+        aec_ref_device: Optional[int] = None,
     ):
         super().__init__(geometry, n_channels=geometry.n_channels)
         self.device = device
@@ -106,6 +110,11 @@ class LiveBeamController(MicController):
         self._dereverb_t60 = float(dereverb_t60)
         self._dereverb_beta = float(dereverb_beta)
         self._dereverb_gmin_db = float(dereverb_gmin_db)
+        # live AEC on the mono output, BEFORE dereverb; fed a far-end reference (loopback/Stereo Mix).
+        self.aec = bool(aec)
+        self._aec_n_taps = int(aec_n_taps)
+        self._aec_mu = float(aec_mu)
+        self._aec_ref_device = aec_ref_device
         # Lazily bound in _open() (numpy / sounddevice objects) — typed Any so the
         # module stays importable + checkable without the [control] extra.
         self._cov: Any = None      # EMA of band covariance, (n_band, M, M) complex
@@ -127,6 +136,8 @@ class LiveBeamController(MicController):
         self._ola: Any = None      # numpy (FRAME,) overlap-add tail
         self._post_nr: Any = None  # post-beam noise reducer (StreamingCleaner / _PostNoiseSuppressor), or None
         self._dereverb: Any = None # real-time dereverb (StreamingDereverb), runs before the noise reducer, or None
+        self._aec: Any = None      # live echo canceller (StreamingAec), runs before dereverb, or None
+        self._ref_capture: Any = None  # far-end reference source (ReferenceCapture) for the AEC, or None
 
     # ---- weight computation (per FFT bin, broadband) ----
     def _compute_weights(self):
@@ -228,6 +239,32 @@ class LiveBeamController(MicController):
                 gmin_db=self._dereverb_gmin_db, frame=self._post_nr_frame)
         else:
             self._dereverb = None
+        # live AEC (StreamingAec): device-free here; the far-end reference STREAM opens in _open().
+        if self.aec:
+            from .streaming_aec import StreamingAec
+            self._aec = StreamingAec(self.samplerate, n_taps=self._aec_n_taps, mu=self._aec_mu)
+        else:
+            self._aec = None
+
+    def _start_ref_capture(self) -> None:
+        """Open the far-end reference source when AEC is on (never raises; degrades to no reference)."""
+        if not self.aec or self._ref_capture is not None:
+            return
+        from .reference_capture import ReferenceCapture
+        rc = ReferenceCapture(self.samplerate, device=self._aec_ref_device)
+        rc.start()
+        self._ref_capture = rc
+
+    def _stop_ref_capture(self) -> None:
+        rc = self._ref_capture
+        self._ref_capture = None
+        if rc is not None:
+            rc.stop()
+
+    @property
+    def aec_erle_db(self) -> float:
+        """Live AEC echo-return-loss-enhancement (dB); 0 when AEC is off or no echo seen."""
+        return float(self._aec.erle_db) if self._aec is not None else 0.0
 
     # ---- lifecycle ----
     def _open(self) -> None:
@@ -295,6 +332,7 @@ class LiveBeamController(MicController):
                 callback=self._cb_output,
             )
             self._out_stream.start()
+        self._start_ref_capture()              # open the far-end reference (AEC) alongside the mic stream
 
     def _close(self) -> None:
         if self._out_stream is not None:
@@ -309,6 +347,7 @@ class LiveBeamController(MicController):
                 self._stream.close()
             finally:
                 self._stream = None
+        self._stop_ref_capture()               # after the mic stream is stopped (no in-flight _process_block)
         self._monitor_q = None
         if self._wav is not None:
             try:
@@ -354,8 +393,12 @@ class LiveBeamController(MicController):
         out = self._ola[:_HOP].copy()
 
         # post-beam enhancement on the mono, before the meter and gain — so the meter, recording and monitor
-        # all reflect the cleaned voice. Dereverb runs BEFORE noise reduction (dereverb → denoise). noise_gate
-        # =False: the minimum-statistics floor learns steady noise every frame without needing a VAD here.
+        # all reflect the cleaned voice. Order: AEC → dereverb → denoise. noise_gate=False: no VAD on this
+        # path, so the AEC relies on its own far-end-activity gate and the min-statistics NR floor.
+        if self._aec is not None:
+            rc = self._ref_capture                    # read once: teardown may null it on the control thread
+            ref = rc.recent(out.shape[0]) if rc is not None else None
+            out = self._aec.process(out, ref, near_end_active=False)
         if self._dereverb is not None:
             out = self._dereverb.process(out, False)
         if self._post_nr is not None:

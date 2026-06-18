@@ -232,6 +232,16 @@ class BeamEngine:
         beam). For an honest readout, not the raw requested set."""
         return self._steered.active_nulls
 
+    @property
+    def aec_erle_db(self) -> float:
+        """Live AEC echo-return-loss-enhancement (dB) from the steered back-end; 0 when AEC is off."""
+        return self._steered.aec_erle_db
+
+    @property
+    def aec_ref_source(self) -> str:
+        """The far-end reference source the AEC opened (empty if AEC off / no source)."""
+        return self._steered.aec_ref_source
+
     # ---- location ----
     @property
     def current_location(self) -> Location:

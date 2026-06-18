@@ -989,6 +989,10 @@ class PolarisBeamformer(MicController):
         dereverb_t60: float = DEFAULT_DEREVERB_T60,                      # assumed room RT60 (s)
         dereverb_beta: float = DEFAULT_DEREVERB_BETA,                    # late-reverb over-subtraction strength
         dereverb_gmin_db: float = DEFAULT_DEREVERB_GMIN_DB,              # dereverb gain floor (suppression depth)
+        aec: bool = False,                                               # live echo cancellation (needs a far-end ref)
+        aec_n_taps: int = 16,                                            # AEC echo-tail length (taps × hop ≈ 93 ms)
+        aec_mu: float = 0.3,                                             # AEC NLMS step
+        aec_ref_device: Optional[int] = None,                           # manual far-end reference device (None=auto)
         output_callback: Optional[Callable[[Any], None]] = None,
         output_queue_size: int = 8,
         output_device: Optional[int] = None,
@@ -1078,6 +1082,15 @@ class PolarisBeamformer(MicController):
         self._dereverb_beta = float(dereverb_beta)
         self._dereverb_gmin_db = float(dereverb_gmin_db)
         self._dereverb: Optional[_PostNoiseSuppressor] = None
+        # live AEC (StreamingAec): runs on the beamformed mono BEFORE dereverb, fed a far-end reference
+        # captured by ReferenceCapture (WASAPI loopback / Stereo Mix). OFF unless aec; both built/opened
+        # alongside the audio stream and a clean pass-through when no reference source is available.
+        self.aec = bool(aec)
+        self._aec_n_taps = int(aec_n_taps)
+        self._aec_mu = float(aec_mu)
+        self._aec_ref_device = aec_ref_device
+        self._aec: Any = None
+        self._ref_capture: Any = None
         self.output_device = output_device
         self.monitor = monitor
         # device supervision (opt-in): wait for the array to appear, auto-reconnect if it drops
@@ -1478,6 +1491,13 @@ class PolarisBeamformer(MicController):
                 gmin_db=self._dereverb_gmin_db, frame=self._post_nr_frame)
         else:
             self._dereverb = None
+        # live AEC (StreamingAec): built device-free here; the far-end reference STREAM is opened separately
+        # by _start_ref_capture() alongside the audio stream (prepare_external / _open_stream).
+        if self.aec:
+            from .streaming_aec import StreamingAec
+            self._aec = StreamingAec(self.sample_rate, n_taps=self._aec_n_taps, mu=self._aec_mu)
+        else:
+            self._aec = None
 
     # ---- external-feed seam (BeamEngine drives the DSP from a shared stream) ----
     def process_block(self, block: Any) -> Any:
@@ -1491,6 +1511,15 @@ class PolarisBeamformer(MicController):
         np = self._np
         with self._beam_lock:
             mono = self._beam.process(block)
+        if self._aec is not None:
+            rc = self._ref_capture                    # read once: teardown may null it on the control thread
+            ref = rc.recent(mono.shape[0]) if rc is not None else None
+            # near_end_active=False: the SRP-PHAT DOA VAD (_noise_gate) cannot separate near-end speech from
+            # the loudspeaker echo, so it must NOT gate adaptation — doing so would FREEZE the filter exactly
+            # on far-end-only echo (the case it most needs to learn). The AEC instead adapts on its own
+            # far-end-activity gate and stays bounded via its leaky, magnitude-clipped NLMS. (A residual /
+            # coherence double-talk detector inside StreamingAec is the documented upgrade.)
+            mono = self._aec.process(mono, ref, near_end_active=False)  # cancel far-end echo first
         if self._dereverb is not None:
             mono = self._dereverb.process(mono, self._noise_gate)  # suppress late reverb BEFORE the noise reducer
         if self._post_nr is not None:
@@ -1511,6 +1540,7 @@ class PolarisBeamformer(MicController):
         if not controls_available():
             raise RuntimeError(_install_hint())
         self._setup_runtime()
+        self._start_ref_capture()
         self._stop.clear()
         if self._doa_thread is None:
             self._doa_thread = threading.Thread(target=self._doa_loop, name="polaris-doa", daemon=True)
@@ -1524,12 +1554,40 @@ class PolarisBeamformer(MicController):
         if th is not None:
             th.join(timeout=2.0)
             self._doa_thread = None
+        self._stop_ref_capture()
         with self._cov_lock:
             self._cov = None
             self._noise_cov = None
         self._stftbuf = None
         self._level = 0.0
         self._streaming = False
+
+    # ---- live AEC far-end reference (its own loopback/Stereo-Mix input stream) ----
+    def _start_ref_capture(self) -> None:
+        """Open the far-end reference source when AEC is on (never raises; degrades to no
+        reference, in which case the AEC passes the mic through)."""
+        if not self.aec or self._ref_capture is not None:
+            return
+        from .reference_capture import ReferenceCapture
+        rc = ReferenceCapture(self.sample_rate, device=self._aec_ref_device)
+        rc.start()
+        self._ref_capture = rc
+
+    def _stop_ref_capture(self) -> None:
+        rc = self._ref_capture
+        self._ref_capture = None
+        if rc is not None:
+            rc.stop()
+
+    @property
+    def aec_erle_db(self) -> float:
+        """Live AEC echo-return-loss-enhancement (dB); 0 when AEC is off or no echo seen."""
+        return float(self._aec.erle_db) if self._aec is not None else 0.0
+
+    @property
+    def aec_ref_source(self) -> str:
+        """Human-readable far-end reference source label (empty if none/off)."""
+        return self._ref_capture.source if self._ref_capture is not None else ""
 
     def reset_transient(self) -> None:
         """Wipe per-mode transient state so a re-activated beam doesn't replay stale
@@ -1556,6 +1614,8 @@ class PolarisBeamformer(MicController):
             self._lp_tail = self._np.zeros(len(self._lp_kernel) - 1, dtype=float)  # flush FIR state
         if self._agc_gain is not None:
             self._agc_gain = ExponentialTracker(self._agc_alpha)   # fresh slew state (atomic rebind; audio reads lock-free)
+        if self._aec is not None:
+            self._aec.reset()              # drop the adaptive echo filter + ERLE history
         if self._dereverb is not None:
             self._dereverb.reset()         # drop the late-reverb PSD + delay-ring history
         if self._post_nr is not None:
@@ -1611,6 +1671,7 @@ class PolarisBeamformer(MicController):
         except Exception:
             self._close_stream()              # tear down any partially-opened stream
             raise
+        self._start_ref_capture()             # open the far-end reference (AEC) alongside the mic stream
         self._last_block_monotonic = time.monotonic()
         self._streaming = True
 
@@ -1674,6 +1735,9 @@ class PolarisBeamformer(MicController):
                 self._stream.close()
             finally:
                 self._stream = None
+        # tear the reference down AFTER the mic stream is stopped, so no in-flight process_block can be
+        # reading the reference when it's nulled (correct by construction, not just by the rc-local guard).
+        self._stop_ref_capture()
         self._monitor_q = None
         self._level = 0.0
         self._streaming = False
