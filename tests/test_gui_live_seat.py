@@ -443,10 +443,15 @@ def test_beameng_noise_suppression_steered_cfg(win):
     assert cfg_a["post_nr_floor_db"] == -22.0 and cfg_a["post_nr_oversub"] == 2.0
     panel.live_beameng_nr_depth.setCurrentIndex(panel.live_beameng_nr_depth.findText("Medium"))
     # the engine combo flows through: OCTOVOX OM-LSA cleaner by default, switchable to the light gate
-    assert panel._beameng_steered_cfg(base)["post_nr_engine"] == "omlsa"   # OCTOVOX cleaner is the default
+    assert panel._beameng_steered_cfg(base)["post_nr_engine"] == "omlsa"   # AI cleaner is the default
     panel.live_beameng_nr_engine.setCurrentIndex(panel.live_beameng_nr_engine.findData("gate"))
     assert panel._beameng_steered_cfg(base)["post_nr_engine"] == "gate"
     panel.live_beameng_nr_engine.setCurrentIndex(panel.live_beameng_nr_engine.findData("omlsa"))
+    # real-time dereverb is an independent toggle that flows to the steered cfg
+    assert "dereverb" not in panel._beameng_steered_cfg(base)
+    panel.live_beameng_dereverb.setChecked(True)
+    assert panel._beameng_steered_cfg(base)["dereverb"] is True
+    panel.live_beameng_dereverb.setChecked(False)
     panel.live_beameng_adaptnull.setChecked(True)
     cfg = panel._beameng_steered_cfg(base)
     assert cfg["mode"] == cc.MODE_MVDR and cfg["auto_null"] is True and cfg["post_nr"] is True
@@ -467,6 +472,7 @@ def test_autosteer_has_its_own_octovox_cleaning_controls(win):
     assert not panel.live_autosteer_clean.isEnabled()       # no auto-steer → disabled
     panel.live_autosteer.setChecked(True)                   # select auto-steer
     assert panel.live_autosteer_clean.isEnabled() and panel.live_autosteer_depth.isEnabled()
+    assert panel.live_autosteer_dereverb.isEnabled()        # dereverb toggle reachable in auto-steer
     assert panel.live_autosteer_clean.currentData() is None  # Off by default (opt-in)
     panel.live_autosteer_clean.setCurrentIndex(panel.live_autosteer_clean.findData("omlsa"))
     assert panel.live_autosteer_clean.currentData() == "omlsa"   # the OCTOVOX cleaner is selectable here
@@ -474,3 +480,38 @@ def test_autosteer_has_its_own_octovox_cleaning_controls(win):
     assert not panel.live_autosteer_clean.isEnabled()       # auto-steer deselected → its cleaner controls off
     panel.live_beameng.setChecked(False)
     panel.live_autosteer.setChecked(False)
+
+
+def test_listening_mode_selector_drives_mode_and_cards(win):
+    """The high-level 'Listening mode' selector configures the underlying live mode and collapses the
+    irrelevant cards ('invisible by default'); 'Manual (advanced)' reveals every card."""
+    panel = win.panels["live"]
+    cards = panel._live_cards
+
+    def pick(data):
+        panel.live_listening_mode.setCurrentIndex(panel.live_listening_mode.findData(data))
+
+    assert panel.live_listening_mode.currentData() == "table"     # default = today's zone behaviour
+
+    pick("follow")
+    assert panel.live_autosteer.isChecked() and not panel.live_beameng.isChecked()
+    assert not cards["steer"].body.isHidden()                     # the auto-steer card is revealed...
+    assert cards["beam"].body.isHidden() and cards["eng"].body.isHidden()   # ...and the rest collapsed
+
+    pick("seat")
+    assert panel.live_beameng.isChecked() and not panel.live_autosteer.isChecked()
+    assert panel.live_beameng_mode.currentData() == "steered"
+    assert not cards["eng"].body.isHidden() and cards["steer"].body.isHidden()
+
+    pick("clean")                                                  # hands-off = follow + AI voice cleaning on
+    assert panel.live_autosteer.isChecked() and panel.live_autosteer_clean.currentData() == "omlsa"
+    assert not cards["steer"].body.isHidden()
+
+    pick("manual")
+    assert all(not c.body.isHidden() for c in cards.values())      # everything revealed
+
+    pick("table")
+    assert not (panel.live_autosteer.isChecked() or panel.live_beameng.isChecked()
+                or panel.live_octovox.isChecked())
+    panel.live_autosteer.setChecked(False)
+    panel.live_beameng.setChecked(False)

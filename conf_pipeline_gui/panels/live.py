@@ -118,6 +118,28 @@ class LivePanel(PanelBase):
         self.live_avail_lbl.setWordWrap(True)
         lay.addWidget(self.live_avail_lbl)
 
+        # --- LISTENING MODE: one high-level selector that drives the live mode + sensible defaults and
+        # collapses the irrelevant cards ("invisible by default"). "Manual (advanced)" reveals every card.
+        # Default "Whole table" maps to today's zone default, so it changes nothing until the user picks. ---
+        lm_row = QHBoxLayout()
+        self.live_listening_mode = QComboBox()
+        self.live_listening_mode.addItem("Follow the room (auto-steer)", "follow")
+        self.live_listening_mode.addItem("Lock to a seat", "seat")
+        self.live_listening_mode.addItem("Whole table", "table")
+        self.live_listening_mode.addItem("Clean audio (hands-off)", "clean")
+        self.live_listening_mode.addItem("Manual (advanced)", "manual")
+        self.live_listening_mode.setToolTip(
+            "Pick how the room is heard; the panel selects the right engine + sensible defaults and hides the "
+            "rest. 'Clean audio (hands-off)' follows talkers and turns on AI voice cleaning. "
+            "'Manual (advanced)' shows every control. Choose before Connect."
+        )
+        self.live_listening_mode.setCurrentIndex(2)          # "Whole table" = today's default (no behaviour change)
+        self.live_listening_mode.currentIndexChanged.connect(
+            lambda *_a: None if self._refreshing else self._on_listening_mode_changed())
+        lm_row.addWidget(QLabel("Listening mode"))
+        lm_row.addWidget(self.live_listening_mode, 1)
+        lay.addLayout(lm_row)
+
         # --- HARDWARE: array, audio device, capsules ---
         hw = Card("Hardware — array & audio device")
         gf = QFormLayout()
@@ -300,7 +322,7 @@ class LivePanel(PanelBase):
         asf.addRow("Gate", self.live_autosteer_gate)
         self.live_autosteer_clean = QComboBox()              # OCTOVOX voice cleaning on the auto-steer output
         self.live_autosteer_clean.addItem("Off", None)
-        self.live_autosteer_clean.addItem("OCTOVOX cleaner (OM-LSA)", "omlsa")
+        self.live_autosteer_clean.addItem("AI voice cleaning (OM-LSA)", "omlsa")
         self.live_autosteer_clean.addItem("Light gate (fast)", "gate")
         self.live_autosteer_clean.setCurrentIndex(0)         # opt-in (Off by default, like the A/B engine)
         self.live_autosteer_clean.setToolTip(
@@ -322,6 +344,13 @@ class LivePanel(PanelBase):
         )
         self.live_autosteer_depth.setEnabled(False)
         asf.addRow("Strength", self.live_autosteer_depth)
+        self.live_autosteer_dereverb = QCheckBox("Reduce room echo (dereverb)")
+        self.live_autosteer_dereverb.setToolTip(
+            "Real-time dereverberation on the followed talker: suppress the late-reverberation tail (room "
+            "echo) so the voice sounds closer and drier. Runs before the cleaner. Fixed at Connect."
+        )
+        self.live_autosteer_dereverb.setEnabled(False)       # enabled when auto-steer is ticked (pre-connect)
+        asf.addRow("Dereverb", self.live_autosteer_dereverb)
         self.live_calib_btn = QPushButton("Calibrate front (talk from the front, then click)")
         self.live_calib_btn.setToolTip(
             "Records a few seconds while someone talks from your desk's 'front', measures "
@@ -401,8 +430,8 @@ class LivePanel(PanelBase):
         )
         self.live_beameng_nr_depth.setEnabled(False)         # enabled when the engine is ticked
         ef.addRow("Noise depth", self.live_beameng_nr_depth)
-        self.live_beameng_nr_engine = QComboBox()            # post_nr engine: OCTOVOX cleaner vs the light gate
-        self.live_beameng_nr_engine.addItem("OCTOVOX cleaner (OM-LSA)", "omlsa")
+        self.live_beameng_nr_engine = QComboBox()            # post_nr engine: AI cleaner (OM-LSA) vs the light gate
+        self.live_beameng_nr_engine.addItem("AI voice cleaning (OM-LSA)", "omlsa")
         self.live_beameng_nr_engine.addItem("Light gate (fast)", "gate")
         self.live_beameng_nr_engine.setCurrentIndex(0)       # default: the OCTOVOX-derived decision-directed cleaner
         self.live_beameng_nr_engine.setToolTip(
@@ -412,6 +441,13 @@ class LivePanel(PanelBase):
         )
         self.live_beameng_nr_engine.setEnabled(False)        # enabled when the engine is ticked
         ef.addRow("Cleaner", self.live_beameng_nr_engine)
+        self.live_beameng_dereverb = QCheckBox("Reduce room echo (dereverb)")
+        self.live_beameng_dereverb.setToolTip(
+            "Real-time dereverberation on the beam output: suppress the late-reverberation tail (room echo) "
+            "so the voice sounds closer and drier. Runs before the noise reducer. Fixed at Connect."
+        )
+        self.live_beameng_dereverb.setEnabled(False)         # enabled when the engine is ticked
+        ef.addRow("Dereverb", self.live_beameng_dereverb)
         self.live_beameng_adaptnull = QCheckBox("Adaptive null (learn room noise)")
         self.live_beameng_adaptnull.setToolTip(
             "Make the steered beam data-adaptive (MVDR): measure the room's noise field during pauses and "
@@ -493,6 +529,9 @@ class LivePanel(PanelBase):
         ov.body_lay.addLayout(ovf)
         lay.addWidget(ov)
 
+        # keep card refs so the Listening-mode selector can collapse the irrelevant ones
+        self._live_cards = {"hw": hw, "beam": beam, "steer": steer, "eng": eng, "ov": ov}
+
         lay.addStretch(1)
 
         # Stop combos from demanding their full content width (long OS device
@@ -564,12 +603,48 @@ class LivePanel(PanelBase):
             return self._autosteer.ctrl
         return self._live_ctl
 
+    def _on_listening_mode_changed(self) -> None:
+        """Drive the live mode + sensible defaults from the single high-level selector, and collapse the
+        cards that don't apply. A convenience facade over the existing mode checkboxes — 'Manual (advanced)'
+        leaves the checkboxes alone and reveals every card. Ignored mid-session (modes are fixed at Connect)."""
+        if self._live_busy():
+            return
+        mode = self.live_listening_mode.currentData()
+        # set the underlying mode checkbox(es); their toggled handlers enforce mutual exclusion + enabling
+        if mode in ("follow", "clean"):
+            self.live_autosteer.setChecked(True)
+        elif mode == "seat":
+            self.live_beameng.setChecked(True)
+            i = self.live_beameng_mode.findData("steered")
+            if i >= 0:
+                self.live_beameng_mode.setCurrentIndex(i)
+        elif mode == "table":
+            self.live_autosteer.setChecked(False)
+            self.live_beameng.setChecked(False)
+            self.live_octovox.setChecked(False)
+        # "Clean audio (hands-off)" = follow the room + AI voice cleaning on
+        if mode == "clean":
+            i = self.live_autosteer_clean.findData("omlsa")
+            if i >= 0:
+                self.live_autosteer_clean.setCurrentIndex(i)
+        # show only the cards relevant to the chosen mode ("manual" shows all)
+        show = {
+            "follow": {"hw", "steer"},
+            "clean": {"hw", "steer"},
+            "seat": {"hw", "eng"},
+            "table": {"hw", "beam"},
+            "manual": {"hw", "beam", "steer", "eng", "ov"},
+        }.get(mode, {"hw", "beam"})
+        for key, card in self._live_cards.items():
+            card.set_open(key in show)
+
     def _sync_autosteer_nr_enabled(self) -> None:
         """Enable auto-steer's own OCTOVOX-cleaning controls when auto-steer is selected and not yet
         connected (the cleaner is built at Connect, like the A/B engine's)."""
         on = self.live_autosteer.isChecked() and self._autosteer is None
         self.live_autosteer_clean.setEnabled(on)
         self.live_autosteer_depth.setEnabled(on)
+        self.live_autosteer_dereverb.setEnabled(on)
 
     def _on_autosteer_toggled(self):
         """Enable the sector controls only when auto-steer is selected."""
@@ -593,6 +668,7 @@ class LivePanel(PanelBase):
         self.live_beameng_postnr.setEnabled(on)
         self.live_beameng_nr_depth.setEnabled(on)
         self.live_beameng_nr_engine.setEnabled(on)
+        self.live_beameng_dereverb.setEnabled(on)
         self.live_beameng_adaptnull.setEnabled(on)
         if on:
             self.live_autosteer.setChecked(False)
@@ -1003,9 +1079,10 @@ class LivePanel(PanelBase):
                 gate_when_empty=self.live_autosteer_gate.isChecked(),
                 monitor=self.live_monitor.isChecked(),
                 output_device=self.live_out_device.currentData(),
-                post_nr=clean is not None,                              # OCTOVOX cleaning on the auto-steer output
+                post_nr=clean is not None,                              # AI cleaning on the auto-steer output
                 post_nr_engine=clean or "gate",
                 post_nr_floor_db=nr_floor_db, post_nr_oversub=nr_oversub,
+                dereverb=self.live_autosteer_dereverb.isChecked(),      # real-time room-echo suppression
             )
             ctrl.ctrl.set_gain_db(float(self.live_gain.value()))
             ctrl.start()
@@ -1040,7 +1117,9 @@ class LivePanel(PanelBase):
             cfg["post_nr"] = True                     # noise reducer on the output (steady fans/AC)
             floor_db, oversub = self.live_beameng_nr_depth.currentData()   # Gentle / Medium / Aggressive
             cfg["post_nr_floor_db"], cfg["post_nr_oversub"] = floor_db, oversub
-            cfg["post_nr_engine"] = self.live_beameng_nr_engine.currentData()   # OCTOVOX OM-LSA vs light gate
+            cfg["post_nr_engine"] = self.live_beameng_nr_engine.currentData()   # AI OM-LSA cleaner vs light gate
+        if self.live_beameng_dereverb.isChecked():
+            cfg["dereverb"] = True                    # real-time late-reverb suppression before the cleaner
         return cfg
 
     def _beameng_connect(self):
@@ -1084,6 +1163,7 @@ class LivePanel(PanelBase):
         self.live_beameng_postnr.setEnabled(False)      # NR / adaptive mode are fixed at Connect too
         self.live_beameng_nr_depth.setEnabled(False)
         self.live_beameng_nr_engine.setEnabled(False)
+        self.live_beameng_dereverb.setEnabled(False)
         self.live_beameng_adaptnull.setEnabled(False)
         self._refresh_beameng_lockseat()                # populate Follow / Manual angle / seats
         steered = self._beameng_mode() == "steered"
@@ -1325,6 +1405,7 @@ class LivePanel(PanelBase):
             self.live_beameng_postnr.setEnabled(self.live_beameng.isChecked())
             self.live_beameng_nr_depth.setEnabled(self.live_beameng.isChecked())
             self.live_beameng_nr_engine.setEnabled(self.live_beameng.isChecked())
+            self.live_beameng_dereverb.setEnabled(self.live_beameng.isChecked())
             self.live_beameng_adaptnull.setEnabled(self.live_beameng.isChecked())
             self.live_beameng_lockseat.setEnabled(False)        # snap-steer needs a running engine
             self.live_beameng_lockseat.blockSignals(True)

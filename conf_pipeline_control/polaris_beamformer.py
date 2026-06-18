@@ -122,6 +122,13 @@ DEFAULT_POST_NR_POWER_ALPHA = 0.8    # per-bin power-smoothing EMA feeding the m
 # StreamingCleaner (a stronger, more natural denoiser; see streaming_cleaner.StreamingCleaner).
 DEFAULT_POST_NR_ENGINE = "gate"      # "gate" | "omlsa" | "wiener"
 
+# Real-time dereverberation (StreamingDereverb): a causal port of OCTOVOX's fast spectral late-reverb
+# suppressor (Lebart 2001 / Habets). Runs at the post-beam seam BEFORE the noise reducer. OFF by default.
+DEFAULT_DEREVERB_T60 = 0.5           # assumed room RT60 (s) → the late-reverb decay pole
+DEFAULT_DEREVERB_BETA = 1.6          # over-subtraction strength on the late-reverb PSD
+DEFAULT_DEREVERB_GMIN_DB = -10.0     # gain floor (max reverb suppression depth; never hard-mutes)
+DEFAULT_DEREVERB_EARLY_MS = 48.0     # early-reflection boundary kept intact (only LATE reverb is suppressed)
+
 MODE_DELAYSUM = "delaysum"        # integer-sample time-domain delay-and-sum (default)
 MODE_FRACDELAY = "fracdelay"      # sub-sample (fractional) delay-and-sum via windowed-sinc FIR
 MODE_SUPERDIRECTIVE = "superdirective"  # frequency-domain diffuse-noise MVDR (fixed analytic Γ)
@@ -978,6 +985,10 @@ class PolarisBeamformer(MicController):
         post_nr_warmup_frames: int = DEFAULT_POST_NR_WARMUP_FRAMES,     # frames before NR engages
         post_nr_minstat: bool = DEFAULT_POST_NR_MINSTAT,                # min-statistics floor (VAD-free) vs gated EMA
         post_nr_engine: str = DEFAULT_POST_NR_ENGINE,                   # "gate" | "omlsa" | "wiener" (OCTOVOX cleaner)
+        dereverb: bool = False,                                          # real-time late-reverb suppression (pre-NR)
+        dereverb_t60: float = DEFAULT_DEREVERB_T60,                      # assumed room RT60 (s)
+        dereverb_beta: float = DEFAULT_DEREVERB_BETA,                    # late-reverb over-subtraction strength
+        dereverb_gmin_db: float = DEFAULT_DEREVERB_GMIN_DB,              # dereverb gain floor (suppression depth)
         output_callback: Optional[Callable[[Any], None]] = None,
         output_queue_size: int = 8,
         output_device: Optional[int] = None,
@@ -1061,6 +1072,12 @@ class PolarisBeamformer(MicController):
         self._post_nr_minstat = bool(post_nr_minstat)
         self._post_nr_engine = str(post_nr_engine)
         self._post_nr: Optional[_PostNoiseSuppressor] = None
+        # real-time dereverberation (StreamingDereverb): runs BEFORE the noise reducer; built in _setup_runtime.
+        self.dereverb = bool(dereverb)
+        self._dereverb_t60 = float(dereverb_t60)
+        self._dereverb_beta = float(dereverb_beta)
+        self._dereverb_gmin_db = float(dereverb_gmin_db)
+        self._dereverb: Optional[_PostNoiseSuppressor] = None
         self.output_device = output_device
         self.monitor = monitor
         # device supervision (opt-in): wait for the array to appear, auto-reconnect if it drops
@@ -1453,6 +1470,14 @@ class PolarisBeamformer(MicController):
                 self.sample_rate, frame=self._post_nr_frame, floor_db=self._post_nr_floor_db,
                 oversub=self._post_nr_oversub, gain_alpha=self._post_nr_gain_alpha,
                 warmup_frames=self._post_nr_warmup_frames, minstat=self._post_nr_minstat)
+        # real-time dereverb (StreamingDereverb): runs on the mono BEFORE the noise reducer; off unless enabled.
+        if self.dereverb:
+            from .streaming_cleaner import StreamingDereverb   # lazy: avoids a module-load import cycle
+            self._dereverb = StreamingDereverb(
+                self.sample_rate, t60=self._dereverb_t60, beta=self._dereverb_beta,
+                gmin_db=self._dereverb_gmin_db, frame=self._post_nr_frame)
+        else:
+            self._dereverb = None
 
     # ---- external-feed seam (BeamEngine drives the DSP from a shared stream) ----
     def process_block(self, block: Any) -> Any:
@@ -1466,6 +1491,8 @@ class PolarisBeamformer(MicController):
         np = self._np
         with self._beam_lock:
             mono = self._beam.process(block)
+        if self._dereverb is not None:
+            mono = self._dereverb.process(mono, self._noise_gate)  # suppress late reverb BEFORE the noise reducer
         if self._post_nr is not None:
             mono = self._post_nr.process(mono, self._noise_gate)   # spectral-gate NR before AGC (stable floor)
         if self._agc_gain is not None:
@@ -1529,6 +1556,8 @@ class PolarisBeamformer(MicController):
             self._lp_tail = self._np.zeros(len(self._lp_kernel) - 1, dtype=float)  # flush FIR state
         if self._agc_gain is not None:
             self._agc_gain = ExponentialTracker(self._agc_alpha)   # fresh slew state (atomic rebind; audio reads lock-free)
+        if self._dereverb is not None:
+            self._dereverb.reset()         # drop the late-reverb PSD + delay-ring history
         if self._post_nr is not None:
             self._post_nr.reset()          # drop NR streaming + floor history; its lock serializes vs an in-flight process()
         with self._beam_lock:

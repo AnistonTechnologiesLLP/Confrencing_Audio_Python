@@ -30,6 +30,9 @@ from .beamformer import BeamDesign
 from .control import MicController
 from .geometry import SOUND_SPEED_MPS, ArrayGeometry
 from .polaris_beamformer import (
+    DEFAULT_DEREVERB_BETA,
+    DEFAULT_DEREVERB_GMIN_DB,
+    DEFAULT_DEREVERB_T60,
     DEFAULT_POST_NR_ENGINE,
     DEFAULT_POST_NR_FLOOR_DB,
     DEFAULT_POST_NR_FRAME,
@@ -74,6 +77,10 @@ class LiveBeamController(MicController):
         post_nr_frame: int = DEFAULT_POST_NR_FRAME,
         post_nr_warmup_frames: int = DEFAULT_POST_NR_WARMUP_FRAMES,
         post_nr_minstat: bool = DEFAULT_POST_NR_MINSTAT,
+        dereverb: bool = False,
+        dereverb_t60: float = DEFAULT_DEREVERB_T60,
+        dereverb_beta: float = DEFAULT_DEREVERB_BETA,
+        dereverb_gmin_db: float = DEFAULT_DEREVERB_GMIN_DB,
     ):
         super().__init__(geometry, n_channels=geometry.n_channels)
         self.device = device
@@ -93,6 +100,12 @@ class LiveBeamController(MicController):
         self._post_nr_frame = int(post_nr_frame)
         self._post_nr_warmup_frames = int(post_nr_warmup_frames)
         self._post_nr_minstat = bool(post_nr_minstat)
+        # real-time dereverb on the mono output, BEFORE the noise reducer (same StreamingDereverb the A/B
+        # engine uses). OFF by default. Built in _build_post_nr().
+        self.dereverb = bool(dereverb)
+        self._dereverb_t60 = float(dereverb_t60)
+        self._dereverb_beta = float(dereverb_beta)
+        self._dereverb_gmin_db = float(dereverb_gmin_db)
         # Lazily bound in _open() (numpy / sounddevice objects) — typed Any so the
         # module stays importable + checkable without the [control] extra.
         self._cov: Any = None      # EMA of band covariance, (n_band, M, M) complex
@@ -113,6 +126,7 @@ class LiveBeamController(MicController):
         self._inbuf: Any = None    # numpy (FRAME, M) sliding input
         self._ola: Any = None      # numpy (FRAME,) overlap-add tail
         self._post_nr: Any = None  # post-beam noise reducer (StreamingCleaner / _PostNoiseSuppressor), or None
+        self._dereverb: Any = None # real-time dereverb (StreamingDereverb), runs before the noise reducer, or None
 
     # ---- weight computation (per FFT bin, broadband) ----
     def _compute_weights(self):
@@ -206,6 +220,14 @@ class LiveBeamController(MicController):
                 self.samplerate, frame=self._post_nr_frame, floor_db=self._post_nr_floor_db,
                 oversub=self._post_nr_oversub, warmup_frames=self._post_nr_warmup_frames,
                 minstat=self._post_nr_minstat)
+        # real-time dereverb (StreamingDereverb): runs on the mono BEFORE the noise reducer; off unless enabled.
+        if self.dereverb:
+            from .streaming_cleaner import StreamingDereverb
+            self._dereverb = StreamingDereverb(
+                self.samplerate, t60=self._dereverb_t60, beta=self._dereverb_beta,
+                gmin_db=self._dereverb_gmin_db, frame=self._post_nr_frame)
+        else:
+            self._dereverb = None
 
     # ---- lifecycle ----
     def _open(self) -> None:
@@ -331,9 +353,11 @@ class LiveBeamController(MicController):
         self._ola += y
         out = self._ola[:_HOP].copy()
 
-        # post-beam noise reduction (OCTOVOX OM-LSA cleaner / light gate) on the mono, before the meter
-        # and gain — so the meter, recording and monitor all reflect the cleaned voice. noise_gate=False:
-        # the minimum-statistics floor learns steady noise every frame without needing a VAD signal here.
+        # post-beam enhancement on the mono, before the meter and gain — so the meter, recording and monitor
+        # all reflect the cleaned voice. Dereverb runs BEFORE noise reduction (dereverb → denoise). noise_gate
+        # =False: the minimum-statistics floor learns steady noise every frame without needing a VAD here.
+        if self._dereverb is not None:
+            out = self._dereverb.process(out, False)
         if self._post_nr is not None:
             out = self._post_nr.process(out, False)
 

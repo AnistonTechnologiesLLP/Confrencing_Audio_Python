@@ -10,6 +10,18 @@ the TS sibling is at matching v5 parity. The desktop app is presented as
 ## [Unreleased]
 
 ### Added
+- **Real-time dereverberation on the live output** (`conf_pipeline_control.streaming_cleaner.StreamingDereverb`;
+  `dereverb` knob on `PolarisBeamformer` / `LiveBeamController` / `AutoSteerController`; GUI **Dereverb** toggle
+  in the A/B-engine and Auto-steer cards) — a causal port of OCTOVOX's fast spectral late-reverb suppressor
+  (Lebart 2001 / Habets), bringing dereverb from the offline OCTOVOX path into the live chain. It estimates the
+  late-reverb power as a delayed, T60-decayed, one-pole-smoothed copy of the observed power and applies a
+  spectral-subtraction gain (`G = max(1 − β·R/P, Gmin)`), running at the post-beam seam **before** the noise
+  reducer (dereverb → denoise → AGC). A drop-in for `_PostNoiseSuppressor` (reuses its overlap-add STFT,
+  warmup-passthrough and process/reset lock); pure numpy, gain floored so it only removes reverb energy.
+  OFF by default. (+9 tests.)
+- **AI-story naming** — the live voice cleaner is now surfaced as **"AI voice cleaning (OM-LSA)"** in the GUI
+  (A/B-engine "Cleaner" and Auto-steer "Clean voice" pickers); tooltips keep the technical OM-LSA / OCTOVOX
+  detail. No behaviour change.
 - **Measure the steered beam's null depth on a 2nd source** (`conf_pipeline_control.measure_null_depth`,
   `NullDepthReport`) — beamforms a raw 8-ch clip BOTH ways (look-only vs look+LCMV-null) and reports the dB
   the null drops energy from the interferer direction, plus whether the talker at the look is preserved.

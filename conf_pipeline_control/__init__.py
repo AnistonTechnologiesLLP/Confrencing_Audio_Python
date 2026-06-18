@@ -112,7 +112,8 @@ from .polaris_beamformer import (  # noqa: F401
     DoaReading,
     PolarisBeamformer,
 )
-from .streaming_cleaner import StreamingCleaner  # noqa: F401  (OCTOVOX-derived live OM-LSA cleaner)
+from .streaming_cleaner import StreamingCleaner, StreamingDereverb  # noqa: F401  (OCTOVOX-derived live cleaner + dereverb)
+from .streaming_aec import StreamingAec  # noqa: F401  (streaming partitioned-block echo canceller)
 from .virtual_mic_grid import VirtualMicGrid  # noqa: F401  (optional module — safe to delete)
 from .beam_engine import BeamEngine, Location  # noqa: F401  (optional A/B wrapper — safe to delete)
 
@@ -140,7 +141,8 @@ __all__ = [
     "DEFAULT_F_LO_HZ", "DEFAULT_F_HI_HZ",
     "AutoSteerController", "SectorConfig",
     "Tracker", "ValueSmoother", "ExponentialTracker", "AlphaBetaTracker",
-    "PolarisBeamformer", "DoaReading", "DeviceConfigError", "StreamingCleaner",
+    "PolarisBeamformer", "DoaReading", "DeviceConfigError", "StreamingCleaner", "StreamingDereverb",
+    "StreamingAec",
     "VirtualMicGrid",
     "BeamEngine", "Location",
     "MicController", "MicState", "SimulatedMicController",

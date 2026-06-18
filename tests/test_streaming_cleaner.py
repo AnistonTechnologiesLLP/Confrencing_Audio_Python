@@ -21,7 +21,7 @@ import conf_pipeline_control.polaris_beamformer as pb
 from conf_pipeline_control.autosteer import AutoSteerController
 from conf_pipeline_control.live import LiveBeamController
 from conf_pipeline_control.polaris_beamformer import PolarisBeamformer
-from conf_pipeline_control.streaming_cleaner import StreamingCleaner, _exp1
+from conf_pipeline_control.streaming_cleaner import StreamingCleaner, StreamingDereverb, _exp1
 
 _GMIN = 10.0 ** (-18.0 / 20.0)            # default gmin_db = -18 dB → linear OM-LSA floor
 
@@ -267,3 +267,93 @@ def test_autosteer_forwards_post_nr_to_the_live_controller():
     assert a.ctrl._post_nr_floor_db == -22.0 and a.ctrl._post_nr_oversub == 2.0
     a.ctrl._build_post_nr()
     assert isinstance(a.ctrl._post_nr, StreamingCleaner)
+
+
+# --------------------------------------------------------------------------- #
+# StreamingDereverb — real-time late-reverb suppression
+# --------------------------------------------------------------------------- #
+def test_dereverb_builds_runs_shape_finite():
+    nr = StreamingDereverb(44100.0, frame=512, warmup_frames=2)
+    rng = np.random.default_rng(30)
+    out = np.concatenate([nr.process((0.05 * rng.standard_normal(1411)).astype(float), False)
+                          for _ in range(8)])
+    assert out.ndim == 1 and out.dtype == np.float32 and bool(np.all(np.isfinite(out)))
+
+
+def test_dereverb_warmup_passthrough_is_byte_identical():
+    rng = np.random.default_rng(31)
+    nr = StreamingDereverb(44100.0, frame=512, warmup_frames=10_000)       # never engages
+    for _ in range(6):
+        blk = (0.05 * rng.standard_normal(1411)).astype(np.float32)
+        assert np.array_equal(nr.process(blk, False), blk)
+    assert nr._engaged is False
+
+
+def test_dereverb_gain_never_boosts():
+    rng = np.random.default_rng(32)
+    nr = StreamingDereverb(44100.0, frame=512, warmup_frames=4)
+    for _ in range(60):
+        nr.process((0.1 * rng.standard_normal(1411)).astype(float), False)
+    assert nr._engaged
+    assert float(np.max(nr._gain_prev)) <= 1.0 + 1e-9         # spectral subtraction only removes energy
+
+
+def test_dereverb_suppresses_sustained_energy():
+    """A steady signal looks like late reverb (R tracks P → G→Gmin), so sustained energy is pulled down;
+    this is exactly the reverb-tail suppression behaviour (onsets, where R lags P, are preserved)."""
+    rng = np.random.default_rng(33)
+    nr = StreamingDereverb(44100.0, frame=512, beta=1.6, gmin_db=-10.0, warmup_frames=8)
+    for _ in range(80):                                       # settle the late-reverb estimate on steady input
+        nr.process((0.05 * rng.standard_normal(1411)).astype(float), False)
+    assert nr._engaged
+    blk = (0.05 * rng.standard_normal(8192)).astype(float)
+    out = np.concatenate([nr.process(blk[i:i + 512], False) for i in range(0, 8192, 512)])
+    rin, rout = _rms(blk), _rms(out)
+    assert 0.05 * rin < rout < 0.85 * rin                     # pulled toward Gmin, never fully muted
+
+
+def test_dereverb_block_size_invariance():
+    rng = np.random.default_rng(34)
+    sig = (0.05 * rng.standard_normal(8192)).astype(float)
+    a = StreamingDereverb(44100.0, frame=512, warmup_frames=0)
+    b = StreamingDereverb(44100.0, frame=512, warmup_frames=0)
+    out_a = np.concatenate([a.process(sig[i:i + 512], False) for i in range(0, 8192, 512)])
+    out_b = np.concatenate([b.process(sig[i:i + 1411], False) for i in range(0, 8192, 1411)])
+    L = min(len(out_a), len(out_b))
+    assert L > 4096 and np.allclose(out_a[1024:L], out_b[1024:L], atol=1e-6)
+
+
+def test_dereverb_reset_clears_state():
+    rng = np.random.default_rng(35)
+    nr = StreamingDereverb(44100.0, frame=512, warmup_frames=0)
+    for _ in range(10):
+        nr.process((0.05 * rng.standard_normal(1411)).astype(float), False)
+    assert nr._engaged and float(np.max(nr._R)) > 0.0
+    nr.reset()
+    assert nr._engaged is False and float(np.max(nr._R)) == 0.0 and float(np.max(nr._phist)) == 0.0
+
+
+def test_engine_dereverb_builds_streaming_dereverb_and_runs():
+    bf = PolarisBeamformer(device=None, dereverb=True, post_nr_warmup_frames=2)
+    bf._setup_runtime()
+    assert isinstance(bf._dereverb, StreamingDereverb)
+    rng = np.random.default_rng(36)
+    out = bf.process_block((0.1 * rng.standard_normal((bf.blocksize, bf.n_channels))).astype(float))
+    assert out.shape == (bf.blocksize,) and bool(np.all(np.isfinite(out)))
+
+
+def test_engine_dereverb_off_builds_none():
+    bf = PolarisBeamformer(device=None)                        # dereverb defaults False
+    bf._setup_runtime()
+    assert bf._dereverb is None
+
+
+def test_live_controller_and_autosteer_forward_dereverb():
+    bf = LiveBeamController(_polaris_geometry(), dereverb=True)
+    bf._build_post_nr()
+    assert isinstance(bf._dereverb, StreamingDereverb)
+    sector = cc.SectorConfig(center_deg=0.0, half_width_deg=60.0)
+    a = AutoSteerController(_polaris_geometry(), sector, samplerate=44100.0, dereverb=True)
+    assert a.ctrl.dereverb is True
+    a.ctrl._build_post_nr()
+    assert isinstance(a.ctrl._dereverb, StreamingDereverb)
