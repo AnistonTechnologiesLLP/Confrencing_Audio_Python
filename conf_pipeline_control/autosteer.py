@@ -30,6 +30,9 @@ from .geometry import ArrayGeometry
 from .live import LiveBeamController
 from .model import DEFAULT_DESIGN_FREQ_HZ
 from .polaris_beamformer import (
+    DEFAULT_DEREVERB_BETA,
+    DEFAULT_DEREVERB_GMIN_DB,
+    DEFAULT_DEREVERB_T60,
     DEFAULT_POST_NR_ENGINE,
     DEFAULT_POST_NR_FLOOR_DB,
     DEFAULT_POST_NR_OVERSUB,
@@ -80,6 +83,10 @@ class AutoSteerController:
         post_nr_engine: str = DEFAULT_POST_NR_ENGINE,
         post_nr_floor_db: float = DEFAULT_POST_NR_FLOOR_DB,
         post_nr_oversub: float = DEFAULT_POST_NR_OVERSUB,
+        dereverb: bool = False,
+        dereverb_t60: float = DEFAULT_DEREVERB_T60,
+        dereverb_beta: float = DEFAULT_DEREVERB_BETA,
+        dereverb_gmin_db: float = DEFAULT_DEREVERB_GMIN_DB,
     ):
         self.geometry = geometry
         self.sector = sector
@@ -109,6 +116,10 @@ class AutoSteerController:
             post_nr_engine=post_nr_engine,
             post_nr_floor_db=post_nr_floor_db,
             post_nr_oversub=post_nr_oversub,
+            dereverb=dereverb,
+            dereverb_t60=dereverb_t60,
+            dereverb_beta=dereverb_beta,
+            dereverb_gmin_db=dereverb_gmin_db,
         )
         self._thread: Optional[threading.Thread] = None
         self._stop = threading.Event()

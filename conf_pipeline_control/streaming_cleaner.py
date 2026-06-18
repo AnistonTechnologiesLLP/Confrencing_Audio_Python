@@ -1,4 +1,10 @@
-"""Streaming OM-LSA voice cleaner for the live beam (a port of OCTOVOX's NR).
+"""Streaming voice-enhancement stages for the live beam (ports of OCTOVOX DSP).
+
+Two real-time, pure-numpy stages that run at the post-beam seam (dereverb → denoise):
+:class:`StreamingCleaner` (OM-LSA noise reduction) and :class:`StreamingDereverb`
+(spectral late-reverb suppression). Both subclass :class:`_PostNoiseSuppressor` and
+reuse its overlap-add STFT, warmup-passthrough and process/reset lock, overriding only
+the per-bin gain law.
 
 The conferencing engine already beamforms the 8-capsule POLARIS array down to one
 mono voice in real time; this runs OCTOVOX's *cleaning* on that mono, frame by
@@ -32,6 +38,10 @@ from __future__ import annotations
 from typing import Any
 
 from .polaris_beamformer import (
+    DEFAULT_DEREVERB_BETA,
+    DEFAULT_DEREVERB_EARLY_MS,
+    DEFAULT_DEREVERB_GMIN_DB,
+    DEFAULT_DEREVERB_T60,
     DEFAULT_POST_NR_FRAME,
     DEFAULT_POST_NR_GAIN_ALPHA,
     DEFAULT_POST_NR_MINSTAT,
@@ -159,6 +169,74 @@ class StreamingCleaner(_PostNoiseSuppressor):
             g = (g_h1 ** p) * (self._g_floor ** (1.0 - p))   # Cohen OM floor: keep a natural Gmin bed in the gaps
         else:                                                 # mode == "wiener"
             g = np.maximum(gw, self._g_floor)
+        # Same smoothing as the base gate: 3-tap frequency smooth then a per-bin temporal one-pole.
+        gs = g.copy()
+        gs[1:-1] = 0.25 * g[:-2] + 0.5 * g[1:-1] + 0.25 * g[2:]
+        gs = self._gain_alpha * gs + (1.0 - self._gain_alpha) * self._gain_prev
+        self._gain_prev = gs
+        return gs
+
+
+class StreamingDereverb(_PostNoiseSuppressor):
+    """Real-time single-channel **dereverberation** — a causal port of OCTOVOX's
+    ``prod_pipeline.dereverb_spectral`` (Lebart 2001 / Habets statistical late-reverb
+    suppression). A **drop-in** for :class:`_PostNoiseSuppressor` (same
+    ``process(block, noise_gate) -> block`` / ``reset()`` contract and overlap-add STFT
+    machinery), it estimates the LATE-reverberation power as a delayed, T60-decayed,
+    one-pole-smoothed copy of the observed power and applies a spectral-subtraction gain
+    ``G = max(1 − β·R/P, Gmin)``.
+
+    Causal by construction: the offline version's delayed-power tap ``Pd[:, d:] = P[:, :-d]``
+    reads PAST frames, so streaming only needs a ``d``-frame per-bin power-history ring plus
+    the one-pole IIR state ``R`` — both carried across blocks. It runs BEFORE the noise
+    reducer at the post-beam seam (dereverb → denoise → AGC). ``noise_gate`` is unused
+    (dereverb is VAD-independent); engagement is unconditional after ``warmup_frames``
+    (the inherited minstat counter advances every frame). Gain is floored at ``Gmin`` so it
+    only REMOVES reverb energy and never hard-mutes.
+    """
+
+    def __init__(self, sample_rate: float, *, t60: float = DEFAULT_DEREVERB_T60,
+                 beta: float = DEFAULT_DEREVERB_BETA, gmin_db: float = DEFAULT_DEREVERB_GMIN_DB,
+                 early_ms: float = DEFAULT_DEREVERB_EARLY_MS,
+                 frame: int = DEFAULT_POST_NR_FRAME,
+                 gain_alpha: float = DEFAULT_POST_NR_GAIN_ALPHA,
+                 warmup_frames: int = DEFAULT_POST_NR_WARMUP_FRAMES,
+                 minstat: bool = DEFAULT_POST_NR_MINSTAT,
+                 minstat_sub: int = DEFAULT_POST_NR_MINSTAT_SUB,
+                 minstat_sublen: int = DEFAULT_POST_NR_MINSTAT_SUBLEN,
+                 minstat_bias: float = DEFAULT_POST_NR_MINSTAT_BIAS,
+                 power_alpha: float = DEFAULT_POST_NR_POWER_ALPHA):
+        self._t60 = max(0.05, float(t60))
+        self._beta = max(0.0, float(beta))
+        self._early_ms = max(0.0, float(early_ms))
+        # Hand gmin_db to the base as floor_db so the inherited _g_floor IS the dereverb gain floor.
+        super().__init__(
+            sample_rate, frame=frame, floor_db=float(gmin_db), gain_alpha=gain_alpha,
+            warmup_frames=warmup_frames, minstat=minstat, minstat_sub=minstat_sub,
+            minstat_sublen=minstat_sublen, minstat_bias=minstat_bias, power_alpha=power_alpha)
+
+    def _init_state(self) -> None:
+        super()._init_state()
+        import numpy as np
+
+        nb = self._F // 2 + 1
+        # per-frame 60 dB decay pole + early-reflection delay (frames), derived from the frame/hop + sr
+        self._a = float(np.exp(-13.8155 * self._H / (self._t60 * self._sr)))   # a = exp(-ln(1e6)·HOP/(t60·fs))
+        self._d = max(1, int(round(self._early_ms / 1000.0 * self._sr / self._H)))
+        self._R: Any = np.zeros(nb, dtype=float)                 # one-pole late-reverb PSD state
+        self._phist: Any = np.zeros((self._d, nb), dtype=float)  # ring of the last d power frames (delayed tap)
+        self._phist_idx = 0
+
+    def _gain(self, X: Any) -> Any:
+        """Per-bin late-reverb spectral-subtraction gain (ported from dereverb_spectral)."""
+        import numpy as np
+
+        P = X.real * X.real + X.imag * X.imag                 # |X|² instantaneous power
+        Pd = self._phist[self._phist_idx].copy()              # power from d frames ago (zeros until the ring fills)
+        self._phist[self._phist_idx] = P
+        self._phist_idx = (self._phist_idx + 1) % self._d
+        self._R = self._a * self._R + (1.0 - self._a) * Pd    # one-pole IIR → late-reverb PSD estimate
+        g = np.maximum(1.0 - self._beta * self._R / (P + 1e-20), self._g_floor)
         # Same smoothing as the base gate: 3-tap frequency smooth then a per-bin temporal one-pole.
         gs = g.copy()
         gs[1:-1] = 0.25 * g[:-2] + 0.5 * g[1:-1] + 0.25 * g[2:]
