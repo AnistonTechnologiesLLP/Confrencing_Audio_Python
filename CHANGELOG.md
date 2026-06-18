@@ -10,6 +10,19 @@ the TS sibling is at matching v5 parity. The desktop app is presented as
 ## [Unreleased]
 
 ### Added
+- **Live acoustic echo cancellation (AEC)** (`conf_pipeline_control.streaming_aec.StreamingAec` +
+  `reference_capture.ReferenceCapture`; `aec` knob on `PolarisBeamformer` / `LiveBeamController` /
+  `AutoSteerController`; GUI **"Echo cancel"** toggle in the A/B-engine and Auto-steer cards + a live ERLE-dB
+  readout) — closes the headline gap from the Shure analysis (AEC was previously planning-level only). A
+  frequency-domain partitioned-block NLMS (ported from OCTOVOX `aec_partitioned`) cancels the room's
+  loudspeaker echo on the beamformed mono using a **far-end reference** captured automatically (WASAPI
+  loopback → Stereo Mix → manual device), mono-downmixed + resampled to the engine rate. Runs at the
+  post-beam seam **before** dereverb (AEC → dereverb → denoise → AGC); adapts on a far-end-activity gate and
+  stays bounded via a leaky, magnitude-clipped update; clean pass-through (never fabricates cancellation) when
+  no reference is delivered. **Off by default** (it only helps when the room plays far-end audio through
+  speakers). Pure numpy on the audio thread. **Limits (documented):** no bulk-delay / clock-drift
+  compensation or true double-talk detector yet, and WASAPI loopback needs a sounddevice/PortAudio build that
+  supports it (else Stereo Mix must be enabled). Hardened by a 16-agent adversarial review. (+21 tests.)
 - **Real-time dereverberation on the live output** (`conf_pipeline_control.streaming_cleaner.StreamingDereverb`;
   `dereverb` knob on `PolarisBeamformer` / `LiveBeamController` / `AutoSteerController`; GUI **Dereverb** toggle
   in the A/B-engine and Auto-steer cards) — a causal port of OCTOVOX's fast spectral late-reverb suppressor
