@@ -12,7 +12,7 @@ from conf_pipeline.angles import Point3D
 from conf_pipeline.model import Point2D, RectShape, default_elevation
 
 from .state import AppState
-from .theme import GLYPH, OVERLAY, palette
+from .theme import FONT, GLYPH, OVERLAY, palette
 
 # Canvas glyph/overlay colours live in theme.py (GLYPH/OVERLAY) — one source for both
 # files. These module names are kept as thin aliases so the painter code below is
@@ -300,26 +300,27 @@ class Canvas(QWidget):
         pal = self._pal()
         head, dim = QColor(pal["canvas_text"]), QColor(pal["canvas_text_dim"])
         mode = getattr(self.state, "mode", "design")
+        ht, hb = FONT["hint_title"], FONT["hint_body"]
         if mode == "design":
             lines = [
-                ("Start your room design", head, 15, QFont.DemiBold),
+                ("Start your room design", head, ht, QFont.DemiBold),
                 ("", None, 6, QFont.Normal),
-                ("• Press the Room tool (R) and click to draw an outline", dim, 11, QFont.Normal),
-                ("• Or load a sample from the ☰ menu", dim, 11, QFont.Normal),
+                ("• Press the Room tool (R) and click to draw an outline", dim, hb, QFont.Normal),
+                ("• Or load a sample from the ☰ menu", dim, hb, QFont.Normal),
             ]
         else:
             verb = {"simulate": "simulate", "route": "route", "deploy": "deploy", "live": "drive"}.get(mode, "show")
             lines = [
-                (f"Nothing to {verb} yet", head, 15, QFont.DemiBold),
+                (f"Nothing to {verb} yet", head, ht, QFont.DemiBold),
                 ("", None, 6, QFont.Normal),
-                ("• Switch to DESIGN (Ctrl+1) and build the room first", dim, 11, QFont.Normal),
+                ("• Switch to DESIGN (Ctrl+1) and build the room first", dim, hb, QFont.Normal),
             ]
         y = cy - 36
         for text, color, size, weight in lines:
             if not text:
                 y += size
                 continue
-            p.setFont(QFont("Segoe UI", size, weight))
+            p.setFont(QFont(FONT["family"], size, weight))
             fm = p.fontMetrics()
             p.setPen(color)
             p.drawText(QPointF(cx - fm.horizontalAdvance(text) / 2, y), text)
@@ -330,13 +331,15 @@ class Canvas(QWidget):
         return QPen(QColor(pal["canvas_axis"] if axis else pal["canvas_grid"]), 1)
 
     def _label(self, p, x, y, text, color="#e6e9f2", bg=True):
-        p.setFont(QFont("Segoe UI", 8, QFont.DemiBold))
+        p.setFont(QFont(FONT["family"], FONT["caption"], QFont.DemiBold))
         fm = p.fontMetrics()
         tw = fm.horizontalAdvance(text)
         if bg:
+            chip = QColor(self._pal()["canvas_label_bg"])
+            chip.setAlpha(184)
             p.setPen(Qt.NoPen)
-            p.setBrush(QColor(8, 12, 24, 184))
-            p.drawRoundedRect(QRectF(x - 1, y - 11, tw + 10, 16), 4, 4)
+            p.setBrush(chip)
+            p.drawRoundedRect(QRectF(x - 1, y - 11, tw + 10, 16), 5, 5)
         p.setPen(QColor(color))
         p.drawText(QPointF(x + 4, y + 2), text)
 
@@ -361,7 +364,7 @@ class Canvas(QWidget):
 
     def _person(self, p, x, y, r, sel):
         p.setBrush(QBrush(_qc(TALKER_COLOR)))
-        p.setPen(QPen(QColor("#070a12"), 2))
+        p.setPen(QPen(QColor(self._pal()["canvas_outline"]), 2))
         path = QPainterPath()
         path.moveTo(x - r * 1.05, y + r * 0.95)
         path.arcTo(QRectF(x - r * 1.05, y - r * 0.1, r * 2.1, r * 2.1), 180, 180)
@@ -762,7 +765,7 @@ class Canvas(QWidget):
         if verts and len(verts) >= 2:
             poly = QPolygonF([self.w2s(p2, v) for p2 in verts])
             p.setBrush(_qc("#6d8bff", 13))
-            p.setPen(QPen(QColor("#46568f"), 2))
+            p.setPen(QPen(QColor(self._pal()["canvas_grid_3d"]), 2))
             p.drawPolygon(poly)
             if self.state.tool == "select" and prof["edit"]:
                 p.setBrush(QColor("#9db4ff"))
@@ -792,7 +795,7 @@ class Canvas(QWidget):
                 p.drawPolygon(QPolygonF(corners))
                 c0 = corners[0]
                 p.setPen(_qc("#cdd6f4", 110 if dim else 255))
-                p.setFont(QFont("Segoe UI", 8))
+                p.setFont(QFont(FONT["family"], FONT["caption"]))
                 p.drawText(QPointF(c0.x() + 4, c0.y() + 13), f"{glyph} {z.label}")
                 if self.state.tool == "select" and prof["edit"]:
                     br = corners[2]
@@ -833,7 +836,7 @@ class Canvas(QWidget):
             color, shape = DEVICE_STYLE[d.type]
             s = self.w2s(pos, v)
             self._highlight(p, s, d.id, err, warn)
-            outline = QColor("#ff6b81") if d.id in err else QColor("#070a12")
+            outline = QColor(self._pal()["err"]) if d.id in err else QColor(self._pal()["canvas_outline"])
             self._marker(p, shape, s.x(), s.y(), 9, _qc(color), outline)
             self._label(p, s.x() + 11, s.y() + 4, d.label)
         # talkers
@@ -874,7 +877,9 @@ class Canvas(QWidget):
 
     def _highlight(self, p, s, did, err, warn):
         if did in err or did in warn:
-            p.setBrush(QColor(255, 107, 129, 51) if did in err else QColor(247, 201, 72, 51))
+            hl = QColor(self._pal()["err"] if did in err else self._pal()["warn"])
+            hl.setAlpha(51)
+            p.setBrush(hl)
             p.setPen(Qt.NoPen)
             p.drawEllipse(s, 16, 16)
         sel = self.state.selection
@@ -935,10 +940,11 @@ class Canvas(QWidget):
                 glyph, color = marks[d.id]
                 s = self.w2s(d.position, v)
                 p.setBrush(_qc(color, 230))
-                p.setPen(QPen(QColor("#070a12"), 1.4))
+                _ol = self._pal()["canvas_outline"]
+                p.setPen(QPen(QColor(_ol), 1.4))
                 p.drawEllipse(QPointF(s.x() - 13, s.y() - 13), 7.5, 7.5)
-                p.setPen(QColor("#070a12"))
-                p.setFont(QFont("Segoe UI", 9, QFont.Bold))
+                p.setPen(QColor(_ol))
+                p.setFont(QFont(FONT["family"], FONT["body"], QFont.Bold))
                 p.drawText(QRectF(s.x() - 20.5, s.y() - 21, 15, 16), Qt.AlignCenter, glyph)
 
     # ---- LIVE operations overlay (sector wedge + DOA rays + level halo) ----
@@ -1057,17 +1063,18 @@ class Canvas(QWidget):
         fp = self.footprint()
         floor = [self.project(Point3D(x, 0, zz), cam) for (x, zz) in fp]
         top = [self.project(Point3D(x, h, zz), cam) for (x, zz) in fp]
+        edge3d = self._pal()["canvas_grid_3d"]
         if all(floor):
             p.setBrush(_qc("#6d8bff", 13))
-            p.setPen(QPen(QColor("#46568f"), 2))
+            p.setPen(QPen(QColor(edge3d), 2))
             p.drawPolygon(QPolygonF([QPointF(s[0], s[1]) for s in floor]))
-        p.setPen(QPen(QColor("#2f3b66"), 1.4))
+        p.setPen(QPen(QColor(edge3d), 1.4))
         for i in range(len(fp)):
             if floor[i] and top[i]:
                 p.drawLine(QPointF(floor[i][0], floor[i][1]), QPointF(top[i][0], top[i][1]))
         if all(top):
             p.setBrush(Qt.NoBrush)
-            p.setPen(QPen(QColor("#28335a"), 1.4))
+            p.setPen(QPen(QColor(edge3d), 1.4))
             p.drawPolygon(QPolygonF([QPointF(s[0], s[1]) for s in top]))
         # zones on floor
         for d in self.cfg.devices:
@@ -1107,7 +1114,7 @@ class Canvas(QWidget):
         for _, kind, obj, P, s in items:
             foot = self.project(Point3D(P.x, 0, P.z), cam)
             if foot:
-                pen = QPen(QColor("#2b3760"), 1)
+                pen = QPen(QColor(self._pal()["canvas_floor_3d"]), 1)
                 pen.setDashPattern([3, 3])
                 p.setPen(pen)
                 p.drawLine(QPointF(foot[0], foot[1]), QPointF(s[0], s[1]))
@@ -1115,7 +1122,7 @@ class Canvas(QWidget):
             if kind == "device":
                 color, shape = DEVICE_STYLE[obj.type]
                 self._highlight(p, QPointF(s[0], s[1]), obj.id, err, warn)
-                outline = QColor("#ff6b81") if obj.id in err else QColor("#070a12")
+                outline = QColor(self._pal()["err"]) if obj.id in err else QColor(self._pal()["canvas_outline"])
                 self._marker(p, shape, s[0], s[1], r, _qc(color), outline)
                 self._label(p, s[0] + r + 3, s[1] + 4, obj.label)
             else:
