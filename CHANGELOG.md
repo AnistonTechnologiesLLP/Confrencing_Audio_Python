@@ -10,6 +10,17 @@ the TS sibling is at matching v5 parity. The desktop app is presented as
 ## [Unreleased]
 
 ### Added
+- **Guided first-run setup** (a "Getting started" checklist in the LIVE panel; `conf_pipeline_gui.panels.first_run`)
+  — the onboarding parity piece. A compact, dismissible banner walks a first-time user through getting audio out
+  of the array — **pick how to listen → connect → check capsules → calibrate the front → hear it** — ticking each
+  step off as they do it with the **real controls** (it never re-runs DSP). Shows once (a stable QSettings flag),
+  is re-openable from the menu ("Show LIVE getting-started"), and is honest about ordering and hardware: optional
+  steps never block completion, irrelevant steps auto-skip per mode (no front-calibration for "Whole table"), and
+  a no-hardware / simulation run can still finish (manual "Got it" fallback for the meter). All gate logic lives
+  in a **pure, Qt-free step model** (`GuideSnapshot` + `step_done`/`active_step`/`required_done`/`progress`) so
+  it's fully unit-testable headless — the two classic traps are designed out (the mode step keys off an explicit
+  *touched* flag, not the "table" default; calibration keys off a success flag, never `front_offset != 0`).
+  (+14 tests.)
 - **Commissioning / as-built report** (`conf_pipeline.commissioning_report` + `CommissioningInfo`; an
   "Export commissioning report…" menu action) — the integrator-deliverable moat. Layers the measured **live
   state** onto the existing as-built design report: the honest **estimated latency** (`~N ms`, framed against

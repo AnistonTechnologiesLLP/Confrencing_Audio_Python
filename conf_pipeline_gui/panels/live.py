@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import math
 
-from PySide6.QtCore import Qt, QThreadPool, QTimer
+from PySide6.QtCore import QSettings, Qt, QThreadPool, QTimer
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -92,6 +92,13 @@ class LivePanel(PanelBase):
         self._ab_obj = None              # the live object (engine/autosteer/ctrl) the A/B capture is on
         self._ab_last = None             # last finalized ABProofResult (for the commissioning report)
         self._caps_probed = False        # True once Detect-silent has measured the capsules this session
+        # --- first-run setup-guide state (the checklist banner reasons over these) ---
+        self._listening_mode_touched = False  # user explicitly picked a listening mode (not the default)
+        self._front_calibrated = False        # Calibrate-front succeeded (NOT inferred from the offset value)
+        self._heard_ack = False               # manual "Got it, I can hear it" fallback
+        self._guide_dismissed = False         # hidden for this session (does not set the persistent flag)
+        self._guide_autoshown = False         # already auto-revealed once this session
+        self._guide_done_persisted = False    # the QSettings done-flag has been written this session
         self._session_array_id = None    # the array the running session was started with
         self._live_seat = None           # SeatMatch for the dominant talker (room-aware readout)
         self._beameng_locked_seat = None  # seat_id the steered beam is pinned to (snap-steer), or None
@@ -121,6 +128,8 @@ class LivePanel(PanelBase):
         self.live_avail_lbl = QLabel()
         self.live_avail_lbl.setWordWrap(True)
         lay.addWidget(self.live_avail_lbl)
+
+        lay.addWidget(self._build_guide_banner())   # first-run checklist (hidden until first LIVE entry)
 
         # --- LISTENING MODE: one high-level selector that drives the live mode + sensible defaults and
         # collapses the irrelevant cards ("invisible by default"). "Manual (advanced)" reveals every card.
@@ -640,6 +649,7 @@ class LivePanel(PanelBase):
         """Drive the live mode + sensible defaults from the single high-level selector, and collapse the
         cards that don't apply. A convenience facade over the existing mode checkboxes — 'Manual (advanced)'
         leaves the checkboxes alone and reveals every card. Ignored mid-session (modes are fixed at Connect)."""
+        self._listening_mode_touched = True   # a genuine user pick (this slot is gated off programmatic refresh)
         if self._live_busy():
             return
         mode = self.live_listening_mode.currentData()
@@ -928,6 +938,7 @@ class LivePanel(PanelBase):
         # applied. Wrap into (−180, 180]; the sector gate is wrap-aware, so it steers identically.
         off = int(((round(az) + 180) % 360) - 180)
         self.live_front_offset.setValue(off)
+        self._front_calibrated = True          # flag the SUCCESS (never infer from the offset value: 0° is valid)
         self.live_status.setText(
             f"Front calibrated: heard at {az:.0f}° → front offset {off:+d}° ({sal:.0f} dB). "
             "Sector centre is now 'front'.")
@@ -1563,6 +1574,134 @@ class LivePanel(PanelBase):
             "connected": True,
         })
 
+    # ---- first-run setup guide (the LIVE getting-started checklist) ----
+    def _build_guide_banner(self):
+        """A compact, dismissible 'Getting started' checklist that ticks off as the user picks a
+        mode, connects, probes, calibrates and hears the array — reusing the real controls (it never
+        re-runs DSP). Deliberately NOT one of self._live_cards, so the listening-mode card-collapse
+        never owns or hides it. All gate logic lives in the pure ``first_run`` module."""
+        card = Card("Getting started")
+        self._guide_card = card
+        self._guide_label = QLabel()
+        self._guide_label.setWordWrap(True)
+        self._guide_label.setTextFormat(Qt.RichText)
+        card.body_lay.addWidget(self._guide_label)
+        row = QHBoxLayout()
+        self._guide_ack_btn = QPushButton("Got it, I can hear it")
+        self._guide_ack_btn.setToolTip("Tick the final step by hand (e.g. a quiet room where the meter stays low).")
+        self._guide_ack_btn.clicked.connect(self._guide_ack)
+        self._guide_ack_btn.setVisible(False)
+        row.addWidget(self._guide_ack_btn)
+        row.addStretch(1)
+        hide_btn = QPushButton("Hide")
+        hide_btn.setToolTip("Hide for now — reopen from the menu: 'Show LIVE getting-started'.")
+        hide_btn.clicked.connect(self._guide_hide)
+        row.addWidget(hide_btn)
+        dont_btn = QPushButton("Don't show again")
+        dont_btn.clicked.connect(self._guide_dont_show_again)
+        row.addWidget(dont_btn)
+        card.body_lay.addLayout(row)
+        card.setVisible(False)                       # revealed on first LIVE entry / via the menu
+        return card
+
+    @staticmethod
+    def _guide_settings() -> QSettings:
+        # Explicit org/app so the flag is stable even if the app didn't set them (e.g. under tests).
+        return QSettings("Aniston", "RoomDesigner")
+
+    def _guide_seen(self) -> bool:
+        from .first_run import GUIDE_DONE_SETTING
+        return bool(self._guide_settings().value(GUIDE_DONE_SETTING, False, type=bool))
+
+    def show_first_run_guide(self, force: bool = False) -> None:
+        """Reveal the checklist. ``force`` (the menu) always shows; otherwise show only on a first
+        run (no done-flag), at most once per session, and never when dismissed this session."""
+        card = getattr(self, "_guide_card", None)
+        if card is None:
+            return
+        if force:
+            self._guide_dismissed = False
+        else:
+            if self._guide_seen() or self._guide_autoshown or self._guide_dismissed:
+                return
+            self._guide_autoshown = True
+        card.setVisible(True)
+        card.set_open(True)
+        self._refresh_guide()
+
+    def _build_guide_snapshot(self):
+        from .first_run import GuideSnapshot
+        meter = getattr(self, "live_meter", None)
+        return GuideSnapshot(
+            listening_mode=self.live_listening_mode.currentData() or "table",
+            listening_mode_touched=self._listening_mode_touched,
+            has_array=self._live_array_id() is not None,
+            controls_available=cc.controls_available(),
+            busy=self._live_busy(),
+            caps_probed=self._caps_probed,
+            front_calibrated=self._front_calibrated,
+            monitor_on=self.live_monitor.isChecked(),
+            meter_level=(meter.level() if meter is not None else 0.0),
+            heard_ack=self._heard_ack,
+        )
+
+    def _guide_hint(self, step_id, snap) -> str:
+        from . import first_run as fr
+        if step_id == fr.STEP_MODE:
+            return "choose how the room is heard, above."
+        if step_id == fr.STEP_CONNECT:
+            return "add a microphone array in DESIGN first." if not snap.has_array else "click Connect in the footer below."
+        if step_id == fr.STEP_DETECT:
+            if not snap.controls_available:
+                return "(simulation — optional)."
+            return "disconnect to re-check capsules (optional)." if snap.busy else "click 'Detect silent capsules' in Hardware."
+        if step_id == fr.STEP_CALIBRATE:
+            return "disconnect to calibrate (optional)." if snap.busy else "click 'Calibrate front' and talk from the front (optional)."
+        if step_id == fr.STEP_HEAR:
+            return "tick Monitor, Connect, and watch the meter — or click 'Got it'."
+        return ""
+
+    def _refresh_guide(self) -> None:
+        """Rebuild the checklist rows from a fresh snapshot (main-thread, cheap). Called from the
+        live meter tick, so it tracks state changes without threading refreshes through handlers."""
+        card = getattr(self, "_guide_card", None)
+        if card is None or not card.isVisible():
+            return
+        from . import first_run as fr
+        snap = self._build_guide_snapshot()
+        active = fr.active_step(snap)
+        done, total = fr.progress(snap)
+        rows = []
+        for s in fr.GUIDE_STEPS:
+            if not fr.step_relevant(s.id, snap):
+                continue
+            mark = "✓" if fr.step_done(s.id, snap) else ("▶" if s.id == active else "○")
+            title = s.title + (" (optional)" if s.optional else "")
+            rows.append(f"<b>{mark} {title}</b> — {self._guide_hint(s.id, snap)}" if s.id == active else f"{mark} {title}")
+        head = "All set — you're live! ✓" if active is None else f"Getting started — {done}/{total} done"
+        self._guide_label.setText(f"<b>{head}</b><br>" + "<br>".join(rows))
+        self._guide_ack_btn.setVisible(active == fr.STEP_HEAR)
+        if fr.required_done(snap) and not self._guide_done_persisted:
+            self._mark_guide_done()                 # persist once; the banner stays until hidden
+
+    def _mark_guide_done(self) -> None:
+        from .first_run import GUIDE_DONE_SETTING
+        self._guide_settings().setValue(GUIDE_DONE_SETTING, True)
+        self._guide_done_persisted = True
+
+    def _guide_ack(self) -> None:
+        self._heard_ack = True
+        self._refresh_guide()
+
+    def _guide_hide(self) -> None:
+        self._guide_dismissed = True
+        if self._guide_card is not None:
+            self._guide_card.setVisible(False)
+
+    def _guide_dont_show_again(self) -> None:
+        self._mark_guide_done()
+        self._guide_hide()
+
     # ---- commissioning snapshot (for the as-built report) ----
     def commissioning_info(self):
         """Snapshot the live / measured state for a commissioning report (control
@@ -1642,6 +1781,7 @@ class LivePanel(PanelBase):
         a sliver on a linear scale."""
         self._poll_ab_proof()                # finalize + export an A/B proof once its capture completes
         self.live_abproof_btn.setEnabled(self._ab_cap is None and self._ab_target() is not None)
+        self._refresh_guide()                # keep the first-run checklist in step with live state (cheap; no-op when hidden)
         self._live_seat = None               # only the DOA paths below re-resolve a seat
         if self._beam_engine is not None:
             self._tick_beameng()

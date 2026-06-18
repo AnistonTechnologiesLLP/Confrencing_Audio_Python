@@ -251,7 +251,13 @@ class MainWindow(QMainWindow):
         m.addAction("Deploy (snapshot design)", self._deploy)
         m.addSeparator()
         m.addAction("Toggle dark / light theme", self._toggle_theme)
+        m.addSeparator()
+        m.addAction("Show LIVE getting-started", self._show_live_guide)
         return m
+
+    def _show_live_guide(self):
+        self.state.set_mode("live")
+        self.panels["live"].show_first_run_guide(force=True)
 
     def _fill_room_menu(self, menu: QMenu):
         menu.clear()
@@ -358,6 +364,8 @@ class MainWindow(QMainWindow):
             self._refresh_sim_summary()
         if mode != "live" and self.panels["live"]._live_busy():
             self.toast("Live session running — the LIVE dot stays red until you disconnect")
+        if mode == "live":
+            self.panels["live"].show_first_run_guide()   # self-gates: only on first run, once per session
         self.canvas.update()
 
     def _goto_mode(self, mode: str):
@@ -732,6 +740,10 @@ def main():
     app.setFont(f)
     app.setStyleSheet(DARK_QSS)
     QGuiApplication.setApplicationDisplayName("Aniston Room Designer")
+    # Stable org/app names so QSettings (e.g. the LIVE first-run guide flag) persist
+    # under a fixed key across runs rather than an empty/derived one.
+    app.setOrganizationName("Aniston")
+    app.setApplicationName("RoomDesigner")
     app.setWindowIcon(app_icon())
     win = MainWindow()
     win.show()

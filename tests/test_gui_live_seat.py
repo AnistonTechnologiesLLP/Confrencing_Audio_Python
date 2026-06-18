@@ -567,3 +567,58 @@ def test_export_commissioning_action_in_menu(win):
     assert hasattr(win, "_export_commissioning")
     titles = [a.text() for a in win._build_app_menu().actions()]
     assert any("commissioning report" in t.lower() for t in titles)
+
+
+# --------------------------------------------------------------------------- #
+# First-run setup guide (the LIVE getting-started checklist)
+# --------------------------------------------------------------------------- #
+def _clear_guide_flag():
+    from PySide6.QtCore import QSettings
+    from conf_pipeline_gui.panels.first_run import GUIDE_DONE_SETTING
+    QSettings("Aniston", "RoomDesigner").remove(GUIDE_DONE_SETTING)
+
+
+def test_first_run_banner_hidden_then_shown_and_renders(win):
+    _clear_guide_flag()
+    panel = win.panels["live"]
+    assert hasattr(panel, "_guide_card")
+    assert panel._guide_card.isHidden()                   # built hidden (own visibility flag)
+    win.state.set_mode("live")                            # entering LIVE auto-reveals on first run
+    assert panel._guide_card.isVisible()                  # panel is now the current page → truly visible
+    assert "Getting started" in panel._guide_label.text()
+    _clear_guide_flag()
+
+
+def test_first_run_snapshot_reads_widgets(win):
+    panel = win.panels["live"]
+    panel.live_listening_mode.setCurrentIndex(panel.live_listening_mode.findData("follow"))  # a real user pick
+    snap = panel._build_guide_snapshot()
+    assert snap.listening_mode == "follow" and snap.listening_mode_touched is True
+    assert snap.has_array is False                        # empty config: no array placed
+    assert snap.busy is False
+
+
+def test_first_run_done_flag_gates_autoshow(win):
+    _clear_guide_flag()
+    panel = win.panels["live"]
+    assert panel._guide_seen() is False
+    win.state.set_mode("live")                            # first run → auto-reveals
+    assert not panel._guide_card.isHidden()
+    panel._guide_hide()
+    assert panel._guide_card.isHidden()
+    panel._mark_guide_done()                              # completion persists the flag
+    assert panel._guide_seen() is True
+    panel._guide_autoshown = False                        # simulate a fresh session
+    panel._guide_dismissed = False
+    panel.show_first_run_guide()                          # seen-flag set → stays hidden
+    assert panel._guide_card.isHidden()
+    _clear_guide_flag()
+
+
+def test_show_live_guide_menu_action(win):
+    _clear_guide_flag()
+    assert hasattr(win, "_show_live_guide")
+    win._show_live_guide()
+    assert win.state.mode == "live"
+    assert win.panels["live"]._guide_card.isVisible()     # force-shown by the menu
+    _clear_guide_flag()
