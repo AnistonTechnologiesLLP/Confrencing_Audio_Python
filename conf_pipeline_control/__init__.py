@@ -118,6 +118,8 @@ from .reference_capture import ReferenceCapture  # noqa: F401  (far-end loopback
 from .ab_capture import ABCapture, ABProofResult, write_ab_proof  # noqa: F401  (live raw-vs-cleaned proof tool)
 from .virtual_mic_grid import VirtualMicGrid  # noqa: F401  (optional module — safe to delete)
 from .beam_engine import BeamEngine, Location  # noqa: F401  (optional A/B wrapper — safe to delete)
+from .agc import TargetLoudnessAgc  # noqa: F401  (shared target-loudness AGC)
+from .multikit import KitSpec, KitStatus, MultiKitController  # noqa: F401  (dual-POLARIS cross-array automix)
 
 
 def controls_available() -> bool:
@@ -147,6 +149,7 @@ __all__ = [
     "StreamingAec", "ReferenceCapture", "ABCapture", "ABProofResult", "write_ab_proof",
     "VirtualMicGrid",
     "BeamEngine", "Location",
+    "TargetLoudnessAgc", "MultiKitController", "KitSpec", "KitStatus",
     "MicController", "MicState", "SimulatedMicController",
     "DEFAULT_DESIGN_FREQ_HZ", "DEFAULT_TARGET_ELEVATION_M", "RESPONSE_FLOOR_DB",
     "SPEECH_BAND_LO_HZ", "SPEECH_BAND_HI_HZ", "SPEECH_OCTAVE_CENTERS_HZ",
