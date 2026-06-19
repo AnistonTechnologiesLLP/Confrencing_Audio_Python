@@ -61,6 +61,7 @@ from .control import MicController
 from .geometry import SOUND_SPEED_MPS, ArrayGeometry, sensibel_8, with_active_channels
 from .tracking import ExponentialTracker, Tracker
 from .agc import TargetLoudnessAgc
+from .preamp import PreampHost
 from . import doa
 
 # --- POLARIS hardware constants (physical facts — do not "tune") ---
@@ -926,7 +927,7 @@ def _resolve_active_mask(active_mask: Optional[Sequence[bool]], dead_capsule: Op
     return None
 
 
-class PolarisBeamformer(MicController):
+class PolarisBeamformer(PreampHost, MicController):
     """Live delay-and-sum beam + dominant-talker DOA for the POLARIS 8-array.
 
     Subclasses :class:`~conf_pipeline_control.control.MicController` for lifecycle,
@@ -978,6 +979,8 @@ class PolarisBeamformer(MicController):
         agc_max_gain_db: float = DEFAULT_AGC_MAX_GAIN_DB,                 # clamp |applied AGC gain| to ±this
         agc_slew_alpha: float = DEFAULT_AGC_SLEW_ALPHA,                   # per-block EMA slew on the gain
         agc_silence_db: float = DEFAULT_AGC_SILENCE_DB,                   # hold gain below this output RMS
+        preamp_gain_db: float = 0.0,                                     # mic-INPUT preamp gain (dB); 0 = no-op
+        preamp_auto: bool = False,                                       # auto headroom stager (analog track)
         post_nr: bool = False,                                           # post-beam spectral-gate NR (local fallback)
         post_nr_floor_db: float = DEFAULT_POST_NR_FLOOR_DB,              # NR residual floor / suppression depth
         post_nr_oversub: float = DEFAULT_POST_NR_OVERSUB,               # NR Wiener over-subtraction strength
@@ -1064,6 +1067,10 @@ class PolarisBeamformer(MicController):
             TargetLoudnessAgc(target_db=agc_target_db, max_gain_db=agc_max_gain_db,
                               slew_alpha=agc_slew_alpha, silence_db=agc_silence_db)
             if agc_target_db is not None else None)
+        # mic-INPUT preamp: uniform front-end gain on the raw block BEFORE the beam (spatially neutral;
+        # see test_preamp_spatial_neutrality). OFF unless gain != 0 / auto / a hw_gain is injected, so
+        # the default path is a zero-overhead no-op. Built numpy-free (deterministic unit tests).
+        self._init_preamp(gain_db=preamp_gain_db, auto=preamp_auto)
         # post-beam noise suppression (P3): a light single-channel spectral gate on the mono output, a
         # LOCAL fallback for when the OCTOVOX cloud cleaning path isn't running. OFF unless post_nr; the
         # suppressor object is built in _setup_runtime (needs numpy) and reset in reset_transient.
@@ -1509,6 +1516,7 @@ class PolarisBeamformer(MicController):
         external owner (BeamEngine) feeding a shared input stream — see
         :meth:`prepare_external`. Realtime-safe: no device, no thread joins, and only bounded
         per-block numpy work (a few small array allocations, like the rest of the DSP path)."""
+        block = self._apply_preamp(block)          # uniform mic-input gain BEFORE beam + covariance (no-op when off)
         np = self._np
         with self._beam_lock:
             mono = self._beam.process(block)

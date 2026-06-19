@@ -346,6 +346,27 @@ class MultiKitController:
             else:
                 self._kit_gain_db[kit] = g
 
+    # ---- mic-INPUT preamp (per-kit input staging — distinct from the single combined-output AGC) ----
+    def set_preamp_gain_db(self, gain_db: float, *, kit: Optional[int] = None) -> None:
+        """Set a kit's mic-INPUT preamp gain (dB), or all kits' (``kit=None``). Forwarded to each
+        kit's beamformer; this is input gain staging, NOT the combined-output gain (``set_gain_db``).
+        Snapshots the engine list under the lock and calls the engines' realtime-safe setters outside
+        it (so the controller lock is never held across a per-block-thread-visible write)."""
+        with self._lock:
+            engines = list(self._engines) if kit is None else [self._engines[kit]]
+        for eng in engines:
+            if eng is not None:
+                eng.set_preamp_gain_db(gain_db)
+
+    def set_preamp_auto(self, on: bool, *, kit: Optional[int] = None) -> None:
+        """Toggle the auto headroom stager on a kit's engine, or all kits' (inert until the analog
+        track wires a stager)."""
+        with self._lock:
+            engines = list(self._engines) if kit is None else [self._engines[kit]]
+        for eng in engines:
+            if eng is not None:
+                eng.set_preamp_auto(on)
+
     # ---- audio: per-kit tap (Invariant C) + combined producer ----
     def _lazy_np(self) -> Any:
         if self._np is None:

@@ -28,6 +28,7 @@ from typing import Any, Optional
 from .audio import controls_available, missing_dependencies
 from .beamformer import BeamDesign
 from .control import MicController
+from .preamp import PreampHost
 from .geometry import SOUND_SPEED_MPS, ArrayGeometry
 from .polaris_beamformer import (
     DEFAULT_DEREVERB_BETA,
@@ -55,7 +56,7 @@ def _install_hint() -> str:
     )
 
 
-class LiveBeamController(MicController):
+class LiveBeamController(PreampHost, MicController):
     """Drive a physical array: capture → per-bin beamform → metered mono output."""
 
     backend = "live"
@@ -85,6 +86,8 @@ class LiveBeamController(MicController):
         aec_n_taps: int = 16,
         aec_mu: float = 0.3,
         aec_ref_device: Optional[int] = None,
+        preamp_gain_db: float = 0.0,            # mic-INPUT preamp gain (dB); 0 = no-op
+        preamp_auto: bool = False,              # auto headroom stager (analog track)
     ):
         super().__init__(geometry, n_channels=geometry.n_channels)
         self.device = device
@@ -94,6 +97,8 @@ class LiveBeamController(MicController):
         self.output_device = output_device     # None → system default output
         # opt-in spatial-covariance tap for DOA / auto-steer (off ⇒ zero overhead)
         self.track_covariance = track_covariance
+        # mic-INPUT preamp: uniform front-end gain on the raw block before the STFT beamformer (no-op when off).
+        self._init_preamp(gain_db=preamp_gain_db, auto=preamp_auto)
         # post-beam noise reducer on the mono output (the same engine the A/B BeamEngine uses), so the
         # auto-steer / zone live paths get OCTOVOX-style cleaning too. OFF by default. "gate" = light
         # spectral gate; "omlsa"/"wiener" = the OCTOVOX-derived StreamingCleaner. Built in _build_post_nr().
@@ -403,6 +408,7 @@ class LiveBeamController(MicController):
         """Beamform one HOP-sized block → post-gain mono output (HOP,). Also
         updates the (pre-gain) meter level and writes the WAV if recording."""
         np = self._np
+        indata = self._apply_preamp(indata)            # uniform mic-input gain BEFORE the STFT + covariance (no-op when off)
         # slide a FRAME-long window: drop oldest HOP, append new HOP
         self._inbuf[:-_HOP, :] = self._inbuf[_HOP:, :]
         self._inbuf[-_HOP:, :] = indata[:_HOP, :]

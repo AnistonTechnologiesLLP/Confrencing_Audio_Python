@@ -91,6 +91,8 @@ class AutoSteerController:
         aec_n_taps: int = 16,
         aec_mu: float = 0.3,
         aec_ref_device: Optional[int] = None,
+        preamp_gain_db: float = 0.0,            # mic-INPUT preamp gain (dB); 0 = no-op
+        preamp_auto: bool = False,              # auto headroom stager (analog track)
     ):
         self.geometry = geometry
         self.sector = sector
@@ -128,6 +130,8 @@ class AutoSteerController:
             aec_n_taps=aec_n_taps,
             aec_mu=aec_mu,
             aec_ref_device=aec_ref_device,
+            preamp_gain_db=preamp_gain_db,
+            preamp_auto=preamp_auto,
         )
         self._thread: Optional[threading.Thread] = None
         self._stop = threading.Event()

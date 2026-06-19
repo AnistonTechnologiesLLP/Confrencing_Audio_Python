@@ -114,3 +114,50 @@ class InputPreamp:
         """Drop any auto-stager streaming state (atomic rebind), mirroring ``TargetLoudnessAgc.reset``."""
         if self._auto_stager is not None:
             self._auto_stager.reset()
+
+
+class PreampHost:
+    """Mixin giving a live backend a mic-input preamp with a one-line front-end insert and
+    realtime-safe setters reachable through the GUI's duck-typed ``_active_ctl`` surface.
+
+    A host calls :meth:`_init_preamp` in its ``__init__`` and :meth:`_apply_preamp` at the FRONT of its
+    per-block process method (before the beam and the covariance read, so DOA stays consistent with what
+    is heard). The mixin defines no ``__init__`` and no state beyond ``_preamp`` (a ``None`` class
+    default), so it composes with any backend with no MRO surprises. The analog track extends it with
+    the debounced hardware-gain tick on the backend's worker thread."""
+
+    _preamp: Optional[InputPreamp] = None     # class default → safe before _init_preamp / when off
+
+    def _init_preamp(self, *, gain_db: float = DEFAULT_PREAMP_GAIN_DB, auto: bool = False,
+                     hw_gain: Optional[HwGain] = None) -> None:
+        """Build the preamp only when the feature is actually on, so the default path is a
+        zero-overhead no-op and the existing suite stays byte-identical."""
+        self._preamp = (InputPreamp(gain_db=gain_db, auto=auto, hw_gain=hw_gain)
+                        if (gain_db != 0.0 or auto or hw_gain is not None) else None)
+
+    def _apply_preamp(self, block: Any) -> Any:
+        """Uniform front-end gain on the raw block; a no-op when the preamp is off."""
+        p = self._preamp
+        return p.process_block(block) if p is not None else block
+
+    def set_preamp_gain_db(self, gain_db: float) -> None:
+        """Set the manual mic-input gain (dB). Realtime-safe: a single atomic float write, or an atomic
+        reference rebind when the preamp is lazily created on first use (the audio thread reads
+        ``_preamp`` lock-free via the ``is not None`` guard)."""
+        p = self._preamp
+        if p is None:
+            if float(gain_db) == 0.0:
+                return                         # stay off — no allocation for a no-op set
+            self._preamp = InputPreamp(gain_db=gain_db)
+        else:
+            p.set_gain_db(gain_db)
+
+    def set_preamp_auto(self, on: bool) -> None:
+        """Toggle the auto headroom stager (inert until the analog track wires a stager)."""
+        p = self._preamp
+        if p is None:
+            if not on:
+                return
+            self._preamp = InputPreamp(auto=True)
+        else:
+            p.set_auto(on)
