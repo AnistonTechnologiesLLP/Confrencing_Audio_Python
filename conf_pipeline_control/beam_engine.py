@@ -86,6 +86,8 @@ class BeamEngine:
         output_queue_size: int = 8,
         assumed_range_m: Optional[float] = None,
         beam_bandlimit_hz: Any = _AUTO,
+        preamp_gain_db: Any = _AUTO,            # one mic-INPUT preamp gain for both back-ends; _AUTO = off
+        preamp_auto: Any = _AUTO,               # one auto-headroom toggle for both back-ends (analog track)
         monitor: bool = False,
         output_device: Optional[int] = None,
     ):
@@ -104,6 +106,15 @@ class BeamEngine:
         if beam_bandlimit_hz is not _AUTO:
             scfg = {"beam_bandlimit_hz": beam_bandlimit_hz, **scfg}
             gcfg = {"beam_bandlimit_hz": beam_bandlimit_hz, **gcfg}
+        # Mic-INPUT preamp is shared by both back-ends on the one POLARIS stream (it sits before the
+        # beam, so a single setting keeps the A/B pair in lockstep). Inject into both unless an explicit
+        # per-back-end cfg key already set it. Omit (the _AUTO default) ⇒ each back-end stays off (0 dB).
+        if preamp_gain_db is not _AUTO:
+            scfg = {"preamp_gain_db": preamp_gain_db, **scfg}
+            gcfg = {"preamp_gain_db": preamp_gain_db, **gcfg}
+        if preamp_auto is not _AUTO:
+            scfg = {"preamp_auto": preamp_auto, **scfg}
+            gcfg = {"preamp_auto": preamp_auto, **gcfg}
 
         # Both back-ends share the SAME device(None)/fs/blocksize so a fed block fits both.
         self._steered = PolarisBeamformer(
@@ -224,6 +235,17 @@ class BeamEngine:
         steered↔grid A/B switches (it lives on the steered back-end). See
         :meth:`conf_pipeline_control.polaris_beamformer.PolarisBeamformer.set_steering`."""
         self._steered.set_steering(azimuth_deg)
+
+    def set_preamp_gain_db(self, gain_db: float) -> None:
+        """Set the mic-INPUT preamp gain (dB) on BOTH back-ends so the A/B pair stays in lockstep
+        (the preamp sits before the beam, shared on the one stream). Realtime-safe scalar write."""
+        self._steered.set_preamp_gain_db(gain_db)
+        self._grid.set_preamp_gain_db(gain_db)
+
+    def set_preamp_auto(self, on: bool) -> None:
+        """Toggle the auto headroom stager on BOTH back-ends (inert until the analog track)."""
+        self._steered.set_preamp_auto(on)
+        self._grid.set_preamp_auto(on)
 
     @property
     def active_nulls(self) -> list:

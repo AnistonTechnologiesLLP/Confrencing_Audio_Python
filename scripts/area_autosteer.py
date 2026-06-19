@@ -70,6 +70,9 @@ def main() -> int:
     ap.add_argument("--monitor", action="store_true", help="play the extracted audio (use HEADPHONES)")
     ap.add_argument("--output-device", type=int, default=None, help="monitor output device index")
     ap.add_argument("--record", default=None, help="path to record the extracted mono WAV")
+    ap.add_argument("--preamp-gain-db", type=float, default=0.0,
+                    help="manual mic-input level trim (dB) before the beamformer — software gain; "
+                         "does NOT improve SNR (the output AGC cancels it when on). 0 = no change")
     args = ap.parse_args()
 
     if not cc.controls_available():
@@ -95,6 +98,7 @@ def main() -> int:
         monitor=args.monitor,
         output_device=args.output_device,
         record_path=args.record,
+        preamp_gain_db=args.preamp_gain_db,
     )
 
     print(

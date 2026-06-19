@@ -48,6 +48,7 @@ from typing import Any, Callable, List, Optional, Sequence, Tuple
 
 from .audio import controls_available, list_input_devices, missing_dependencies
 from .control import MicController
+from .preamp import PreampHost
 from .geometry import SOUND_SPEED_MPS, ArrayGeometry, sensibel_8, with_active_channels
 from .tracking import ExponentialTracker, ValueSmoother
 from . import doa
@@ -208,7 +209,7 @@ def score_grid(monos: Any, win: Any, band_idx: Any, nfft: int) -> Any:
 # --------------------------------------------------------------------------- #
 # The module
 # --------------------------------------------------------------------------- #
-class VirtualMicGrid(MicController):
+class VirtualMicGrid(PreampHost, MicController):
     """Live virtual-microphone-grid selection beamformer for the POLARIS 8-array.
 
     Subclasses :class:`~conf_pipeline_control.control.MicController` for lifecycle, mute/gain,
@@ -244,6 +245,8 @@ class VirtualMicGrid(MicController):
         tracker: Optional[ValueSmoother] = None,   # swap the selection smoother (default: EMA)
         vad_floor_db: Optional[float] = DEFAULT_VAD_FLOOR_DB,   # hold seat through silence; None/≤0 off
         beam_bandlimit_hz: Optional[float] = DEFAULT_BEAM_BANDLIMIT_HZ,   # None/0 disables
+        preamp_gain_db: float = 0.0,               # mic-INPUT preamp gain (dB); 0 = no-op
+        preamp_auto: bool = False,                 # auto headroom stager (analog track)
         output_callback: Optional[Callable[[Any], None]] = None,
         output_queue_size: int = 8,
         output_device: Optional[int] = None,
@@ -280,6 +283,8 @@ class VirtualMicGrid(MicController):
         self.beam_bandlimit_hz = beam_bandlimit_hz
         self.output_device = output_device
         self.monitor = monitor
+        # mic-INPUT preamp: uniform front-end gain on the raw block before delay-and-sum (no-op when off).
+        self._init_preamp(gain_db=preamp_gain_db, auto=preamp_auto)
 
         # Fixed focus grid (stdlib — so grid_points() works without numpy). Delays (numpy) are
         # precomputed once in _open(). The grid never moves.
@@ -454,6 +459,7 @@ class VirtualMicGrid(MicController):
         Updates the selection (and `selected_xy`/`scores()`) and level. Used both by
         :meth:`_cb_input` (standalone) and by an external owner (BeamEngine) feeding a
         shared input stream — see :meth:`prepare_external`."""
+        block = self._apply_preamp(block)                    # uniform mic-input gain BEFORE the grid (no-op when off)
         np = self._np
         x = np.asarray(block, dtype=float)                   # (B, M)
         B = x.shape[0]

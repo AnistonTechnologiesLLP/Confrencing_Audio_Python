@@ -134,6 +134,40 @@ def test_beameng_monitor_mute_gain_route_to_engine(win):
     assert eng.gain_db == -6.0                                     # Gain routes to the engine
 
 
+def test_preamp_card_present_and_default_off(win):
+    """The 'Mic input' card exists with a sane software-trim spin defaulting to 0 dB (off)."""
+    panel = win.panels["live"]
+    assert "mic" in panel._live_cards
+    assert panel.live_preamp_gain.value() == 0.0                   # off by default
+    assert panel.live_preamp_gain.suffix() == " dB"
+    assert (panel.live_preamp_gain.minimum(), panel.live_preamp_gain.maximum()) == (-24.0, 24.0)
+
+
+def test_preamp_gain_routes_through_active_ctl_to_engine(win):
+    """The manual mic-input gain routes via _active_ctl to the active session's preamp; for the A/B
+    engine it fans to both back-ends (so the shared input gain stays in lockstep)."""
+    import conf_pipeline_control as cc
+    st = win.state
+    st.set_config(_config_with_array_and_seats(bearing=0.0))
+    panel = win.panels["live"]
+    eng = cc.BeamEngine(device=None, mode="steered")
+    panel._beam_engine = eng
+    assert panel._active_ctl() is eng
+    panel.live_preamp_gain.setValue(6.0)
+    panel._on_preamp_gain_changed(6.0)
+    assert eng._steered._preamp is not None and eng._steered._preamp.gain_db == 6.0
+    assert eng._grid._preamp is not None and eng._grid._preamp.gain_db == 6.0
+
+
+def test_preamp_push_skips_a_controller_without_the_setter(win):
+    """_push_preamp_gain is duck-typed: a session with no preamp (SimulatedMicController / OCTOVOX) is
+    skipped without raising."""
+    panel = win.panels["live"]
+    panel.live_preamp_gain.setValue(-3.0)
+    panel._beam_engine = object()                                  # no set_preamp_gain_db
+    panel._push_preamp_gain()                                      # must not raise
+
+
 def test_beameng_seat_nulling_pushes_other_seats(win):
     """The A/B-engine 'Null the other seats' path: with a matched target seat, push the OTHER seats'
     bearings to the steered back-end via the engine; clear when disabled."""

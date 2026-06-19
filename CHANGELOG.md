@@ -10,6 +10,17 @@ the TS sibling is at matching v5 parity. The desktop app is presented as
 ## [Unreleased]
 
 ### Added
+- **Mic-input preamp — manual level trim** (`conf_pipeline_control.preamp.InputPreamp` + the `PreampHost`
+  mixin; `preamp_gain_db` on every live back-end + `set_preamp_gain_db` on each live control surface; a
+  "Mic input" card in the LIVE panel; CLI `--preamp-gain-db` on the live scripts) — a uniform software gain
+  applied to **all capsules at the front of the chain, before the beamformer**. **Off by default (0 dB)**, so
+  the pipeline is byte-identical when unused. **Spatially neutral**: a uniform input scalar scales the array
+  covariance by `g²` and leaves DOA and the trace-relative-loaded MVDR/LCMV beam unchanged (guarded by a
+  ×0.01–100 sweep test). Deliberately **honest about what it is** — a level trim for input metering / a healthy
+  operating level into level-sensitive DSP, **not an SNR improvement**: a post-ADC software gain scales signal
+  and noise together and the output AGC re-levels it. A hardware-gain probe on the real POLARIS confirmed its
+  capture endpoint exposes only a **cut-only digital volume** (−96…0 dB, no boost above unity), so there is no
+  analog input gain to drive — hence software-trim-only, and no auto/hardware stage. (+24 tests.)
 - **Real-time DeepFilterNet3 voice cleaning** (`post_nr_engine="dfn3"`;
   `conf_pipeline_control.deepfilter_cleaner.StreamingDeepFilter`) — the strongest cleaner now runs **live on the
   audio thread**, not just offline. DeepFilterNet3's official package can't build on this host (Python 3.14 / no

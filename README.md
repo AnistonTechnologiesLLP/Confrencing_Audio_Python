@@ -582,6 +582,16 @@ non-target seat bearings to the steered beam, arbitrated against auto-null by a 
 the remainder). An opt-in **target-loudness AGC** (`agc_target_db`) normalizes the mono
 output level — EMA-slewed, clamped to ±18 dB, and held through silence.
 
+**Mic-input preamp** (LIVE **"Mic input"** card; `preamp_gain_db` / CLI `--preamp-gain-db`): a uniform
+software gain applied to all capsules at the **front** of the chain, before the beam. Off by default
+(0 dB), so the pipeline is byte-identical when unused. It is **spatially neutral** — a uniform input
+scalar scales the array covariance by `g²` and leaves DOA and the trace-relative-loaded MVDR/LCMV beam
+unchanged — and deliberately **honest**: a level trim (input metering / a healthy operating level into
+level-sensitive DSP), **not** an SNR gain, because a post-ADC software multiply scales signal and noise
+together and the output AGC re-levels it. (A hardware probe confirmed this POLARIS exposes no boostable
+hardware gain — its Windows capture endpoint only attenuates, −96…0 dB — so there is no analog preamp
+to drive; the trim stays software-only.)
+
 **Noise suppression for fans / AC** (LIVE A/B card): **"Suppress steady noise (fans/AC)"**
 (`post_nr`) runs a gentle single-channel Wiener gate on the beam output that learns the
 steady background by **minimum statistics** (the per-bin running minimum — no silence or
