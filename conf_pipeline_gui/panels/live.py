@@ -87,6 +87,7 @@ class LivePanel(PanelBase):
         self._clean_monitor = None       # CleanMonitor while OCTOVOX cleaning is live
         self._autosteer = None           # AutoSteerController while auto-following talkers
         self._beam_engine = None         # BeamEngine while running the steered/grid A/B
+        self._twokit = None              # MultiKitController while running the dual-POLARIS automix
         self._beameng_loc = None         # last BeamEngine current_location (for the overlay tick)
         self._ab_cap = None              # armed ABCapture during a running A/B proof, or None
         self._ab_obj = None              # the live object (engine/autosteer/ctrl) the A/B capture is on
@@ -141,6 +142,7 @@ class LivePanel(PanelBase):
         self.live_listening_mode.addItem("Whole table", "table")
         self.live_listening_mode.addItem("Clean audio (hands-off)", "clean")
         self.live_listening_mode.addItem("Manual (advanced)", "manual")
+        self.live_listening_mode.addItem("Two kits (combined room)", "twokit")
         self.live_listening_mode.setToolTip(
             "Pick how the room is heard; the panel selects the right engine + sensible defaults and hides the "
             "rest. 'Clean audio (hands-off)' follows talkers and turns on AI voice cleaning. "
@@ -560,8 +562,49 @@ class LivePanel(PanelBase):
         ov.body_lay.addLayout(ovf)
         lay.addWidget(ov)
 
+        # --- TWO KITS: dual-POLARIS combined-room automix (one output, follows the active talker) ---
+        twokit = Card("Two kits — combined room coverage")
+        intro = QLabel("Two POLARIS kits cover one room. The app outputs whichever kit currently has the "
+                       "talker (one stream — not two people at once) and cross-fades on the hand-off. "
+                       "Each kit needs its OWN input device.")
+        intro.setWordWrap(True)
+        twokit.body_lay.addWidget(intro)
+        tkf = QFormLayout()
+        tkf.setRowWrapPolicy(QFormLayout.WrapLongRows)
+        tkf.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+        self.live_twokit_dev_a = QComboBox()
+        tkf.addRow("Kit A input", self.live_twokit_dev_a)
+        self.live_twokit_arr_a = QComboBox()
+        tkf.addRow("Kit A array", self.live_twokit_arr_a)
+        self.live_twokit_meter_a = LevelMeter()
+        tkf.addRow("Kit A level", self.live_twokit_meter_a)
+        self.live_twokit_dev_b = QComboBox()
+        tkf.addRow("Kit B input", self.live_twokit_dev_b)
+        self.live_twokit_arr_b = QComboBox()
+        tkf.addRow("Kit B array", self.live_twokit_arr_b)
+        self.live_twokit_meter_b = LevelMeter()
+        tkf.addRow("Kit B level", self.live_twokit_meter_b)
+        self.live_twokit_out = QComboBox()
+        tkf.addRow("Output (headphones)", self.live_twokit_out)
+        self.live_twokit_clean = QComboBox()
+        self.live_twokit_clean.addItem("Off", None)
+        self.live_twokit_clean.addItem("AI voice cleaning (OM-LSA)", "omlsa")
+        self.live_twokit_clean.addItem("Light gate (fast)", "gate")
+        self.live_twokit_clean.setToolTip("Per-kit voice cleaning (fans/AC) on each kit's stream; applied to "
+                                          "both. The selected kit is what you hear.")
+        tkf.addRow("Clean voice", self.live_twokit_clean)
+        self.live_twokit_agc = QCheckBox("Normalize output loudness (AGC)")
+        self.live_twokit_agc.setToolTip("One target-loudness AGC on the combined output so a near vs far "
+                                        "talker land at a consistent level.")
+        tkf.addRow("Loudness", self.live_twokit_agc)
+        twokit.body_lay.addLayout(tkf)
+        self.live_twokit_status = QLabel("Pick a DISTINCT input device for each kit, then Connect.")
+        self.live_twokit_status.setWordWrap(True)
+        twokit.body_lay.addWidget(self.live_twokit_status)
+        lay.addWidget(twokit)
+
         # keep card refs so the Listening-mode selector can collapse the irrelevant ones
-        self._live_cards = {"hw": hw, "beam": beam, "steer": steer, "eng": eng, "ov": ov}
+        self._live_cards = {"hw": hw, "beam": beam, "steer": steer, "eng": eng, "ov": ov, "twokit": twokit}
 
         lay.addStretch(1)
 
@@ -569,7 +612,9 @@ class LivePanel(PanelBase):
         # names) — let them fill the column and elide instead of forcing the
         # whole panel wider.
         for combo in (self.live_array, self.live_device, self.live_rate, self.live_out_device,
-                      self.live_mode, self.live_beameng_mode):
+                      self.live_mode, self.live_beameng_mode,
+                      self.live_twokit_dev_a, self.live_twokit_dev_b, self.live_twokit_arr_a,
+                      self.live_twokit_arr_b, self.live_twokit_out, self.live_twokit_clean):
             combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
             combo.setMinimumContentsLength(6)
             combo.setMinimumWidth(80)
@@ -633,12 +678,15 @@ class LivePanel(PanelBase):
     def _live_busy(self):
         """True if any live session (beamformer, OCTOVOX, auto-steer, or A/B engine) is active."""
         return (self._live_ctl is not None or self._clean_monitor is not None
-                or self._autosteer is not None or self._beam_engine is not None)
+                or self._autosteer is not None or self._beam_engine is not None
+                or self._twokit is not None)
 
     def _active_ctl(self):
         """The active session's mute/gain control surface — the A/B engine (duck-typed:
         ``set_mute``/``set_gain_db``/``read_level``), the auto-steer controller, or the live zone
         controller; ``None`` if none is connected. Sessions are mutually exclusive."""
+        if self._twokit is not None:
+            return self._twokit
         if self._beam_engine is not None:
             return self._beam_engine
         if self._autosteer is not None:
@@ -661,7 +709,7 @@ class LivePanel(PanelBase):
             i = self.live_beameng_mode.findData("steered")
             if i >= 0:
                 self.live_beameng_mode.setCurrentIndex(i)
-        elif mode == "table":
+        elif mode in ("table", "twokit"):
             self.live_autosteer.setChecked(False)
             self.live_beameng.setChecked(False)
             self.live_octovox.setChecked(False)
@@ -676,7 +724,8 @@ class LivePanel(PanelBase):
             "clean": {"hw", "steer"},
             "seat": {"hw", "eng"},
             "table": {"hw", "beam"},
-            "manual": {"hw", "beam", "steer", "eng", "ov"},
+            "manual": {"hw", "beam", "steer", "eng", "ov", "twokit"},
+            "twokit": {"twokit"},
         }.get(mode, {"hw", "beam"})
         for key, card in self._live_cards.items():
             card.set_open(key in show)
@@ -1005,6 +1054,9 @@ class LivePanel(PanelBase):
     def _live_toggle_connect(self):
         if self._live_busy():
             self._live_disconnect()
+            return
+        if self.live_listening_mode.currentData() == "twokit":
+            self._twokit_connect()
             return
         if self.live_beameng.isChecked():
             self._beameng_connect()
@@ -1451,7 +1503,51 @@ class LivePanel(PanelBase):
         if a.error:
             self.live_status.setText(f"Auto-steer: {a.error[:60]}")
 
+    def _twokit_connect(self):
+        """Start the dual-POLARIS automix: two kits → select the active talker → one combined output."""
+        if not cc.controls_available():
+            self.live_twokit_status.setText("Two-kit mode needs the [control] extra (numpy + sounddevice).")
+            return
+        dev_a = self.live_twokit_dev_a.currentData()
+        dev_b = self.live_twokit_dev_b.currentData()
+        if dev_a is not None and dev_a == dev_b:
+            self.live_twokit_status.setText("Pick a DISTINCT input device for each kit (two POLARIS = two devices).")
+            return
+        clean = self.live_twokit_clean.currentData()
+        cfg: dict = {"post_nr": True, "post_nr_engine": clean} if clean is not None else {}
+        specs = [
+            cc.KitSpec(device=dev_a, array_id=self.live_twokit_arr_a.currentData(), radius_m=0.04, cfg=dict(cfg)),
+            cc.KitSpec(device=dev_b, array_id=self.live_twokit_arr_b.currentData(), radius_m=0.04, cfg=dict(cfg)),
+        ]
+        agc_db = -20.0 if self.live_twokit_agc.isChecked() else None
+        try:
+            ctrl = cc.MultiKitController(specs, output_device=self.live_twokit_out.currentData(),
+                                         sample_rate=44100.0, agc_target_db=agc_db)
+            ctrl.set_gain_db(float(self.live_gain.value()))
+            ctrl.set_mute(self.live_mute.isChecked())
+            ctrl.start()
+        except Exception as exc:                      # distinct-device guard / hardware open → report, stay disconnected
+            self.live_twokit_status.setText(f"Two-kit connect failed: {exc}")
+            return
+        self._twokit = ctrl
+        self._session_array_id = self.live_twokit_arr_a.currentData()
+        self.live_connect.setText("Disconnect")
+        self.live_mute.setEnabled(True)
+        self.live_gain.setEnabled(True)
+        self.live_twokit_status.setText("Two kits connected — speak in each area; the active kit is output.")
+        self._notify_session_changed()
+
     def _live_disconnect(self):
+        if self._twokit is not None:
+            try:
+                self._twokit.stop()
+            finally:
+                self._twokit = None
+            self.live_mute.setEnabled(True)
+            self.live_gain.setEnabled(True)
+            self.live_twokit_meter_a.reset()
+            self.live_twokit_meter_b.reset()
+            self.live_twokit_status.setText("Disconnected.")
         if self._beam_engine is not None:
             try:
                 self._beam_engine.stop()
@@ -1779,6 +1875,29 @@ class LivePanel(PanelBase):
         cc.write_ab_proof(res, out_dir)
         self.live_status.setText(f"A/B proof saved · {res.headline()} → {out_dir}")
 
+    def _tick_twokit(self):
+        """Drive the combined + per-kit meters and the status readout for the 2-kit automix."""
+        tk = self._twokit
+        if tk is None:
+            return
+
+        def _pct(lvl):
+            if lvl <= 1e-6:
+                return 0.0
+            return max(0.0, min(1.0, (20.0 * math.log10(lvl) + 60.0) / 60.0))
+
+        self.live_meter.set_level(_pct(tk.read_level()))
+        meters = (self.live_twokit_meter_a, self.live_twokit_meter_b)
+        parts = []
+        for s in tk.status():
+            if s.index < len(meters):
+                meters[s.index].set_level(_pct(s.level))
+            tag = "●" if s.active else "○"
+            doa = f"{s.doa_deg:.0f}°" if s.doa_deg is not None else "—"
+            err = f"  ⚠ {s.error}" if s.error else ""
+            parts.append(f"{tag} Kit {s.index + 1}: DOA {doa}{err}")
+        self.live_twokit_status.setText("     ".join(parts))
+
     def _tick_live_meter(self):
         """Update the level meter on a dB scale (−60 dB → 0 %, 0 dB → 100 %), so
         normal speech picked up by a ceiling array is clearly visible rather than
@@ -1787,6 +1906,10 @@ class LivePanel(PanelBase):
         self.live_abproof_btn.setEnabled(self._ab_cap is None and self._ab_target() is not None)
         self._refresh_guide()                # keep the first-run checklist in step with live state (cheap; no-op when hidden)
         self._live_seat = None               # only the DOA paths below re-resolve a seat
+        if self._twokit is not None:
+            self._tick_twokit()
+            self._publish_overlay()
+            return
         if self._beam_engine is not None:
             self._tick_beameng()
             self._publish_overlay()
@@ -1822,6 +1945,46 @@ class LivePanel(PanelBase):
         elif self.live_meter.level() != 0:
             self.live_meter.reset()
         self._publish_overlay()
+
+    def _refresh_twokit_pickers(self, arrays, devs):
+        """Populate the 2-kit device / array / output combos (idle-only, called from refresh).
+        Defaults the two kits to two DISTINCT input devices so Connect works out of the box."""
+        for combo, default_ix in ((self.live_twokit_dev_a, 0), (self.live_twokit_dev_b, 1)):
+            cur = combo.currentData()
+            combo.blockSignals(True)
+            combo.clear()
+            if devs:
+                for d in devs:
+                    combo.addItem(f"[{d.index}] {d.name} ({d.max_input_channels}ch)", d.index)
+            else:
+                combo.addItem("System default", None)
+            ix = combo.findData(cur) if cur is not None else -1
+            if ix < 0:
+                ix = min(default_ix, combo.count() - 1)
+            combo.setCurrentIndex(max(0, ix))
+            combo.blockSignals(False)
+        for combo, default_ix in ((self.live_twokit_arr_a, 0), (self.live_twokit_arr_b, 1)):
+            cur = combo.currentData()
+            combo.blockSignals(True)
+            combo.clear()
+            for a in arrays:
+                combo.addItem(f"{a.label} · {a.id}", a.id)
+            ix = combo.findData(cur) if cur is not None else -1
+            if ix < 0:
+                ix = min(default_ix, combo.count() - 1)
+            if combo.count():
+                combo.setCurrentIndex(max(0, ix))
+            combo.blockSignals(False)
+        from conf_pipeline_control.audio import list_output_devices
+        cur = self.live_twokit_out.currentData()
+        self.live_twokit_out.blockSignals(True)
+        self.live_twokit_out.clear()
+        self.live_twokit_out.addItem("System default", None)
+        for o in list_output_devices():
+            self.live_twokit_out.addItem(f"[{o.index}] {o.name} ({o.max_output_channels}ch)", o.index)
+        ix = self.live_twokit_out.findData(cur) if cur is not None else -1
+        self.live_twokit_out.setCurrentIndex(max(0, ix))
+        self.live_twokit_out.blockSignals(False)
 
     # --------------------------------------------------------------- refresh
     def refresh(self):
@@ -1886,5 +2049,7 @@ class LivePanel(PanelBase):
                     if i >= 0:
                         self.live_out_device.setCurrentIndex(i)
                 self.live_out_device.blockSignals(False)
+
+                self._refresh_twokit_pickers(arrays, devs)   # 2-kit device/array/output pickers
         finally:
             self._refreshing = False
