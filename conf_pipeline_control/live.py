@@ -220,6 +220,18 @@ class LiveBeamController(MicController):
         OCTOVOX-derived :class:`StreamingCleaner`; ``"gate"`` → the light spectral gate. ``None`` if off."""
         if not self.post_nr:
             self._post_nr = None
+        elif self._post_nr_engine == "dfn3":
+            try:
+                from .deepfilter_cleaner import StreamingDeepFilter   # lazy: needs the [dfn] extra (onnxruntime)
+                self._post_nr = StreamingDeepFilter(self.samplerate)
+            except Exception as exc:                          # DFN3 unavailable → keep audio, fall back to the gate
+                import sys
+                print(f"[dfn3] unavailable - falling back to the light gate: {exc}", file=sys.stderr)
+                from .polaris_beamformer import _PostNoiseSuppressor
+                self._post_nr = _PostNoiseSuppressor(
+                    self.samplerate, frame=self._post_nr_frame, floor_db=self._post_nr_floor_db,
+                    oversub=self._post_nr_oversub, warmup_frames=self._post_nr_warmup_frames,
+                    minstat=self._post_nr_minstat)
         elif self._post_nr_engine in ("omlsa", "wiener"):
             from .streaming_cleaner import StreamingCleaner   # lazy: avoids a module-load import cycle
             self._post_nr = StreamingCleaner(
