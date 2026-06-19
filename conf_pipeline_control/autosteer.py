@@ -33,9 +33,11 @@ from .polaris_beamformer import (
     DEFAULT_DEREVERB_BETA,
     DEFAULT_DEREVERB_GMIN_DB,
     DEFAULT_DEREVERB_T60,
+    DEFAULT_POST_NR_AMOUNT,
     DEFAULT_POST_NR_ENGINE,
     DEFAULT_POST_NR_FLOOR_DB,
     DEFAULT_POST_NR_OVERSUB,
+    DEFAULT_POST_NR_PRESERVE_LEVEL,
 )
 
 
@@ -83,6 +85,8 @@ class AutoSteerController:
         post_nr_engine: str = DEFAULT_POST_NR_ENGINE,
         post_nr_floor_db: float = DEFAULT_POST_NR_FLOOR_DB,
         post_nr_oversub: float = DEFAULT_POST_NR_OVERSUB,
+        post_nr_amount: float = DEFAULT_POST_NR_AMOUNT,
+        post_nr_preserve_level: bool = DEFAULT_POST_NR_PRESERVE_LEVEL,
         dereverb: bool = False,
         dereverb_t60: float = DEFAULT_DEREVERB_T60,
         dereverb_beta: float = DEFAULT_DEREVERB_BETA,
@@ -120,6 +124,8 @@ class AutoSteerController:
             post_nr_engine=post_nr_engine,
             post_nr_floor_db=post_nr_floor_db,
             post_nr_oversub=post_nr_oversub,
+            post_nr_amount=post_nr_amount,
+            post_nr_preserve_level=post_nr_preserve_level,
             dereverb=dereverb,
             dereverb_t60=dereverb_t60,
             dereverb_beta=dereverb_beta,

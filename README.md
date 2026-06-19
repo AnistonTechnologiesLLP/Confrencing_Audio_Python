@@ -590,12 +590,16 @@ VAD needed, so it removes always-on fan/AC/HVAC hum the old gate couldn't), with
 the gate never hard-mutes. A **"Cleaner"** picker chooses the engine: **OCTOVOX cleaner
 (OM-LSA)** — OCTOVOX's decision-directed Ephraim–Malah/Cohen denoiser ported to run live on
 the mono output (stronger and more natural on non-stationary noise; pure numpy, ~12 ms) —
-or the **light gate** (the single-pole spectral gate). The same cleaner is available on the
+or the **light gate** (the single-pole spectral gate), or **DeepFilterNet3** — the neural
+denoiser, now running **live** on the audio thread via a self-contained streaming ONNX
+(no torch at runtime; the `[dfn]` extra). The same cleaners are available on the
 **auto-steer** path (its **Clean voice** + **Strength** controls), not just the A/B engine.
 **"Adaptive null (learn room noise)"** switches the steered beam to data-adaptive `mvdr` +
-`auto_null` to spatially **null a directional fan/duct**. All opt-in and fixed at Connect;
-A/B them by ear on the monitor. (DeepFilterNet3 stays an offline path — it needs 48 kHz +
-torch and has no frame-streaming API.)
+`auto_null` to spatially **null a directional fan/duct**. Every cleaner is **level-preserving**
+(a shared speech-gated makeup restores the ~5-7 dB any denoiser strips, so the cleaned voice
+never sounds weak), and the **Strength** combo doubles as a **cleaning-amount** dial that blends
+the original voice back in (less muffled) — Light / Medium / Full. All opt-in and fixed at
+Connect; A/B them by ear on the monitor.
 
 **Caveat:** the ~cm aperture means coarse-zone selection, not
 MXA920/Nureva-scale pinpoint — these isolate a zone or A/B two strategies, they don't

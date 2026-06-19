@@ -176,7 +176,8 @@ def test_streaming_cleaner_gate_mode_delegates_to_base():
 def test_engine_omlsa_builds_streaming_cleaner_and_runs():
     bf = PolarisBeamformer(device=None, post_nr=True, post_nr_engine="omlsa", post_nr_warmup_frames=2)
     bf._setup_runtime()
-    assert isinstance(bf._post_nr, StreamingCleaner) and bf._post_nr.mode == "omlsa"
+    assert isinstance(bf._post_nr, pb._LevelPreservingCleaner)           # level-preserving makeup wraps the cleaner
+    assert isinstance(bf._post_nr._inner, StreamingCleaner) and bf._post_nr.mode == "omlsa"
     rng = np.random.default_rng(10)
     blk = (0.1 * rng.standard_normal((bf.blocksize, bf.n_channels))).astype(float)
     out = bf.process_block(blk)
@@ -186,14 +187,15 @@ def test_engine_omlsa_builds_streaming_cleaner_and_runs():
 def test_engine_wiener_builds_streaming_cleaner():
     bf = PolarisBeamformer(device=None, post_nr=True, post_nr_engine="wiener", post_nr_warmup_frames=2)
     bf._setup_runtime()
-    assert isinstance(bf._post_nr, StreamingCleaner) and bf._post_nr.mode == "wiener"
+    assert isinstance(bf._post_nr._inner, StreamingCleaner) and bf._post_nr.mode == "wiener"
 
 
 def test_engine_default_gate_is_the_base_suppressor():
     bf = PolarisBeamformer(device=None, post_nr=True, post_nr_warmup_frames=2)   # default engine "gate"
     bf._setup_runtime()
-    assert isinstance(bf._post_nr, pb._PostNoiseSuppressor)
-    assert not isinstance(bf._post_nr, StreamingCleaner)
+    assert isinstance(bf._post_nr, pb._LevelPreservingCleaner)
+    assert isinstance(bf._post_nr._inner, pb._PostNoiseSuppressor)
+    assert not isinstance(bf._post_nr._inner, StreamingCleaner)
 
 
 def test_engine_reset_transient_resets_the_cleaner_in_place():
@@ -231,14 +233,14 @@ def _wire_live(bf):
 def test_live_controller_omlsa_builds_streaming_cleaner():
     bf = LiveBeamController(_polaris_geometry(), post_nr=True, post_nr_engine="omlsa")
     bf._build_post_nr()
-    assert isinstance(bf._post_nr, StreamingCleaner) and bf._post_nr.mode == "omlsa"
+    assert isinstance(bf._post_nr._inner, StreamingCleaner) and bf._post_nr.mode == "omlsa"
 
 
 def test_live_controller_gate_builds_base_suppressor():
     bf = LiveBeamController(_polaris_geometry(), post_nr=True, post_nr_engine="gate")
     bf._build_post_nr()
-    assert isinstance(bf._post_nr, pb._PostNoiseSuppressor)
-    assert not isinstance(bf._post_nr, StreamingCleaner)
+    assert isinstance(bf._post_nr._inner, pb._PostNoiseSuppressor)
+    assert not isinstance(bf._post_nr._inner, StreamingCleaner)
 
 
 def test_live_controller_off_builds_no_cleaner():
@@ -267,7 +269,7 @@ def test_autosteer_forwards_post_nr_to_the_live_controller():
     assert a.ctrl.post_nr is True and a.ctrl._post_nr_engine == "omlsa"
     assert a.ctrl._post_nr_floor_db == -22.0 and a.ctrl._post_nr_oversub == 2.0
     a.ctrl._build_post_nr()
-    assert isinstance(a.ctrl._post_nr, StreamingCleaner)
+    assert isinstance(a.ctrl._post_nr._inner, StreamingCleaner)
 
 
 # --------------------------------------------------------------------------- #
