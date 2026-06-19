@@ -1474,8 +1474,17 @@ class PolarisBeamformer(MicController):
         if not self.post_nr:
             self._post_nr = None
         elif self._post_nr_engine == "dfn3":
-            from .deepfilter_cleaner import StreamingDeepFilter   # lazy: needs the [dfn] extra (onnxruntime)
-            self._post_nr = StreamingDeepFilter(self.sample_rate)
+            try:
+                from .deepfilter_cleaner import StreamingDeepFilter   # lazy: needs the [dfn] extra (onnxruntime)
+                self._post_nr = StreamingDeepFilter(self.sample_rate)
+            except Exception as exc:                          # DFN3 unavailable → keep audio, fall back to the gate
+                import sys
+                print(f"[dfn3] unavailable - falling back to the light gate: {exc}", file=sys.stderr)
+                self.error = f"DeepFilterNet3 unavailable: {exc}"
+                self._post_nr = _PostNoiseSuppressor(
+                    self.sample_rate, frame=self._post_nr_frame, floor_db=self._post_nr_floor_db,
+                    oversub=self._post_nr_oversub, gain_alpha=self._post_nr_gain_alpha,
+                    warmup_frames=self._post_nr_warmup_frames, minstat=self._post_nr_minstat)
         elif self._post_nr_engine in ("omlsa", "wiener"):
             from .streaming_cleaner import StreamingCleaner   # lazy: avoids a module-load import cycle
             self._post_nr = StreamingCleaner(
