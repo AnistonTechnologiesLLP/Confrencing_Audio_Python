@@ -42,6 +42,7 @@ from .polaris_beamformer import (
     DEFAULT_DEREVERB_EARLY_MS,
     DEFAULT_DEREVERB_GMIN_DB,
     DEFAULT_DEREVERB_T60,
+    DEFAULT_POST_NR_AMOUNT,
     DEFAULT_POST_NR_FRAME,
     DEFAULT_POST_NR_GAIN_ALPHA,
     DEFAULT_POST_NR_MINSTAT,
@@ -121,7 +122,8 @@ class StreamingCleaner(_PostNoiseSuppressor):
                  minstat_sub: int = DEFAULT_POST_NR_MINSTAT_SUB,
                  minstat_sublen: int = DEFAULT_POST_NR_MINSTAT_SUBLEN,
                  minstat_bias: float = DEFAULT_POST_NR_MINSTAT_BIAS,
-                 power_alpha: float = DEFAULT_POST_NR_POWER_ALPHA):
+                 power_alpha: float = DEFAULT_POST_NR_POWER_ALPHA,
+                 amount: float = DEFAULT_POST_NR_AMOUNT):
         self.mode = mode if mode in ("omlsa", "wiener", "gate") else "omlsa"
         self._alpha = min(1.0, max(0.0, float(alpha)))
         self._gamma_thresh = max(1e-6, float(gamma_thresh))
@@ -133,7 +135,7 @@ class StreamingCleaner(_PostNoiseSuppressor):
             sample_rate, frame=frame, floor_db=float(gmin_db), gain_alpha=gain_alpha,
             warmup_frames=warmup_frames, noise_alpha=noise_alpha, minstat=minstat,
             minstat_sub=minstat_sub, minstat_sublen=minstat_sublen,
-            minstat_bias=minstat_bias, power_alpha=power_alpha)
+            minstat_bias=minstat_bias, power_alpha=power_alpha, amount=amount)
 
     def _init_state(self) -> None:
         super()._init_state()

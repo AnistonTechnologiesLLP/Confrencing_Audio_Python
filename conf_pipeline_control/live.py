@@ -34,11 +34,13 @@ from .polaris_beamformer import (
     DEFAULT_DEREVERB_BETA,
     DEFAULT_DEREVERB_GMIN_DB,
     DEFAULT_DEREVERB_T60,
+    DEFAULT_POST_NR_AMOUNT,
     DEFAULT_POST_NR_ENGINE,
     DEFAULT_POST_NR_FLOOR_DB,
     DEFAULT_POST_NR_FRAME,
     DEFAULT_POST_NR_MINSTAT,
     DEFAULT_POST_NR_OVERSUB,
+    DEFAULT_POST_NR_PRESERVE_LEVEL,
     DEFAULT_POST_NR_WARMUP_FRAMES,
 )
 from .steering import Direction
@@ -78,6 +80,8 @@ class LiveBeamController(PreampHost, MicController):
         post_nr_frame: int = DEFAULT_POST_NR_FRAME,
         post_nr_warmup_frames: int = DEFAULT_POST_NR_WARMUP_FRAMES,
         post_nr_minstat: bool = DEFAULT_POST_NR_MINSTAT,
+        post_nr_amount: float = DEFAULT_POST_NR_AMOUNT,
+        post_nr_preserve_level: bool = DEFAULT_POST_NR_PRESERVE_LEVEL,
         dereverb: bool = False,
         dereverb_t60: float = DEFAULT_DEREVERB_T60,
         dereverb_beta: float = DEFAULT_DEREVERB_BETA,
@@ -109,6 +113,8 @@ class LiveBeamController(PreampHost, MicController):
         self._post_nr_frame = int(post_nr_frame)
         self._post_nr_warmup_frames = int(post_nr_warmup_frames)
         self._post_nr_minstat = bool(post_nr_minstat)
+        self._post_nr_amount = min(1.0, max(0.0, float(post_nr_amount)))
+        self._post_nr_preserve_level = bool(post_nr_preserve_level)
         # real-time dereverb on the mono output, BEFORE the noise reducer (same StreamingDereverb the A/B
         # engine uses). OFF by default. Built in _build_post_nr().
         self.dereverb = bool(dereverb)
@@ -225,18 +231,33 @@ class LiveBeamController(PreampHost, MicController):
         OCTOVOX-derived :class:`StreamingCleaner`; ``"gate"`` → the light spectral gate. ``None`` if off."""
         if not self.post_nr:
             self._post_nr = None
-        elif self._post_nr_engine in ("omlsa", "wiener"):
-            from .streaming_cleaner import StreamingCleaner   # lazy: avoids a module-load import cycle
-            self._post_nr = StreamingCleaner(
-                self.samplerate, mode=self._post_nr_engine, frame=self._post_nr_frame,
-                gmin_db=self._post_nr_floor_db, warmup_frames=self._post_nr_warmup_frames,
-                minstat=self._post_nr_minstat)
         else:
-            from .polaris_beamformer import _PostNoiseSuppressor
-            self._post_nr = _PostNoiseSuppressor(
-                self.samplerate, frame=self._post_nr_frame, floor_db=self._post_nr_floor_db,
-                oversub=self._post_nr_oversub, warmup_frames=self._post_nr_warmup_frames,
-                minstat=self._post_nr_minstat)
+            from .polaris_beamformer import _LevelPreservingCleaner, _PostNoiseSuppressor
+            inner: Any
+            if self._post_nr_engine == "dfn3":
+                try:
+                    from .deepfilter_cleaner import StreamingDeepFilter   # lazy: needs the [dfn] extra (onnxruntime)
+                    inner = StreamingDeepFilter(self.samplerate, mix=self._post_nr_amount)
+                except Exception as exc:                      # DFN3 unavailable → keep audio, fall back to the gate
+                    import sys
+                    print(f"[dfn3] unavailable - falling back to the light gate: {exc}", file=sys.stderr)
+                    inner = _PostNoiseSuppressor(
+                        self.samplerate, frame=self._post_nr_frame, floor_db=self._post_nr_floor_db,
+                        oversub=self._post_nr_oversub, warmup_frames=self._post_nr_warmup_frames,
+                        minstat=self._post_nr_minstat, amount=self._post_nr_amount)
+            elif self._post_nr_engine in ("omlsa", "wiener"):
+                from .streaming_cleaner import StreamingCleaner   # lazy: avoids a module-load import cycle
+                inner = StreamingCleaner(
+                    self.samplerate, mode=self._post_nr_engine, frame=self._post_nr_frame,
+                    gmin_db=self._post_nr_floor_db, warmup_frames=self._post_nr_warmup_frames,
+                    minstat=self._post_nr_minstat, amount=self._post_nr_amount)
+            else:
+                inner = _PostNoiseSuppressor(
+                    self.samplerate, frame=self._post_nr_frame, floor_db=self._post_nr_floor_db,
+                    oversub=self._post_nr_oversub, warmup_frames=self._post_nr_warmup_frames,
+                    minstat=self._post_nr_minstat, amount=self._post_nr_amount)
+            # Wrap so the cleaned voice keeps its loudness (restore the ~5-7 dB the cleaner removes).
+            self._post_nr = _LevelPreservingCleaner(inner) if self._post_nr_preserve_level else inner
         # real-time dereverb (StreamingDereverb): runs on the mono BEFORE the noise reducer; off unless enabled.
         if self.dereverb:
             from .streaming_cleaner import StreamingDereverb

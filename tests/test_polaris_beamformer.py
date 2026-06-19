@@ -859,7 +859,8 @@ def test_post_nr_builds_runs_shape_finite():
     bf = PolarisBeamformer(device=None, post_nr=True, post_nr_warmup_frames=2)
     assert bf.post_nr is True
     bf._setup_runtime()
-    assert isinstance(bf._post_nr, pb._PostNoiseSuppressor)
+    assert isinstance(bf._post_nr, pb._LevelPreservingCleaner)            # makeup wraps the gate
+    assert isinstance(bf._post_nr._inner, pb._PostNoiseSuppressor)
     out = bf.process_block(_analytic_plane_wave(bf.geometry, 0.0, bf.sample_rate, bf.blocksize, 2000.0))
     assert out.shape == (bf.blocksize,) and bool(np.all(np.isfinite(out)))
 
