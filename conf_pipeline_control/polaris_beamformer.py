@@ -1075,7 +1075,7 @@ class PolarisBeamformer(MicController):
         self._post_nr_warmup_frames = int(post_nr_warmup_frames)
         self._post_nr_minstat = bool(post_nr_minstat)
         self._post_nr_engine = str(post_nr_engine)
-        self._post_nr: Optional[_PostNoiseSuppressor] = None
+        self._post_nr: Optional[Any] = None   # _PostNoiseSuppressor | StreamingCleaner | StreamingDeepFilter (duck-typed)
         # real-time dereverberation (StreamingDereverb): runs BEFORE the noise reducer; built in _setup_runtime.
         self.dereverb = bool(dereverb)
         self._dereverb_t60 = float(dereverb_t60)
@@ -1473,6 +1473,9 @@ class PolarisBeamformer(MicController):
         # process(block, noise_gate)/reset() contract, so process_block and reset_transient are untouched.
         if not self.post_nr:
             self._post_nr = None
+        elif self._post_nr_engine == "dfn3":
+            from .deepfilter_cleaner import StreamingDeepFilter   # lazy: needs the [dfn] extra (onnxruntime)
+            self._post_nr = StreamingDeepFilter(self.sample_rate)
         elif self._post_nr_engine in ("omlsa", "wiener"):
             from .streaming_cleaner import StreamingCleaner   # lazy: avoids a module-load import cycle
             self._post_nr = StreamingCleaner(

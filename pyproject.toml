@@ -17,6 +17,7 @@ sim = ["numpy>=1.24"]                                        # far-field validat
 sim-rir = ["pyroomacoustics>=0.7", "numpy>=1.24", "scipy>=1.7"]  # image-source RIR backend
 control = ["numpy>=1.24", "sounddevice>=0.4", "scipy>=1.7"]  # live host-side beamforming; scipy = AEC reference resampling
 octovox = ["numpy>=1.24", "sounddevice>=0.4", "requests>=2.25", "scipy>=1.7"]  # bridge to the OCTOVOX cleaning server
+dfn = ["numpy>=1.24", "scipy>=1.7", "onnxruntime>=1.16"]     # real-time DeepFilterNet3 voice cleaning (bundled streaming ONNX)
 
 [project.scripts]
 conf-pipeline-gui = "conf_pipeline_gui.app:main"
@@ -29,6 +30,7 @@ packages = ["conf_pipeline", "conf_pipeline.sim", "conf_pipeline_gui", "conf_pip
 
 [tool.setuptools.package-data]
 conf_pipeline_gui = ["assets/*.png", "assets/*.ico"]
+conf_pipeline_control = ["models/*.onnx"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -45,5 +47,5 @@ warn_unused_ignores = true
 
 [[tool.mypy.overrides]]
 # Optional-extra deps without type stubs (imported behind availability gates).
-module = ["sounddevice", "sounddevice.*", "pyroomacoustics", "pyroomacoustics.*", "scipy", "scipy.*"]
+module = ["sounddevice", "sounddevice.*", "pyroomacoustics", "pyroomacoustics.*", "scipy", "scipy.*", "onnxruntime", "onnxruntime.*"]
 ignore_missing_imports = true

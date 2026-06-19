@@ -220,6 +220,9 @@ class LiveBeamController(MicController):
         OCTOVOX-derived :class:`StreamingCleaner`; ``"gate"`` → the light spectral gate. ``None`` if off."""
         if not self.post_nr:
             self._post_nr = None
+        elif self._post_nr_engine == "dfn3":
+            from .deepfilter_cleaner import StreamingDeepFilter   # lazy: needs the [dfn] extra (onnxruntime)
+            self._post_nr = StreamingDeepFilter(self.samplerate)
         elif self._post_nr_engine in ("omlsa", "wiener"):
             from .streaming_cleaner import StreamingCleaner   # lazy: avoids a module-load import cycle
             self._post_nr = StreamingCleaner(

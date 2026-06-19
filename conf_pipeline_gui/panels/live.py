@@ -338,6 +338,7 @@ class LivePanel(PanelBase):
         self.live_autosteer_clean = QComboBox()              # OCTOVOX voice cleaning on the auto-steer output
         self.live_autosteer_clean.addItem("Off", None)
         self.live_autosteer_clean.addItem("AI voice cleaning (OM-LSA)", "omlsa")
+        self.live_autosteer_clean.addItem("DeepFilterNet3 (AI, ~60 ms)", "dfn3")
         self.live_autosteer_clean.addItem("Light gate (fast)", "gate")
         self.live_autosteer_clean.setCurrentIndex(0)         # opt-in (Off by default, like the A/B engine)
         self.live_autosteer_clean.setToolTip(
@@ -456,6 +457,7 @@ class LivePanel(PanelBase):
         ef.addRow("Noise depth", self.live_beameng_nr_depth)
         self.live_beameng_nr_engine = QComboBox()            # post_nr engine: AI cleaner (OM-LSA) vs the light gate
         self.live_beameng_nr_engine.addItem("AI voice cleaning (OM-LSA)", "omlsa")
+        self.live_beameng_nr_engine.addItem("DeepFilterNet3 (AI, ~60 ms)", "dfn3")
         self.live_beameng_nr_engine.addItem("Light gate (fast)", "gate")
         self.live_beameng_nr_engine.setCurrentIndex(0)       # default: the OCTOVOX-derived decision-directed cleaner
         self.live_beameng_nr_engine.setToolTip(
@@ -589,6 +591,7 @@ class LivePanel(PanelBase):
         self.live_twokit_clean = QComboBox()
         self.live_twokit_clean.addItem("Off", None)
         self.live_twokit_clean.addItem("AI voice cleaning (OM-LSA)", "omlsa")
+        self.live_twokit_clean.addItem("DeepFilterNet3 (AI, ~60 ms)", "dfn3")
         self.live_twokit_clean.addItem("Light gate (fast)", "gate")
         self.live_twokit_clean.setToolTip("Per-kit voice cleaning (fans/AC) on each kit's stream; applied to "
                                           "both. The selected kit is what you hear.")
