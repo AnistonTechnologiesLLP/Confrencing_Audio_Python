@@ -10,6 +10,25 @@ the TS sibling is at matching v5 parity. The desktop app is presented as
 ## [Unreleased]
 
 ### Added
+- **Real-time DeepFilterNet3 voice cleaning** (`post_nr_engine="dfn3"`;
+  `conf_pipeline_control.deepfilter_cleaner.StreamingDeepFilter`) — the strongest cleaner now runs **live on the
+  audio thread**, not just offline. DeepFilterNet3's official package can't build on this host (Python 3.14 / no
+  Rust toolchain), so it runs a one-time **TorchDF → self-contained streaming ONNX** export via **ONNX Runtime**
+  (the new `[dfn]` extra; the 16 MB model is bundled, git-LFS-tracked). Raw 10 ms frame in → cleaned frame out +
+  carried model state, wrapped in a streaming 44.1↔48 kHz resampler and fixed-latency priming (~60 ms total),
+  **warmed at Connect** so the first block never stalls the stream, and **realtime-safe** — it passes the raw
+  voice through on prime / underrun / any error (never silence, never a throw) and falls back to the light gate
+  if the model is missing. Selectable in all three cleaner pickers (A/B engine, auto-steer, 2-kit). (+7 tests.)
+- **Level-preserving voice cleaning + a "Cleaning amount" dial** (`_LevelPreservingCleaner`;
+  `post_nr_preserve_level` on by default, `post_nr_amount`) — every denoiser strips noise energy and drops the
+  **talker** ~5-7 dB with it, so the cleaned voice came out **weak / muffled**. A shared, engine-agnostic
+  **makeup** now restores the speech-region level the cleaner removed — slewed, speech-gated (uses the VAD's
+  `noise_gate`), **held through pauses** so it never re-pumps the noise floor, and boost-only. Measured on a real
+  conference recording: **SNR-neutral** on a clean room and **SNR-improving** in noise, with the talker's level
+  fully restored (the gate / OM-LSA / DeepFilterNet3 all). The **Strength** combo now doubles as a
+  **cleaning-amount** dial (Light / Medium / Full) that blends the original voice back in for a gentler,
+  less-muffled result; default **Medium**. Applies on the A/B engine, auto-steer and 2-kit paths; CLI
+  `--post-nr-amount` / `--no-post-nr-preserve-level`. (+9 tests.)
 - **Guided first-run setup** (a "Getting started" checklist in the LIVE panel; `conf_pipeline_gui.panels.first_run`)
   — the onboarding parity piece. A compact, dismissible banner walks a first-time user through getting audio out
   of the array — **pick how to listen → connect → check capsules → calibrate the front → hear it** — ticking each

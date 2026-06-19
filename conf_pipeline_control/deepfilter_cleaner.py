@@ -25,7 +25,9 @@ from typing import Any, Optional
 DFN3_SR = 48000          # DeepFilterNet operates at 48 kHz
 DFN3_HOP = 480           # 10 ms @ 48 kHz — the model's frame/hop
 DFN3_STATE_LEN = 45304   # flattened streaming-state tensor length (from the exported model)
+DFN3_LOOKAHEAD = 1440    # model output lag vs input @48k (3 frames; measured by cross-correlation) — dry/wet align
 DEFAULT_ATTEN_LIM_DB = 100.0   # max attenuation the model may apply (100 ≈ unlimited / full cleaning)
+DEFAULT_DFN3_MIX = 1.0   # cleaning amount: 1.0 = full clean; <1 mixes the (lag-aligned) original back in (less muffled)
 
 _DEFAULT_MODEL = Path(__file__).resolve().parent / "models" / "deepfilternet3_streaming.onnx"
 
@@ -67,10 +69,12 @@ class StreamingDeepFilter:
     serialises ``process``/``reset``)."""
 
     def __init__(self, sample_rate: float, *, model_path: Optional[str] = None,
-                 atten_lim_db: float = DEFAULT_ATTEN_LIM_DB, **_ignored: Any):
+                 atten_lim_db: float = DEFAULT_ATTEN_LIM_DB, mix: float = DEFAULT_DFN3_MIX,
+                 **_ignored: Any):
         self.sample_rate = float(sample_rate)
         self._atten_path = str(model_path) if model_path else str(_DEFAULT_MODEL)
         self._atten_lim_db = float(atten_lim_db)
+        self._mix = min(1.0, max(0.0, float(mix)))      # cleaning amount: <1 blends the lag-aligned original back in
         self._lock = threading.Lock()
         self.error: Optional[str] = None       # last process() error (passthrough fallback fired)
         self._np: Any = None
@@ -123,6 +127,7 @@ class StreamingDeepFilter:
         self._from48 = _StreamingResampler(int(self.sample_rate), DFN3_SR, np) if up else None
         self._states = np.zeros(DFN3_STATE_LEN, dtype=np.float32)
         self._in48 = np.zeros(0, dtype=np.float32)     # accumulated 48 kHz input awaiting full frames
+        self._dry48 = np.zeros(DFN3_LOOKAHEAD, dtype=np.float32)  # 48 kHz input history to lag-align the dry/wet mix
         self._outq = np.zeros(0, dtype=np.float32)     # cleaned output at the ENGINE rate, FIFO
         self._primed = False
         self._total_in = 0
@@ -152,6 +157,11 @@ class StreamingDeepFilter:
                         out, self._states, _lsnr = self._sess.run(
                             None, {"input_frame": fr, "states": self._states, "atten_lim_db": self._atten})
                         enh[f * DFN3_HOP:(f + 1) * DFN3_HOP] = np.asarray(out, dtype=np.float32).reshape(-1)
+                    if self._mix < 1.0:                    # "cleaning amount": blend the LAG-ALIGNED original back in
+                        buf = np.concatenate([self._dry48, chunk])
+                        dry = buf[:take]                    # input delayed by DFN3_LOOKAHEAD → aligned to enh
+                        self._dry48 = buf[-DFN3_LOOKAHEAD:].copy()
+                        enh = (self._mix * enh + (1.0 - self._mix) * dry).astype(np.float32)
                     y = self._from48.process(enh) if self._from48 is not None else enh
                     self._outq = np.concatenate([self._outq, y])
                 if not self._primed:

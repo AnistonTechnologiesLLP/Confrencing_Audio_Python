@@ -90,3 +90,21 @@ def test_cleaner_48k_path_no_resampler_runs():
     assert cl._to48 is None and cl._from48 is None
     y = cl.process(_sine(300.0, 480 * 4, 48000), False)
     assert y.shape[0] == 480 * 4
+
+
+@needs_dfn
+def test_cleaner_mix_blends_original_back_in():
+    """`mix` ("cleaning amount") < 1 blends the lag-aligned original back in, so the output differs
+    from full-clean (and stays bounded/same-length) — the gentleness dial for muffling."""
+    rng = np.random.default_rng(0)
+    sig = ((0.2 * rng.standard_normal(48000)).astype(np.float32) + _sine(220.0, 48000, 48000))
+
+    def run(mix):
+        cl = StreamingDeepFilter(48000.0, mix=mix)
+        bs = 480
+        return np.concatenate([cl.process(sig[i:i + bs], False) for i in range(0, len(sig) - bs, bs)])
+
+    full, half, dry = run(1.0), run(0.5), run(0.0)
+    assert full.shape == half.shape == dry.shape
+    assert np.all(np.isfinite(half)) and np.all(np.isfinite(dry))
+    assert not np.allclose(full, half)                        # the mix actually changes the output

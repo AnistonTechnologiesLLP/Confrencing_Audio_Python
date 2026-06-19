@@ -123,6 +123,16 @@ DEFAULT_POST_NR_POWER_ALPHA = 0.8    # per-bin power-smoothing EMA feeding the m
 # StreamingCleaner (a stronger, more natural denoiser; see streaming_cleaner.StreamingCleaner).
 DEFAULT_POST_NR_ENGINE = "gate"      # "gate" | "omlsa" | "wiener"
 
+# Voice-cleaning level preservation + "cleaning amount" (apply to EVERY cleaner engine). Every denoiser
+# strips noise energy and so drops the TALKER ~5-7 dB too — the cleaned voice comes out weak. The shared
+# _LevelPreservingCleaner wrapper restores that (a slewed, speech-gated makeup gain), and `amount` blends
+# each cleaner's gain back toward unity (gentler cleaning → less muffling) as a user "cleaning amount" dial.
+DEFAULT_POST_NR_PRESERVE_LEVEL = True   # wrap the cleaner so the cleaned voice keeps its loudness (escape hatch: False)
+DEFAULT_POST_NR_AMOUNT = 1.0            # cleaning amount: 1.0 = full clean; <1 blends toward passthrough (Light/Medium)
+_POST_NR_MAKEUP_MAX_GAIN_DB = 15.0     # cap the makeup boost (the drop is ~5-7 dB; never run away on a near-silent cleaner)
+_POST_NR_MAKEUP_LEVEL_ALPHA = 0.05     # slow per-block EMA on the in/out speech levels (~0.3 s) feeding the makeup ratio
+_POST_NR_MAKEUP_SLEW_ALPHA = 0.08      # per-block EMA slew on the applied makeup gain (no pumping; held through pauses)
+
 # Real-time dereverberation (StreamingDereverb): a causal port of OCTOVOX's fast spectral late-reverb
 # suppressor (Lebart 2001 / Habets). Runs at the post-beam seam BEFORE the noise reducer. OFF by default.
 DEFAULT_DEREVERB_T60 = 0.5           # assumed room RT60 (s) → the late-reverb decay pole
@@ -793,8 +803,10 @@ class _PostNoiseSuppressor:
                  minstat_sub: int = DEFAULT_POST_NR_MINSTAT_SUB,
                  minstat_sublen: int = DEFAULT_POST_NR_MINSTAT_SUBLEN,
                  minstat_bias: float = DEFAULT_POST_NR_MINSTAT_BIAS,
-                 power_alpha: float = DEFAULT_POST_NR_POWER_ALPHA):
+                 power_alpha: float = DEFAULT_POST_NR_POWER_ALPHA,
+                 amount: float = DEFAULT_POST_NR_AMOUNT):
         self._sr = float(sample_rate)
+        self._amount = min(1.0, max(0.0, float(amount)))   # cleaning amount: <1 blends the per-bin gain toward unity
         self._F = max(2, (int(frame) // 2) * 2)                 # even ≥ 2 (Hann 50%-hop COLA needs even frame)
         self._H = self._F // 2
         self._g_floor = min(1.0, 10.0 ** (float(floor_db) / 20.0))   # ≤ 1: a floor caps suppression, never boosts
@@ -893,7 +905,10 @@ class _PostNoiseSuppressor:
                         if self._noise_frames >= self._warmup:
                             self._engaged = True               # floor trusted → start suppressing
                 if self._engaged:
-                    Y = self._gain(X) * X
+                    g = self._gain(X)
+                    if self._amount < 1.0:                  # "cleaning amount": blend gain toward unity (gentler)
+                        g = self._amount * g + (1.0 - self._amount)
+                    Y = g * X
                     y = np.fft.irfft(Y, n=F)
                     self._ola[:-H] = self._ola[H:]
                     self._ola[-H:] = 0.0
@@ -908,6 +923,78 @@ class _PostNoiseSuppressor:
                 out = np.concatenate([np.zeros(n - self._outq.shape[0]), self._outq])
                 self._outq = self._outq[:0]
             return out.astype(np.float32)
+
+
+class _LevelPreservingCleaner:
+    """Wrap ANY post-beam cleaner (gate / OM-LSA / Wiener / DeepFilterNet3) and restore the talker
+    level it removes — so the cleaned voice doesn't come out **weak / muffled**.
+
+    Every denoiser strips noise energy and, with it, drops the speech ~5-7 dB. This applies one
+    slewed, **speech-gated makeup** gain so the cleaned output's speech level tracks the cleaner's
+    INPUT speech level. Measured behaviour (DFN3, the worst case): the cut is ~uniform across speech
+    and noise, so matching the speech level restores loudness **without changing SNR** (clean SNR
+    preserved, noisy SNR improved) and **without re-pumping the noise floor** — the gain is recomputed
+    only on speech frames (``noise_gate`` False) and **held** through pauses (never ramps up on
+    silence). Boost-only (a cleaner only ever attenuates) and capped, so it can't run away.
+
+    Engine-agnostic and **self-adapting**: a cleaner that loses no level yields a unity makeup (no-op).
+    Same ``process(block, noise_gate) -> block`` / ``reset()`` contract as the inner cleaner, so the
+    engine dispatches to it identically. Realtime-safe: two RMS reads + a scalar multiply per block,
+    inside a try/except so it never throws into the audio callback (falls back to the cleaned block).
+    """
+
+    def __init__(self, inner: Any, *, max_gain_db: float = _POST_NR_MAKEUP_MAX_GAIN_DB,
+                 level_alpha: float = _POST_NR_MAKEUP_LEVEL_ALPHA,
+                 slew_alpha: float = _POST_NR_MAKEUP_SLEW_ALPHA,
+                 silence_db: float = DEFAULT_AGC_SILENCE_DB):
+        self._inner = inner
+        self._gain_max = 10.0 ** (float(max_gain_db) / 20.0)
+        self._silence_rms = 10.0 ** (float(silence_db) / 20.0)
+        self._lin = ExponentialTracker(float(level_alpha))    # slow EMA of the INPUT speech RMS
+        self._lout = ExponentialTracker(float(level_alpha))   # slow EMA of the cleaned-OUTPUT speech RMS
+        self._slew = ExponentialTracker(float(slew_alpha))    # slewed applied gain (held through pauses)
+        self._target = 1.0
+        self.error: Optional[str] = None
+
+    def process(self, block: Any, noise_gate: bool) -> Any:
+        import numpy as np
+
+        try:
+            cleaned = self._inner.process(block, noise_gate)
+        except Exception as exc:                             # a buggy inner cleaner must not kill the stream
+            self.error = f"inner cleaner error: {exc}"
+            return np.asarray(block, dtype=np.float32).reshape(-1)   # raw passthrough — never silence, never a throw
+        try:
+            x = np.asarray(block, dtype=float).reshape(-1)
+            c = np.asarray(cleaned, dtype=float).reshape(-1)
+            rms_in = float(np.sqrt(np.mean(x * x))) if x.size else 0.0
+            if (not noise_gate) and rms_in > self._silence_rms and c.size:   # speech present + above silence
+                rms_out = float(np.sqrt(np.mean(c * c)))
+                lin = float(self._lin.update(rms_in))
+                lout = float(self._lout.update(rms_out))
+                if lout > 1e-9:                              # boost-only: a cleaner only ever attenuates
+                    self._target = min(self._gain_max, max(1.0, lin / lout))
+            g = float(self._slew.update(self._target))       # slew toward the held target every block
+            return (c * g).astype(np.float32)
+        except Exception as exc:                             # never throw into the audio callback
+            self.error = f"level-preserve error: {exc}"
+            return cleaned
+
+    def reset(self) -> None:
+        self._inner.reset()
+        self._lin.reset()
+        self._lout.reset()
+        self._slew.reset()
+        self._target = 1.0
+
+    def __getattr__(self, name: str) -> Any:
+        # Delegate unknown attributes to the wrapped cleaner so duck-typed callers see through the
+        # wrapper — e.g. the ``.mode`` stage-label probe in active_cleaning_stages(), and the inner
+        # cleaner's own state (``_engaged`` / ``_prev_clean`` / ``mode`` / …). Only fires for names
+        # this wrapper does NOT define (process/reset/_inner/_slew/… resolve normally first).
+        if name == "_inner":
+            raise AttributeError(name)
+        return getattr(self._inner, name)
 
 
 def _install_hint() -> str:
@@ -986,6 +1073,8 @@ class PolarisBeamformer(MicController):
         post_nr_warmup_frames: int = DEFAULT_POST_NR_WARMUP_FRAMES,     # frames before NR engages
         post_nr_minstat: bool = DEFAULT_POST_NR_MINSTAT,                # min-statistics floor (VAD-free) vs gated EMA
         post_nr_engine: str = DEFAULT_POST_NR_ENGINE,                   # "gate" | "omlsa" | "wiener" (OCTOVOX cleaner)
+        post_nr_amount: float = DEFAULT_POST_NR_AMOUNT,                 # cleaning amount (1.0 full; <1 gentler/less muffled)
+        post_nr_preserve_level: bool = DEFAULT_POST_NR_PRESERVE_LEVEL,  # restore the level the cleaner removes (no weak voice)
         dereverb: bool = False,                                          # real-time late-reverb suppression (pre-NR)
         dereverb_t60: float = DEFAULT_DEREVERB_T60,                      # assumed room RT60 (s)
         dereverb_beta: float = DEFAULT_DEREVERB_BETA,                    # late-reverb over-subtraction strength
@@ -1075,6 +1164,8 @@ class PolarisBeamformer(MicController):
         self._post_nr_warmup_frames = int(post_nr_warmup_frames)
         self._post_nr_minstat = bool(post_nr_minstat)
         self._post_nr_engine = str(post_nr_engine)
+        self._post_nr_amount = min(1.0, max(0.0, float(post_nr_amount)))
+        self._post_nr_preserve_level = bool(post_nr_preserve_level)
         self._post_nr: Optional[Any] = None   # _PostNoiseSuppressor | StreamingCleaner | StreamingDeepFilter (duck-typed)
         # real-time dereverberation (StreamingDereverb): runs BEFORE the noise reducer; built in _setup_runtime.
         self.dereverb = bool(dereverb)
@@ -1473,29 +1564,36 @@ class PolarisBeamformer(MicController):
         # process(block, noise_gate)/reset() contract, so process_block and reset_transient are untouched.
         if not self.post_nr:
             self._post_nr = None
-        elif self._post_nr_engine == "dfn3":
-            try:
-                from .deepfilter_cleaner import StreamingDeepFilter   # lazy: needs the [dfn] extra (onnxruntime)
-                self._post_nr = StreamingDeepFilter(self.sample_rate)
-            except Exception as exc:                          # DFN3 unavailable → keep audio, fall back to the gate
-                import sys
-                print(f"[dfn3] unavailable - falling back to the light gate: {exc}", file=sys.stderr)
-                self.error = f"DeepFilterNet3 unavailable: {exc}"
-                self._post_nr = _PostNoiseSuppressor(
+        else:
+            inner: Any
+            if self._post_nr_engine == "dfn3":
+                try:
+                    from .deepfilter_cleaner import StreamingDeepFilter   # lazy: needs the [dfn] extra (onnxruntime)
+                    inner = StreamingDeepFilter(self.sample_rate, mix=self._post_nr_amount)
+                except Exception as exc:                      # DFN3 unavailable → keep audio, fall back to the gate
+                    import sys
+                    print(f"[dfn3] unavailable - falling back to the light gate: {exc}", file=sys.stderr)
+                    self.error = f"DeepFilterNet3 unavailable: {exc}"
+                    inner = _PostNoiseSuppressor(
+                        self.sample_rate, frame=self._post_nr_frame, floor_db=self._post_nr_floor_db,
+                        oversub=self._post_nr_oversub, gain_alpha=self._post_nr_gain_alpha,
+                        warmup_frames=self._post_nr_warmup_frames, minstat=self._post_nr_minstat,
+                        amount=self._post_nr_amount)
+            elif self._post_nr_engine in ("omlsa", "wiener"):
+                from .streaming_cleaner import StreamingCleaner   # lazy: avoids a module-load import cycle
+                inner = StreamingCleaner(
+                    self.sample_rate, mode=self._post_nr_engine, frame=self._post_nr_frame,
+                    gmin_db=self._post_nr_floor_db, gain_alpha=self._post_nr_gain_alpha,
+                    warmup_frames=self._post_nr_warmup_frames, minstat=self._post_nr_minstat,
+                    amount=self._post_nr_amount)
+            else:
+                inner = _PostNoiseSuppressor(
                     self.sample_rate, frame=self._post_nr_frame, floor_db=self._post_nr_floor_db,
                     oversub=self._post_nr_oversub, gain_alpha=self._post_nr_gain_alpha,
-                    warmup_frames=self._post_nr_warmup_frames, minstat=self._post_nr_minstat)
-        elif self._post_nr_engine in ("omlsa", "wiener"):
-            from .streaming_cleaner import StreamingCleaner   # lazy: avoids a module-load import cycle
-            self._post_nr = StreamingCleaner(
-                self.sample_rate, mode=self._post_nr_engine, frame=self._post_nr_frame,
-                gmin_db=self._post_nr_floor_db, gain_alpha=self._post_nr_gain_alpha,
-                warmup_frames=self._post_nr_warmup_frames, minstat=self._post_nr_minstat)
-        else:
-            self._post_nr = _PostNoiseSuppressor(
-                self.sample_rate, frame=self._post_nr_frame, floor_db=self._post_nr_floor_db,
-                oversub=self._post_nr_oversub, gain_alpha=self._post_nr_gain_alpha,
-                warmup_frames=self._post_nr_warmup_frames, minstat=self._post_nr_minstat)
+                    warmup_frames=self._post_nr_warmup_frames, minstat=self._post_nr_minstat,
+                    amount=self._post_nr_amount)
+            # Wrap so the cleaned voice keeps its loudness (restore the ~5-7 dB the cleaner removes).
+            self._post_nr = _LevelPreservingCleaner(inner) if self._post_nr_preserve_level else inner
         # real-time dereverb (StreamingDereverb): runs on the mono BEFORE the noise reducer; off unless enabled.
         if self.dereverb:
             from .streaming_cleaner import StreamingDereverb   # lazy: avoids a module-load import cycle
@@ -1939,6 +2037,11 @@ def _demo(argv: Optional[Sequence[str]] = None) -> int:
     ap.add_argument("--post-nr-engine", choices=("gate", "omlsa", "wiener"), default=DEFAULT_POST_NR_ENGINE,
                     help=f"post-NR engine: 'gate' light spectral gate, or the OCTOVOX-derived decision-directed "
                          f"'omlsa'/'wiener' cleaner (default {DEFAULT_POST_NR_ENGINE})")
+    ap.add_argument("--post-nr-amount", type=float, default=DEFAULT_POST_NR_AMOUNT,
+                    help=f"cleaning amount 0..1: 1.0 = full clean, <1 blends the original voice back in (less "
+                         f"muffled) (default {DEFAULT_POST_NR_AMOUNT})")
+    ap.add_argument("--no-post-nr-preserve-level", dest="post_nr_preserve_level", action="store_false",
+                    help="do NOT restore the level the cleaner removes (default: preserve, so the voice isn't weak)")
     ap.add_argument("--auto-null", action="store_true",
                     help="null detected interferers (the non-dominant talkers); superdirective/mvdr only")
     ap.add_argument("--monitor", action="store_true", help="play the mono output (use HEADPHONES)")
@@ -1973,7 +2076,8 @@ def _demo(argv: Optional[Sequence[str]] = None) -> int:
         agc_target_db=args.agc_target_db,
         post_nr=args.post_nr, post_nr_floor_db=args.post_nr_floor_db,
         post_nr_oversub=args.post_nr_oversub, post_nr_minstat=args.post_nr_minstat,
-        post_nr_engine=args.post_nr_engine,
+        post_nr_engine=args.post_nr_engine, post_nr_amount=args.post_nr_amount,
+        post_nr_preserve_level=args.post_nr_preserve_level,
         monitor=args.monitor, output_device=args.output_device,
         wait_for_device=args.wait, **bl_kw,
     )

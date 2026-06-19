@@ -32,6 +32,17 @@ from PySide6.QtWidgets import (
 import conf_pipeline as cp
 import conf_pipeline_control as cc
 
+# "Cleaning amount" per Strength step (Gentle / Medium / Aggressive index → post_nr_amount): how much of the
+# cleaner is applied vs the original voice blended back. Lower = gentler / less muffling. The shared
+# level-preserving makeup (always on) keeps the voice from coming out weak at any setting.
+_CLEANING_AMOUNTS = (0.5, 0.75, 1.0)
+_CLEANING_AMOUNT_DEFAULT = _CLEANING_AMOUNTS[1]    # Medium
+
+
+def _clean_amount(depth_combo) -> float:
+    """Map a Strength combo (Gentle / Medium / Aggressive) to a post_nr cleaning amount."""
+    return _CLEANING_AMOUNTS[max(0, min(len(_CLEANING_AMOUNTS) - 1, depth_combo.currentIndex()))]
+
 from .common import (
     Card,
     LevelMeter,
@@ -355,8 +366,9 @@ class LivePanel(PanelBase):
         self.live_autosteer_depth.addItem("Aggressive", (-22.0, 2.0))
         self.live_autosteer_depth.setCurrentIndex(1)         # Medium
         self.live_autosteer_depth.setToolTip(
-            "How hard the cleaner suppresses. Aggressive cuts deeper but can dull speech; Gentle is safest. "
-            "Only applies when 'Clean voice' is on."
+            "How much cleaning is applied. Aggressive cuts deepest; Gentle/Medium blend more of the original "
+            "voice back in so it stays natural (less muffled). The voice level is preserved automatically at "
+            "every setting, so cleaning never makes you sound weak. Only applies when 'Clean voice' is on."
         )
         self.live_autosteer_depth.setEnabled(False)
         asf.addRow("Strength", self.live_autosteer_depth)
@@ -450,8 +462,10 @@ class LivePanel(PanelBase):
         self.live_beameng_nr_depth.addItem("Aggressive", (-22.0, 2.0))
         self.live_beameng_nr_depth.setCurrentIndex(1)        # Medium (= the engine default)
         self.live_beameng_nr_depth.setToolTip(
-            "How hard the noise gate suppresses. Aggressive cuts the fan/AC deeper but can dull speech; "
-            "Gentle is safest. Only applies when 'Suppress steady noise' is on."
+            "How much cleaning is applied. Aggressive cuts the fan/AC deepest; Gentle/Medium blend more of the "
+            "original voice back in so it stays natural (less muffled). The voice level is preserved "
+            "automatically at every setting, so cleaning never makes you sound weak. Only applies when "
+            "'Suppress steady noise' is on."
         )
         self.live_beameng_nr_depth.setEnabled(False)         # enabled when the engine is ticked
         ef.addRow("Noise depth", self.live_beameng_nr_depth)
@@ -1184,6 +1198,7 @@ class LivePanel(PanelBase):
                 post_nr=clean is not None,                              # AI cleaning on the auto-steer output
                 post_nr_engine=clean or "gate",
                 post_nr_floor_db=nr_floor_db, post_nr_oversub=nr_oversub,
+                post_nr_amount=_clean_amount(self.live_autosteer_depth),  # cleaning amount (keeps the voice full-bodied)
                 dereverb=self.live_autosteer_dereverb.isChecked(),      # real-time room-echo suppression
                 aec=self.live_autosteer_aec.isChecked(),                # cancel far-end loudspeaker echo
             )
@@ -1220,6 +1235,7 @@ class LivePanel(PanelBase):
             cfg["post_nr"] = True                     # noise reducer on the output (steady fans/AC)
             floor_db, oversub = self.live_beameng_nr_depth.currentData()   # Gentle / Medium / Aggressive
             cfg["post_nr_floor_db"], cfg["post_nr_oversub"] = floor_db, oversub
+            cfg["post_nr_amount"] = _clean_amount(self.live_beameng_nr_depth)   # cleaning amount (full-bodied voice)
             cfg["post_nr_engine"] = self.live_beameng_nr_engine.currentData()   # AI OM-LSA cleaner vs light gate
         if self.live_beameng_dereverb.isChecked():
             cfg["dereverb"] = True                    # real-time late-reverb suppression before the cleaner
@@ -1517,7 +1533,10 @@ class LivePanel(PanelBase):
             self.live_twokit_status.setText("Pick a DISTINCT input device for each kit (two POLARIS = two devices).")
             return
         clean = self.live_twokit_clean.currentData()
-        cfg: dict = {"post_nr": True, "post_nr_engine": clean} if clean is not None else {}
+        # 2-kit has one clean combo (no Strength row) → default to the Medium cleaning amount; the always-on
+        # level-preserving makeup keeps each kit's voice full-bodied (not weak).
+        cfg: dict = ({"post_nr": True, "post_nr_engine": clean, "post_nr_amount": _CLEANING_AMOUNT_DEFAULT}
+                     if clean is not None else {})
         specs = [
             cc.KitSpec(device=dev_a, array_id=self.live_twokit_arr_a.currentData(), radius_m=0.04, cfg=dict(cfg)),
             cc.KitSpec(device=dev_b, array_id=self.live_twokit_arr_b.currentData(), radius_m=0.04, cfg=dict(cfg)),
