@@ -213,6 +213,29 @@ class LivePanel(PanelBase):
         hw.body_lay.addLayout(ctl_row)
         lay.addWidget(hw)
 
+        # --- MIC INPUT: software level trim before the beamformer ---
+        mic = Card("Mic input — level trim")
+        mf = QFormLayout()
+        mf.setRowWrapPolicy(QFormLayout.WrapLongRows)
+        mf.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+        self.live_preamp_gain = NoWheelDoubleSpinBox()
+        self.live_preamp_gain.setRange(-24.0, 24.0)          # software range; control clamps to ±(60, 24) dB
+        self.live_preamp_gain.setSingleStep(0.5)
+        self.live_preamp_gain.setDecimals(1)
+        self.live_preamp_gain.setValue(0.0)
+        self.live_preamp_gain.setSuffix(" dB")
+        self.live_preamp_gain.setToolTip(
+            "Manual gain on the mic input, applied uniformly to all capsules before the beamformer. A "
+            "software level trim (for input metering / a healthy operating level) — it does NOT improve "
+            "SNR: it scales signal and noise together and the output AGC re-levels it. This POLARIS "
+            "exposes no boostable hardware gain (its capture volume only attenuates). 0 dB = off."
+        )
+        self.live_preamp_gain.valueChanged.connect(
+            lambda v: None if self._refreshing else self._on_preamp_gain_changed(v))
+        mf.addRow("Input gain", self.live_preamp_gain)
+        mic.body_lay.addLayout(mf)
+        lay.addWidget(mic)
+
         # --- BEAM: design + analysis ---
         beam = Card("Beam — directivity & zone design")
         bf = QFormLayout()
@@ -604,7 +627,7 @@ class LivePanel(PanelBase):
         lay.addWidget(twokit)
 
         # keep card refs so the Listening-mode selector can collapse the irrelevant ones
-        self._live_cards = {"hw": hw, "beam": beam, "steer": steer, "eng": eng, "ov": ov, "twokit": twokit}
+        self._live_cards = {"hw": hw, "mic": mic, "beam": beam, "steer": steer, "eng": eng, "ov": ov, "twokit": twokit}
 
         lay.addStretch(1)
 
@@ -1093,6 +1116,7 @@ class LivePanel(PanelBase):
             self.live_status.setText(f"Connect failed: {exc}")
             return
         self._live_ctl = ctl
+        self._push_preamp_gain()
         self._session_array_id = self._live_array_id()
         self.live_connect.setText("Disconnect")
         st = ctl.state()
@@ -1190,6 +1214,7 @@ class LivePanel(PanelBase):
             self.live_status.setText(f"Auto-steer connect failed: {exc}")
             return
         self._autosteer = ctrl
+        self._push_preamp_gain()
         self._sync_autosteer_nr_enabled()    # fixed at Connect: disable the cleaning controls
         self._session_array_id = self._live_array_id()
         self.live_connect.setText("Disconnect")
@@ -1252,6 +1277,7 @@ class LivePanel(PanelBase):
             self.live_status.setText(f"A/B engine connect failed: {exc}")
             return
         self._beam_engine = eng
+        self._push_preamp_gain()
         self._beameng_loc = None
         self._session_array_id = self._live_array_id()
         self.live_connect.setText("Disconnect")
@@ -1530,6 +1556,7 @@ class LivePanel(PanelBase):
             self.live_twokit_status.setText(f"Two-kit connect failed: {exc}")
             return
         self._twokit = ctrl
+        self._push_preamp_gain()
         self._session_array_id = self.live_twokit_arr_a.currentData()
         self.live_connect.setText("Disconnect")
         self.live_mute.setEnabled(True)
@@ -1616,6 +1643,16 @@ class LivePanel(PanelBase):
         ctl = self._active_ctl()
         if ctl is not None:
             ctl.set_gain_db(float(v))
+
+    def _push_preamp_gain(self):
+        """Push the current mic-input gain to the active session (duck-typed — SimulatedMicController
+        and OCTOVOX have no preamp, so guard with hasattr). A software level trim, not an SNR change."""
+        ctl = self._active_ctl()
+        if ctl is not None and hasattr(ctl, "set_preamp_gain_db"):
+            ctl.set_preamp_gain_db(float(self.live_preamp_gain.value()))
+
+    def _on_preamp_gain_changed(self, _v):
+        self._push_preamp_gain()
 
     def _notify_session_changed(self):
         """Tell the shell (ModeBar live dot) the session state flipped, and mark the Connect/Disconnect
