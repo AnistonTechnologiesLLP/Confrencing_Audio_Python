@@ -60,6 +60,7 @@ from .beamformer import _unit_from_az_offnadir
 from .control import MicController
 from .geometry import SOUND_SPEED_MPS, ArrayGeometry, sensibel_8, with_active_channels
 from .tracking import ExponentialTracker, Tracker
+from .agc import TargetLoudnessAgc
 from . import doa
 
 # --- POLARIS hardware constants (physical facts — do not "tune") ---
@@ -1054,16 +1055,15 @@ class PolarisBeamformer(MicController):
         # gain still trims on top. The applied gain is one scalar/block, EMA-slewed so it ramps (no pumping)
         # and clamped to ±agc_max_gain_db; near-silence HOLDS the gain so pauses don't amplify the floor.
         self.agc_target_db = agc_target_db
-        self._agc_target_rms: Optional[float] = (
-            10.0 ** (float(agc_target_db) / 20.0) if agc_target_db is not None else None)
-        self._agc_gain_max = 10.0 ** (float(agc_max_gain_db) / 20.0)
-        self._agc_gain_min = 10.0 ** (-float(agc_max_gain_db) / 20.0)
-        self._agc_silence_rms = 10.0 ** (float(agc_silence_db) / 20.0)
-        self._agc_alpha = float(agc_slew_alpha)
-        # scalar EMA slewing the applied gain (pure stdlib). Rebound atomically in reset_transient,
-        # mirroring _tracker, since the audio thread mutates it lock-free.
-        self._agc_gain: Optional[ExponentialTracker] = (
-            ExponentialTracker(self._agc_alpha) if self._agc_target_rms is not None else None)
+        # Target-loudness AGC on the beam OUTPUT — the shared TargetLoudnessAgc (ONE implementation, the
+        # same one the dual-kit combined output reuses). OFF unless agc_target_db is set; built here (no
+        # numpy needed) so the deterministic _apply_agc unit tests work without a full runtime. Rebound via
+        # .reset() in reset_transient (atomic tracker rebind; the audio thread reads it lock-free). The
+        # _agc_gain / _agc_gain_min / _agc_gain_max names survive as back-compat read-only views (below).
+        self._agc: Optional[TargetLoudnessAgc] = (
+            TargetLoudnessAgc(target_db=agc_target_db, max_gain_db=agc_max_gain_db,
+                              slew_alpha=agc_slew_alpha, silence_db=agc_silence_db)
+            if agc_target_db is not None else None)
         # post-beam noise suppression (P3): a light single-channel spectral gate on the mono output, a
         # LOCAL fallback for when the OCTOVOX cloud cleaning path isn't running. OFF unless post_nr; the
         # suppressor object is built in _setup_runtime (needs numpy) and reset in reset_transient.
@@ -1662,8 +1662,8 @@ class PolarisBeamformer(MicController):
         self._steered_az = None
         if self._lp_kernel is not None and self._np is not None:
             self._lp_tail = self._np.zeros(len(self._lp_kernel) - 1, dtype=float)  # flush FIR state
-        if self._agc_gain is not None:
-            self._agc_gain = ExponentialTracker(self._agc_alpha)   # fresh slew state (atomic rebind; audio reads lock-free)
+        if self._agc is not None:
+            self._agc.reset()              # fresh slew state (atomic tracker rebind; the audio thread reads it lock-free)
         if self._aec is not None:
             self._aec.reset()              # drop the adaptive echo filter + ERLE history
         if self._dereverb is not None:
@@ -1804,25 +1804,24 @@ class PolarisBeamformer(MicController):
         self._last_block_monotonic = time.monotonic()       # watchdog: stream is alive
         self._emit(self.process_block(indata))              # DSP (beam + DOA cov) → emit
 
+    # ---- target-loudness AGC: shared TargetLoudnessAgc + back-compat views the tests pin ----
+    @property
+    def _agc_gain(self) -> Optional[ExponentialTracker]:
+        """Back-compat view: the slewing gain EMA (``.value`` = current gain), or None when AGC is off."""
+        return self._agc.tracker if self._agc is not None else None
+
+    @property
+    def _agc_gain_max(self) -> float:
+        return self._agc.gain_max if self._agc is not None else 0.0
+
+    @property
+    def _agc_gain_min(self) -> float:
+        return self._agc.gain_min if self._agc is not None else 0.0
+
     def _apply_agc(self, mono: Any) -> Any:
-        """Push the beam-output block RMS toward ``agc_target_db`` with one scalar gain, EMA-slewed so
-        it ramps (no pumping) and clamped to ±``agc_max_gain_db``. Near-silence (output RMS below
-        ``agc_silence_db``) HOLDS the current gain instead of ramping up — so pauses don't amplify the
-        noise floor. Control-pure: driven by the output level only, never distance/room. No-op unless
-        ``agc_target_db`` was set (guarded by the caller)."""
-        np = self._np
-        tr = self._agc_gain
-        target = self._agc_target_rms
-        if tr is None or target is None:                 # AGC off (also satisfies the type-checker)
-            return mono
-        rms = float(np.sqrt(np.mean(mono * mono))) if mono.size else 0.0
-        if rms > self._agc_silence_rms:
-            desired = min(self._agc_gain_max, max(self._agc_gain_min, target / rms))
-        else:
-            held = tr.value
-            desired = held if held is not None else 1.0  # hold through silence (don't pump the floor)
-        g = float(tr.update(desired))
-        return (mono * g).astype(np.float32)
+        """Normalize the beam-output block toward ``agc_target_db`` via the shared TargetLoudnessAgc
+        (slewed, clamped, held through silence). No-op unless ``agc_target_db`` was set."""
+        return self._agc.process(mono) if self._agc is not None else mono
 
     def _band_limit(self, mono: Any) -> Any:
         np = self._np
