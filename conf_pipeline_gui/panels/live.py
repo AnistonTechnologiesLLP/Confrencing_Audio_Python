@@ -1662,6 +1662,23 @@ class LivePanel(PanelBase):
             steer_az = self._beameng_locked_manual_az
             if steer_az is None and self._beameng_locked_seat is not None:
                 steer_az = self._beameng_locked_az
+        # 2-kit mode: both kits' arrays on the one map (each its own bearing + dominant DOA), with the
+        # active (currently-output) kit flagged. None in every other mode → the canvas single-array path.
+        kits = None
+        if self._twokit is not None:
+            kits = []
+            active_k = self._twokit.active_kit
+            specs = self._twokit.kits
+            for s in self._twokit.status():
+                aid = specs[s.index].array_id if s.index < len(specs) else None
+                karr = next((d for d in self.state.config.devices if d.id == aid), None)
+                kits.append({
+                    "array_id": aid,
+                    "bearing": getattr(karr, "bearing_deg", None) or 0.0,
+                    "doa": s.doa_deg,
+                    "level": s.level,
+                    "active": s.index == active_k,
+                })
         self.state.set_live_overlay({
             # pinned at connect — the combo may show another room's arrays
             "array_id": self._session_array_id,
@@ -1671,6 +1688,7 @@ class LivePanel(PanelBase):
             "bearing": bearing,
             "level": self.live_meter.level(),
             "steer_az": steer_az,
+            "kits": kits,
             "connected": True,
         })
 

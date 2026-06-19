@@ -50,6 +50,7 @@ def test_twokit_mode_connect_tick_disconnect(win, monkeypatch):
     class _FakeMK:  # stand-in for cc.MultiKitController — no hardware
         def __init__(self, specs, **kw):
             captured["specs"], captured["kw"] = specs, kw
+            self.kits = specs                                       # overlay reads each kit's array_id
             self.error = None
         def start(self):
             captured["started"] = True
@@ -93,7 +94,11 @@ def test_twokit_mode_connect_tick_disconnect(win, monkeypatch):
 
     panel._tick_live_meter()                                             # per-kit + combined meters, overlay; must not raise
     assert panel.live_meter.level() > 0.0
-    win.canvas.repaint()
+    ov = win.state.live_overlay                                          # dual-array overlay: both kits, one active
+    assert ov is not None and len(ov.get("kits") or []) == 2
+    assert sum(1 for k in ov["kits"] if k["active"]) == 1
+    assert {k["array_id"] for k in ov["kits"]} == {"A1", "A2"}
+    win.canvas.repaint()                                                 # the dual-array overlay must paint without raising
 
     panel._live_toggle_connect()                                        # disconnect
     assert panel._twokit is None and captured.get("stopped")

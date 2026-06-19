@@ -961,9 +961,38 @@ class Canvas(QWidget):
         rad = math.radians(bearing_deg)
         return math.sin(rad), math.cos(rad)
 
+    def _paint_twokit_overlay(self, p, v, kits):
+        """Both kits' arrays on one map: a level halo + the dominant-talker DOA ray per kit, with the
+        active (currently-output) kit highlighted. Additive — only the 2-kit listening mode sends `kits`."""
+        for k in kits:
+            d = next((x for x in self.cfg.devices if x.id == k.get("array_id") and x.position), None)
+            if d is None:
+                continue
+            pos = d.position
+            c = self.w2s(pos, v)
+            active = bool(k.get("active"))
+            lvl = max(0.0, min(1.0, float(k.get("level") or 0.0)))
+            halo = "#3ddc97" if active else "#6d8bff"
+            p.setPen(Qt.NoPen)
+            p.setBrush(_qc(halo, (40 if active else 16) + int(lvl * 60)))
+            r = 16 + lvl * 26
+            p.drawEllipse(c, r, r)
+            doa = k.get("doa")
+            if doa is not None:
+                dx, dy = self._bearing_dir(float(doa) + float(k.get("bearing") or 0.0))
+                tip = self.w2s(Point2D(pos.x + dx * 3.5, pos.y + dy * 3.5), v)
+                col = "#3ddc97" if active else "#9aa7c7"
+                p.setPen(QPen(_qc(col, 240 if active else 150), 3.0 if active else 1.8))
+                p.drawLine(c, tip)
+                self._label(p, tip.x() + 4, tip.y(), f"{float(doa):.0f}°", col)
+            self._label(p, c.x() + 11, c.y() - 9, "● active" if active else "○", halo)
+
     def _paint_live_overlay(self, p, v):
         ov = getattr(self.state, "live_overlay", None)
         if not ov or not ov.get("connected"):
+            return
+        if ov.get("kits"):
+            self._paint_twokit_overlay(p, v, ov["kits"])
             return
         pos = self._live_array_pos(ov)
         if pos is None:
