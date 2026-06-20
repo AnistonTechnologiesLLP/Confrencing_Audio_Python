@@ -33,6 +33,8 @@ from conf_pipeline.seat_mapper import (
     seat_azimuth_for_array,
 )
 
+from .geometry import ArrayGeometry
+
 DEFAULT_N_BEAMS = 3                 # the small array's practical ceiling (2-3 separable talkers)
 DEFAULT_HOLD_SECONDS = 0.6          # keep a beam through a brief pause before releasing the slot
 DEFAULT_MATCH_RADIUS_DEG = 25.0     # a target within this of a slot's bearing is "the same talker"
@@ -176,3 +178,92 @@ class BeamSlotTracker:
 
     def reset(self) -> None:
         self._slots = [_SlotState() for _ in range(self._n)]
+
+
+# --------------------------------------------------------------------------- realtime mixer
+def nom_automix(gates: Sequence[float], monos: Sequence[object]) -> object:
+    """Gain-shared automix of per-beam monos by their open-gates, with **NOM** attenuation.
+
+    `mixed = (Σ gate_k · mono_k) / max(1, √Σgate)` — one open talker passes at unity; as more mics open
+    the mix is pulled down (number-of-open-mics law) so N simultaneous beams don't stack their noise
+    floors. Returns float32 (silence when nothing is open). Pure numpy (lazy import)."""
+    import numpy as np
+
+    if not monos:
+        return np.zeros(0, dtype=np.float32)
+    g = np.asarray(gates, dtype=float)
+    open_sum = float(g.sum())
+    n = int(np.asarray(monos[0]).shape[0])
+    if open_sum <= 1e-6:
+        return np.zeros(n, dtype=np.float32)
+    stack = np.stack([np.asarray(m, dtype=np.float32) for m in monos], axis=0)   # (N, n)
+    mixed = (g[:, None] * stack).sum(axis=0) / max(1.0, float(np.sqrt(open_sum)))
+    return mixed.astype(np.float32)
+
+
+class MultiBeamMixer:
+    """Apply N simultaneous beams to each block and NOM-automix the gated per-beam monos.
+
+    Owns N `_FreqDomainBeam`s (superdirective LCMV — each steered to a slot while nulling the others) and
+    N fan-proof `SpeechPresenceScorer`s. The control thread re-aims the beams via :meth:`set_slots`
+    (the heavy per-bin solve runs off-lock; weights publish atomically). The audio thread calls
+    :meth:`process_block`, which runs every beam (continuous STFT), gates each live slot by its
+    speech-presence score, and returns ``(mixed, monos, gates)`` — the combined feed plus the raw
+    per-beam monos (the per-person tracks). Realtime-safe: bounded per-block numpy, no locks, atomic
+    weight/flag rebinds."""
+
+    def __init__(self, geom: ArrayGeometry, sample_rate: float, speed_of_sound: float, *,
+                 n_beams: int = DEFAULT_N_BEAMS, off_nadir_deg: float = 90.0,
+                 loading: float = 0.05, frame: int = 1024,
+                 hop_seconds: float = 0.0116):
+        from .multikit import SpeechPresenceScorer
+        from .polaris_beamformer import _FreqDomainBeam
+
+        if n_beams < 1:
+            raise ValueError("n_beams must be >= 1")
+        self._n = int(n_beams)
+        self._off_nadir = float(off_nadir_deg)
+        self._beams = [_FreqDomainBeam(geom, sample_rate, speed_of_sound,
+                                       loading=loading, off_nadir_deg=off_nadir_deg, frame=frame)
+                       for _ in range(self._n)]
+        self._scorers = [SpeechPresenceScorer(hop_seconds=hop_seconds) for _ in range(self._n)]
+        self._live = [False] * self._n          # control thread writes, audio thread reads (atomic bools)
+
+    @property
+    def n_beams(self) -> int:
+        return self._n
+
+    def set_slots(self, slots: Sequence[BeamSlot]) -> None:
+        """Re-aim each beam from the planner's slots (control thread; heavy solve off-lock). A live slot
+        steers its beam to the slot bearing nulling the OTHER live slots; an idle/expired slot is gated
+        out (its beam keeps its last weights but contributes nothing)."""
+        live_az = [s.azimuth_deg for s in slots if s.azimuth_deg is not None]
+        for i in range(self._n):
+            slot = slots[i] if i < len(slots) else None
+            az = slot.azimuth_deg if slot is not None else None
+            self._live[i] = bool(slot is not None and az is not None and (slot.active or slot.held))
+            if az is not None:
+                nulls = [a for a in live_az if a != az]          # null the other talkers so beams don't bleed
+                self._beams[i].commit_look(self._beams[i].plan_look(az, self._off_nadir, nulls))
+
+    def process_block(self, block: object) -> Tuple[object, List[object], List[float]]:
+        import numpy as np
+
+        monos: List[object] = []
+        gates: List[float] = []
+        for i in range(self._n):
+            mono = self._beams[i].process(block)
+            monos.append(mono)
+            if self._live[i]:
+                arr = np.asarray(mono)
+                rms = float(np.sqrt(np.mean(arr * arr))) if arr.size else 0.0
+                gates.append(float(self._scorers[i].update(rms)))
+            else:
+                gates.append(0.0)
+        return nom_automix(gates, monos), monos, gates
+
+    def reset(self) -> None:
+        for b in self._beams:
+            b.reset()
+        for s in self._scorers:
+            s.reset()
