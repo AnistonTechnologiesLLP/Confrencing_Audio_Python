@@ -103,6 +103,7 @@ class LivePanel(PanelBase):
         self._live_ctl = None            # MicController while connected
         self._live_design = None         # last cc.BeamDesign built from zones
         self._live_dev_rates = {}        # device index -> native samplerate
+        self._array_device = {}          # array_id -> chosen input-device index (each array keeps its own)
         self._probe_workers = set()      # strong refs to capsule-probe runnables
         self._ab_workers = set()         # strong refs to A/B-test runnables
         self._calib_workers = set()      # strong refs to front-calibration runnables
@@ -958,6 +959,31 @@ class LivePanel(PanelBase):
         # changing the target array invalidates any prior design
         self._live_design = None
         self.live_design_view.clear()
+        self._apply_array_device()                    # each array keeps its own input device
+
+    def _pick_unused_device(self, used):
+        """The first Input-combo device not already assigned to another array (or item 0 if all are taken)."""
+        for i in range(self.live_device.count()):
+            d = self.live_device.itemData(i)
+            if d is not None and d not in used:
+                return d
+        return self.live_device.itemData(0) if self.live_device.count() else None
+
+    def _apply_array_device(self):
+        """Point the Input dropdown at the SELECTED array's device — its remembered one, or (first time) a
+        device not already used by another array, so two arrays don't default to the same input."""
+        aid = self._live_array_id()
+        if aid is None:
+            return
+        want = self._array_device.get(aid)
+        if want is None:                              # no device for this array yet → a distinct, unused one
+            used = {d for a, d in self._array_device.items() if a != aid and d is not None}
+            want = self._pick_unused_device(used)
+        if want is not None:
+            i = self.live_device.findData(want)
+            if i >= 0 and i != self.live_device.currentIndex():
+                self.live_device.setCurrentIndex(i)   # fires _on_live_device_changed (records + rate match)
+        self._array_device[aid] = self.live_device.currentData()   # remember (incl. a defaulted pick)
 
     def _live_aggressive_preset(self):
         """Max-directivity superdirective — safe thanks to the 80 dBA studio mics."""
@@ -1010,8 +1036,11 @@ class LivePanel(PanelBase):
         self.live_status.setText(f"A/B failed: {msg}")
 
     def _on_live_device_changed(self):
-        """Select the device's native sample rate so Connect doesn't fail on a
-        rate the hardware can't open (e.g. a 44100-only array vs a 48000 default)."""
+        """Remember the device for the selected array, then select the device's native sample rate so
+        Connect doesn't fail on a rate the hardware can't open (e.g. a 44100-only array vs a 48000 default)."""
+        aid = self._live_array_id()
+        if aid is not None:
+            self._array_device[aid] = self.live_device.currentData()   # this array's input device
         rate = self._live_dev_rates.get(self.live_device.currentData())
         if not rate:
             return
@@ -2445,7 +2474,8 @@ class LivePanel(PanelBase):
                     if idx >= 0:
                         self.live_array.setCurrentIndex(idx)
                 self.live_array.blockSignals(False)
-                curd = self.live_device.currentData()
+                # restore the SELECTED array's remembered device (falls back to the shown one)
+                curd = self._array_device.get(self._live_array_id(), self.live_device.currentData())
                 self.live_device.blockSignals(True)
                 self.live_device.clear()
                 from conf_pipeline_control.audio import list_input_devices
@@ -2465,6 +2495,9 @@ class LivePanel(PanelBase):
                 if self.live_device.currentData() != curd:
                     self._on_live_device_changed()  # device changed — match its native rate
                 # (an unchanged device keeps the user's manually chosen rate)
+                aid = self._live_array_id()
+                if aid is not None and aid not in self._array_device:
+                    self._array_device[aid] = self.live_device.currentData()   # seed so other arrays default distinct
 
                 # output devices (for monitoring)
                 from conf_pipeline_control.audio import list_output_devices
