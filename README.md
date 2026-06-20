@@ -611,9 +611,18 @@ never sounds weak), and the **Strength** combo doubles as a **cleaning-amount** 
 the original voice back in (less muffled) — Light / Medium / Full. All opt-in and fixed at
 Connect; A/B them by ear on the monitor.
 
-**Caveat:** the ~cm aperture means coarse-zone selection, not
-MXA920/Nureva-scale pinpoint — these isolate a zone or A/B two strategies, they don't
-separate two people at one table.
+**Capture everyone — simultaneous multi-talker** (`conf_pipeline_control.multibeam`; CLI
+`scripts/capture_everyone.py`): instead of committing to one dominant talker, form a beam per active
+person — DOA-detected and **snapped to defined room seats** for a stable, jitter-free aim (free DOA
+where no seat is near) — gate each with the fan-proof speech scorer, and **NOM-automix** them into one
+combined feed. It also records a **separate WAV track per person** (for recording / transcription /
+diarization). Each beam nulls the others (multi-look LCMV over a shared FFT, so N beams cost ~one);
+persistent **beam slots** keep each track on the same person across brief pauses. Honest limit: the
+~40 mm array separates **2-3 well-spaced talkers** (>~40-50° apart) — closer people merge into one beam.
+
+**Caveat:** the ~cm aperture means coarse-zone selection, not MXA920/Nureva-scale pinpoint — these
+isolate a zone, A/B two strategies, or (with **Capture everyone**) separate 2-3 well-spaced talkers,
+but two people seated close together at one table still merge into a single beam.
 
 ## Designer-inspired workflow (1.8.0)
 
