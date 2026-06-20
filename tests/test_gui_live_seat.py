@@ -166,6 +166,7 @@ def test_preamp_push_skips_a_controller_without_the_setter(win):
     panel.live_preamp_gain.setValue(-3.0)
     panel._beam_engine = object()                                  # no set_preamp_gain_db
     panel._push_preamp_gain()                                      # must not raise
+    panel._beam_engine = None                                      # drop the non-conformant stub before fixture teardown
 
 
 def test_beameng_seat_nulling_pushes_other_seats(win):

@@ -758,15 +758,16 @@ class LivePanel(PanelBase):
             i = self.live_autosteer_clean.findData("omlsa")
             if i >= 0:
                 self.live_autosteer_clean.setCurrentIndex(i)
-        # show only the cards relevant to the chosen mode ("manual" shows all)
+        # show only the cards relevant to the chosen mode ("manual" reveals every card)
         show = {
             "follow": {"hw", "steer"},
             "clean": {"hw", "steer"},
             "seat": {"hw", "eng"},
             "table": {"hw", "beam"},
-            "manual": {"hw", "beam", "steer", "eng", "ov", "twokit"},
             "twokit": {"twokit"},
         }.get(mode, {"hw", "beam"})
+        if mode == "manual":
+            show = set(self._live_cards)          # advanced: every card (stays correct as cards are added)
         for key, card in self._live_cards.items():
             card.set_open(key in show)
 
