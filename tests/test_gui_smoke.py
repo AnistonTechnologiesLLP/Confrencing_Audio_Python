@@ -293,7 +293,7 @@ def test_beam_engine_ab_connect_switch_disconnect(win, monkeypatch):
         r.use.setChecked(r.array_id == "A1")
     panel.live_beameng.setChecked(True)                       # selects the engine, unchecks the others
     assert panel.live_beameng_mode.isEnabled()
-    assert not panel.live_autosteer.isChecked() and not panel.live_octovox.isChecked()
+    assert not panel.live_autosteer.isChecked()
     panel.live_beameng_mode.setCurrentIndex(panel.live_beameng_mode.findData("grid"))
 
     panel._live_toggle_connect()

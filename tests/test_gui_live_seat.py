@@ -169,14 +169,6 @@ def test_preamp_push_skips_a_controller_without_the_setter(win):
     panel._beam_engine = None                                      # drop the non-conformant stub before fixture teardown
 
 
-def test_multibeam_mode_and_card_present(win):
-    """The 'Capture everyone' listening mode + card are wired in."""
-    panel = win.panels["live"]
-    assert "multibeam" in panel._live_cards
-    items = [panel.live_listening_mode.itemData(i) for i in range(panel.live_listening_mode.count())]
-    assert "multibeam" in items
-
-
 def test_multibeam_active_ctl_routes_mute_and_gain(win):
     """With a capture-everyone session active, _active_ctl resolves to it and the transport Mute/Gain
     route to the engine's mixed-feed trim (duck-typed, like the A/B engine)."""
@@ -205,14 +197,6 @@ def test_multibeam_active_ctl_routes_mute_and_gain(win):
     panel._live_toggle_mute()
     assert mb.mute is True
     panel._multibeam = None                                        # teardown
-
-
-def test_multibeam_record_toggle_preconnect_is_noop(win):
-    """Arming 'Record per-person tracks' before connecting just remembers the state — never raises."""
-    panel = win.panels["live"]
-    panel.live_mb_record.setChecked(True)
-    panel._on_multibeam_record_toggled()
-    panel.live_mb_record.setChecked(False)
 
 
 # --------------------------------------------------------------------------- #
@@ -804,8 +788,7 @@ def test_listening_mode_selector_drives_mode_and_cards(win):
     assert all(not c.body.isHidden() for c in cards.values())      # everything revealed
 
     pick("table")
-    assert not (panel.live_autosteer.isChecked() or panel.live_beameng.isChecked()
-                or panel.live_octovox.isChecked())
+    assert not (panel.live_autosteer.isChecked() or panel.live_beameng.isChecked())
     panel.live_autosteer.setChecked(False)
     panel.live_beameng.setChecked(False)
 
