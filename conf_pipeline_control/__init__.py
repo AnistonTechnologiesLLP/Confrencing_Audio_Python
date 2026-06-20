@@ -122,6 +122,7 @@ from .agc import TargetLoudnessAgc  # noqa: F401  (shared target-loudness AGC)
 from .preamp import HwGain, InputPreamp, PreampHost  # noqa: F401  (shared mic-input preamp / front-end gain)
 from .multikit import KitSpec, KitStatus, MultiKitController  # noqa: F401  (dual-POLARIS cross-array automix)
 from .multibeam import BeamStatus, MultiBeamController, MultiTrackRecorder  # noqa: F401  (single-array multi-talker "capture everyone")
+from .multiroom import MultiRoomController, RoomKitSpec, RoomKitStatus  # noqa: F401  (combine N arrays → room-wide capture)
 
 
 def controls_available() -> bool:
@@ -153,6 +154,7 @@ __all__ = [
     "BeamEngine", "Location",
     "TargetLoudnessAgc", "InputPreamp", "HwGain", "PreampHost", "MultiKitController", "KitSpec", "KitStatus",
     "MultiBeamController", "BeamStatus", "MultiTrackRecorder",
+    "MultiRoomController", "RoomKitSpec", "RoomKitStatus",
     "MicController", "MicState", "SimulatedMicController",
     "DEFAULT_DESIGN_FREQ_HZ", "DEFAULT_TARGET_ELEVATION_M", "RESPONSE_FLOOR_DB",
     "SPEECH_BAND_LO_HZ", "SPEECH_BAND_HI_HZ", "SPEECH_OCTAVE_CENTERS_HZ",

@@ -10,6 +10,20 @@ the TS sibling is at matching v5 parity. The desktop app is presented as
 ## [Unreleased]
 
 ### Added
+- **Multi-array room capture — combine N POLARIS kits into one room-wide "capture everyone"**
+  (`conf_pipeline_control.multiroom.MultiRoomController` + `RoomKitSpec`; a dynamic add/remove **kit list
+  in the LIVE Hardware card**; `conf_pipeline.seat_mapper.seats_owned_by_array`) — add ≥2 kits (each its
+  own input device) and several arrays cover a whole room at once: one combined feed + a per-person track
+  for every talker in the room. Each kit runs the single-array `MultiBeamController`, restricted to the
+  **seats it owns** (each seat → its nearest array, `seats_owned_by_array`) so the *same* voice is captured
+  by one kit (best SNR) and never summed twice; the kits' feeds are combined **volume-domain** with
+  number-of-open-mics attenuation (`nom_automix`) — because N POLARIS = N independent USB clocks, no
+  cross-kit sample alignment is possible, so this sums (like the 2-kit cross-fade) rather than jointly
+  beamforming. Mirrors the dual-kit realtime invariants (copy-on-write tap, watchdog, ONE combined AGC +
+  master mute/gain, one output stream, distinct-device guard) and collects a per-person WAV per kit
+  (namespaced by array) + the room feed. The single-array "Capture everyone" is unchanged for 0–1 kits.
+  **Honest limit:** clean ownership needs snap-to-seats ON + every array posed + room seats; otherwise the
+  combine is best-effort (an overlapping talker may be double-captured) and says so. (+12 tests.)
 - **Capture everyone — simultaneous multi-talker automix + per-person tracks**
   (`conf_pipeline_control.multibeam`: `MultiBeamController` + `MultiTrackRecorder`; `scripts/capture_everyone.py`)
   — instead of committing to one dominant talker, this forms **several beams at once** (one per active

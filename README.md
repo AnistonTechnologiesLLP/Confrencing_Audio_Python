@@ -620,6 +620,14 @@ diarization). Each beam nulls the others (multi-look LCMV over a shared FFT, so 
 persistent **beam slots** keep each track on the same person across brief pauses. Honest limit: the
 ~40 mm array separates **2-3 well-spaced talkers** (>~40-50° apart) — closer people merge into one beam.
 
+**Multi-array room capture** (`conf_pipeline_control.multiroom.MultiRoomController`; the LIVE Hardware
+card's **"Kits — multiple arrays"** list): add ≥2 POLARIS (each its own input device) to cover a whole
+room — several arrays at once, one combined feed + a per-person track for every talker. Each seat is
+handled by its **nearest** array (`seats_owned_by_array`), so a voice is captured by one kit (best SNR)
+and never summed twice; the kits combine **volume-domain** (`nom_automix`) because N independent USB
+clocks can't be sample-aligned (no joint beamforming across kits — same wall as the 2-kit automix). Clean
+ownership needs snap-to-seats on + arrays posed + seats defined; otherwise it's best-effort and flags it.
+
 **Caveat:** the ~cm aperture means coarse-zone selection, not MXA920/Nureva-scale pinpoint — these
 isolate a zone, A/B two strategies, or (with **Capture everyone**) separate 2-3 well-spaced talkers,
 but two people seated close together at one table still merge into a single beam.

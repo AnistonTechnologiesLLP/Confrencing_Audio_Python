@@ -82,6 +82,17 @@ def _dominant_seat(config, array_id, detections):
         return None
 
 
+class _KitRow:
+    """The widgets of one dynamic 'kit' row in the Hardware card — an input device + a room array + a
+    per-kit capsule radius + a remove button (and a 'device gone' flag)."""
+
+    __slots__ = ("widget", "device", "array", "radius", "remove", "missing")
+
+    def __init__(self, widget, device, array, radius, remove, missing):
+        self.widget, self.device, self.array = widget, device, array
+        self.radius, self.remove, self.missing = radius, remove, missing
+
+
 class LivePanel(PanelBase):
     MODE = "live"
     TITLE = "Live"
@@ -101,6 +112,8 @@ class LivePanel(PanelBase):
         self._twokit = None              # MultiKitController while running the dual-POLARIS automix
         self._multibeam = None           # MultiBeamController while capturing everyone (multi-talker automix)
         self._multibeam_rec = None       # MultiTrackRecorder while "Record tracks" is armed
+        self._multiroom = None           # MultiRoomController while combining ≥2 kits into one room capture
+        self._kit_rows = []              # dynamic Hardware-card device+array rows (multi-array room)
         self._beameng_loc = None         # last BeamEngine current_location (for the overlay tick)
         self._ab_cap = None              # armed ABCapture during a running A/B proof, or None
         self._ab_obj = None              # the live object (engine/autosteer/ctrl) the A/B capture is on
@@ -225,6 +238,29 @@ class LivePanel(PanelBase):
         ctl_row.addWidget(self.live_active_lbl)
         ctl_row.addStretch(1)
         hw.body_lay.addLayout(ctl_row)
+
+        # --- KITS: multiple arrays/devices for room-wide "capture everyone" (only shown in that mode) ---
+        self._kits_section = QWidget()
+        ks = QVBoxLayout(self._kits_section)
+        ks.setContentsMargins(0, 0, 0, 0)
+        ks_intro = QLabel("Kits — multiple arrays. Add ≥2 (each its OWN input device) to capture a whole "
+                          "room with several POLARIS units; each seat is handled by its nearest array. "
+                          "0–1 kits uses the single array above.")
+        ks_intro.setWordWrap(True)
+        ks.addWidget(ks_intro)
+        self._kit_rows_lay = QVBoxLayout()
+        ks.addLayout(self._kit_rows_lay)
+        ks_btn = QHBoxLayout()
+        self.live_kits_add = QPushButton("Add device / kit")
+        self.live_kits_add.clicked.connect(lambda *_a: None if self._refreshing else self._add_kit_row())
+        self.live_kits_status = QLabel("")
+        self.live_kits_status.setWordWrap(True)
+        ks_btn.addWidget(self.live_kits_add)
+        ks_btn.addWidget(self.live_kits_status, 1)
+        ks.addLayout(ks_btn)
+        hw.body_lay.addWidget(self._kits_section)
+        self._kits_section.setVisible(False)   # revealed only in the "Capture everyone" / manual modes
+
         lay.addWidget(hw)
 
         # --- MIC INPUT: software level trim before the beamformer ---
@@ -756,7 +792,8 @@ class LivePanel(PanelBase):
         """True if any live session (beamformer, OCTOVOX, auto-steer, or A/B engine) is active."""
         return (self._live_ctl is not None or self._clean_monitor is not None
                 or self._autosteer is not None or self._beam_engine is not None
-                or self._twokit is not None or self._multibeam is not None)
+                or self._twokit is not None or self._multibeam is not None
+                or self._multiroom is not None)
 
     def _active_ctl(self):
         """The active session's mute/gain control surface — the A/B engine (duck-typed:
@@ -764,6 +801,8 @@ class LivePanel(PanelBase):
         controller; ``None`` if none is connected. Sessions are mutually exclusive."""
         if self._twokit is not None:
             return self._twokit
+        if self._multiroom is not None:
+            return self._multiroom
         if self._multibeam is not None:
             return self._multibeam
         if self._beam_engine is not None:
@@ -810,6 +849,7 @@ class LivePanel(PanelBase):
             show = set(self._live_cards)          # advanced: every card (stays correct as cards are added)
         for key, card in self._live_cards.items():
             card.set_open(key in show)
+        self._kits_section.setVisible(mode in ("multibeam", "manual"))   # multi-array kits: capture-everyone only
 
     def _sync_autosteer_nr_enabled(self) -> None:
         """Enable auto-steer's own OCTOVOX-cleaning controls when auto-steer is selected and not yet
@@ -1630,8 +1670,109 @@ class LivePanel(PanelBase):
         self.live_twokit_status.setText("Two kits connected — speak in each area; the active kit is output.")
         self._notify_session_changed()
 
+    # ---- dynamic Hardware-card kit rows (multi-array room) ----
+    def _build_kit_row(self) -> _KitRow:
+        row = QWidget()
+        h = QHBoxLayout(row)
+        h.setContentsMargins(0, 0, 0, 0)
+        device, array = QComboBox(), QComboBox()
+        for cb in (device, array):
+            cb.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+            cb.setMinimumContentsLength(6)
+            cb.setMinimumWidth(80)
+        radius = NoWheelDoubleSpinBox()
+        radius.setRange(0.01, 1.0)
+        radius.setSingleStep(0.005)
+        radius.setDecimals(3)
+        radius.setValue(0.04)
+        radius.setSuffix(" m")
+        remove = QPushButton("✕")
+        remove.setFixedWidth(28)
+        missing = QLabel("")
+        kr = _KitRow(row, device, array, radius, remove, missing)
+        remove.clicked.connect(lambda *_a, r=kr: None if self._refreshing else self._remove_kit_row(r))
+        for cb in (device, array):
+            cb.currentIndexChanged.connect(lambda *_a: None if self._refreshing else self._update_kits_status())
+        for wdg in (device, array, QLabel("r"), radius, remove, missing):
+            h.addWidget(wdg)
+        return kr
+
+    def _add_kit_row(self, *, device=None, array=None) -> None:
+        if self._refreshing or self._live_busy():
+            return
+        from conf_pipeline_control.audio import list_input_devices
+        kr = self._build_kit_row()
+        self._kit_rows.append(kr)
+        self._kit_rows_lay.addWidget(kr.widget)
+        arrays = [d for d in self.state.config.devices if d.type == "microphoneArray"]
+        self._populate_kit_row(kr, arrays, list_input_devices(), default_ix=len(self._kit_rows) - 1)
+        self._update_kits_status()
+
+    def _remove_kit_row(self, kr: _KitRow) -> None:
+        if self._refreshing or self._live_busy() or kr not in self._kit_rows:
+            return
+        self._kit_rows.remove(kr)
+        self._kit_rows_lay.removeWidget(kr.widget)
+        kr.widget.setParent(None)
+        kr.widget.deleteLater()
+        self._update_kits_status()
+
+    def _populate_kit_row(self, kr: _KitRow, arrays, devs, *, default_ix: int = 0) -> None:
+        cur = kr.device.currentData()
+        kr.device.blockSignals(True)
+        kr.device.clear()
+        if devs:
+            for d in devs:
+                kr.device.addItem(f"[{d.index}] {d.name} ({d.max_input_channels}ch)", d.index)
+        else:
+            kr.device.addItem("System default", None)
+        ix = kr.device.findData(cur) if cur is not None else -1
+        kr.missing.setText("device gone" if (cur is not None and ix < 0) else "")
+        if ix < 0:
+            ix = min(default_ix, kr.device.count() - 1)
+        kr.device.setCurrentIndex(max(0, ix))
+        kr.device.blockSignals(False)
+        cur = kr.array.currentData()
+        kr.array.blockSignals(True)
+        kr.array.clear()
+        for a in arrays:
+            kr.array.addItem(f"{a.label} · {a.id}", a.id)
+        ix = kr.array.findData(cur) if cur is not None else -1
+        if ix < 0:
+            ix = min(default_ix, kr.array.count() - 1)
+        if kr.array.count():
+            kr.array.setCurrentIndex(max(0, ix))
+        kr.array.blockSignals(False)
+
+    def _refresh_kit_rows(self, arrays, devs) -> None:
+        for i, kr in enumerate(self._kit_rows):
+            self._populate_kit_row(kr, arrays, devs, default_ix=i)
+
+    def _read_kit_specs(self):
+        return [(kr.device.currentData(), kr.array.currentData(), float(kr.radius.value()))
+                for kr in self._kit_rows]
+
+    def _kits_distinct(self) -> bool:
+        devs = [d for (d, _a, _r) in self._read_kit_specs() if d is not None]
+        return len(devs) == len(set(devs))
+
+    def _update_kits_status(self) -> None:
+        n = len(self._kit_rows)
+        if n == 0:
+            self.live_kits_status.setText("No kits — Capture-everyone uses the single array above.")
+        elif n == 1:
+            self.live_kits_status.setText("1 kit — add another for a multi-array room.")
+        elif not self._kits_distinct():
+            self.live_kits_status.setText("Two kits share a device — pick a DISTINCT input per kit.")
+        else:
+            self.live_kits_status.setText(f"{n} kits — distinct devices ✓ (combined into one room capture).")
+
     def _multibeam_connect(self):
-        """Start capture-everyone: a beam per talker on ONE array, snapped to seats, NOM-automixed."""
+        """Start capture-everyone: ONE array (a beam per talker, snapped to seats, NOM-automixed), or —
+        when ≥2 Hardware kit rows are configured — combine those arrays into a room-wide capture."""
+        if len(self._kit_rows) >= 2:
+            self._multiroom_connect()
+            return
         if not cc.controls_available():
             self.live_mb_status.setText("Capture-everyone needs the [control] extra (numpy + sounddevice).")
             return
@@ -1669,6 +1810,40 @@ class LivePanel(PanelBase):
         self.live_mb_status.setText("Capturing — speak from different seats; each talker gets its own beam.")
         self._notify_session_changed()
 
+    def _multiroom_connect(self):
+        """Combine the ≥2 Hardware kit rows into one room-wide capture (each array owns its nearest seats)."""
+        if not cc.controls_available():
+            self.live_kits_status.setText("Capture-everyone needs the [control] extra (numpy + sounddevice).")
+            return
+        if not self._kits_distinct():
+            self.live_kits_status.setText("Each kit needs a DISTINCT input device — fix the kits and Connect.")
+            return
+        rate = float(self.live_rate.currentData() or 44100)
+        n_beams = int(self.live_mb_beams.value())
+        specs = [cc.RoomKitSpec(device=dev, array_id=aid, radius_m=rad)
+                 for (dev, aid, rad) in self._read_kit_specs()]
+        try:
+            ctrl = cc.MultiRoomController(self.state.config, specs, sample_rate=rate, n_beams=n_beams,
+                                          snap=self.live_mb_snap.isChecked())
+            ctrl.set_gain_db(float(self.live_gain.value()))
+            ctrl.set_mute(self.live_mute.isChecked())
+            if self.live_mb_record.isChecked():
+                self._multibeam_rec = "multiroom"             # sentinel: the room controller owns the recorders
+            ctrl.start()
+            if self.live_mb_record.isChecked():
+                ctrl.record_tracks(True)
+        except Exception as exc:                              # hardware open / distinct-device → report, stay off
+            self.live_kits_status.setText(f"Room capture connect failed: {exc}")
+            self._multibeam_rec = None
+            return
+        self._multiroom = ctrl
+        self._session_array_id = specs[0].array_id
+        self.live_connect.setText("Disconnect")
+        self.live_mute.setEnabled(True)
+        self.live_gain.setEnabled(True)
+        self.live_kits_status.setText(f"Room capture — {len(specs)} kits; each seat goes to its nearest array.")
+        self._notify_session_changed()
+
     def _on_multibeam_record_toggled(self):
         """Arm/disarm per-person recording. Mid-session it attaches/detaches the recorder live; when the
         session ends (or recording is turned off) the tracks are written via the folder picker."""
@@ -1699,6 +1874,22 @@ class LivePanel(PanelBase):
         self.live_mb_status.setText(f"Wrote {len(paths)} track(s) to {out}")
 
     def _live_disconnect(self):
+        if self._multiroom is not None:
+            mr, armed = self._multiroom, (self._multibeam_rec == "multiroom")
+            try:
+                mr.stop()
+            finally:
+                self._multiroom = None
+            self._multibeam_rec = None
+            self.live_mute.setEnabled(True)
+            self.live_gain.setEnabled(True)
+            if armed:
+                from PySide6.QtWidgets import QFileDialog
+                out = QFileDialog.getExistingDirectory(self, "Save per-person tracks to …")
+                if out:
+                    paths = mr.write_tracks(out, prefix="room")
+                    self.live_kits_status.setText(f"Wrote {len(paths)} track(s) to {out}")
+            self.live_mb_record.setChecked(False)
         if self._multibeam is not None:
             try:
                 self._multibeam.stop()
@@ -2114,6 +2305,23 @@ class LivePanel(PanelBase):
             cells = "   ".join(f"● {b.seat_id or f'{b.azimuth_deg:.0f}°'}" for b in live)
             self.live_mb_status.setText(f"{len(live)} talking:   {cells}")
 
+    def _tick_multiroom(self):
+        """Drive the meter + per-kit 'which seats are talking' readout for the room-wide capture."""
+        mr = self._multiroom
+        if mr is None:
+            return
+
+        def _pct(lvl):
+            return 0.0 if lvl <= 1e-6 else max(0.0, min(1.0, (20.0 * math.log10(lvl) + 60.0) / 60.0))
+
+        self.live_meter.set_level(_pct(mr.read_level()))
+        parts = []
+        for k in mr.status():
+            tag = "⚠" if k.dead else "●"
+            seats = ",".join(b.seat_id or f"{b.azimuth_deg:.0f}°" for b in k.beams if b.active) or "—"
+            parts.append(f"{tag} {k.array_id or f'kit{k.index + 1}'}: {seats}")
+        self.live_kits_status.setText("    ".join(parts))
+
     def _tick_live_meter(self):
         """Update the level meter on a dB scale (−60 dB → 0 %, 0 dB → 100 %), so
         normal speech picked up by a ceiling array is clearly visible rather than
@@ -2125,6 +2333,9 @@ class LivePanel(PanelBase):
         if self._twokit is not None:
             self._tick_twokit()
             self._publish_overlay()
+            return
+        if self._multiroom is not None:
+            self._tick_multiroom()
             return
         if self._multibeam is not None:
             self._tick_multibeam()
@@ -2270,5 +2481,6 @@ class LivePanel(PanelBase):
                 self.live_out_device.blockSignals(False)
 
                 self._refresh_twokit_pickers(arrays, devs)   # 2-kit device/array/output pickers
+                self._refresh_kit_rows(arrays, devs)         # dynamic multi-array Hardware kit rows
         finally:
             self._refreshing = False

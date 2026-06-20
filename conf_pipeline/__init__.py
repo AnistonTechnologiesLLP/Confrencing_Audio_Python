@@ -199,6 +199,7 @@ from .seat_mapper import (  # noqa: F401
     room_seats,
     seat_azimuth_for_array,
     seat_null_azimuths,
+    seats_owned_by_array,
 )
 
 # ---- design report export ----

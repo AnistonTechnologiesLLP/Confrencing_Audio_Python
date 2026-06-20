@@ -26,7 +26,7 @@ from __future__ import annotations
 import threading
 import time
 from dataclasses import dataclass
-from typing import Any, Callable, List, Optional, Sequence, Tuple
+from typing import AbstractSet, Any, Callable, List, Optional, Sequence, Tuple
 
 from conf_pipeline.model import angular_separation_deg
 from conf_pipeline.seat_mapper import (
@@ -70,12 +70,18 @@ def snap_targets(
     *,
     snap: bool = True,
     max_separation_deg: float = DEFAULT_MAX_SEPARATION_DEG,
+    allowed_seats: Optional[AbstractSet[str]] = None,
 ) -> List[BeamTarget]:
     """Hybrid aim: map each ``(azimuth_deg, salience_db)`` detection to a `BeamTarget`.
 
     With ``snap`` on, a detection within ``max_separation_deg`` of a defined room seat takes the seat's
     (stable) bearing and ``seat_id``; otherwise it keeps the raw DOA azimuth (``seat_id=None``). With
-    ``snap`` off, or when the config/array has no room/seats/bearing, every target is free DOA."""
+    ``snap`` off, or when the config/array has no room/seats/bearing, every target is free DOA.
+
+    ``allowed_seats`` (multi-array **ownership**): when given, a detection is kept ONLY if it snapped to a
+    seat in the set — non-owned seats AND free-DOA detections are dropped, so in a multi-kit room this
+    array captures only the seats it owns (one voice = one kit, no double-capture). ``None`` (default) is
+    the unrestricted behaviour."""
     out: List[BeamTarget] = []
     for az, sal in detections:
         if az is None:
@@ -88,6 +94,8 @@ def snap_targets(
                 seat_bearing = seat_azimuth_for_array(config, array_id, match.seat_id)  # type: ignore[arg-type]
                 if seat_bearing is not None:
                     bearing, seat_id = float(seat_bearing), match.seat_id
+        if allowed_seats is not None and seat_id not in allowed_seats:
+            continue                                          # ownership: only this array's owned seats
         out.append(BeamTarget(bearing, seat_id, float(sal)))
     return out
 
@@ -351,7 +359,8 @@ class MultiBeamController:
                  n_beams: int = DEFAULT_N_BEAMS, snap: bool = True, plan_hz: float = 8.0,
                  off_nadir_deg: float = 90.0, hold_seconds: float = DEFAULT_HOLD_SECONDS,
                  match_radius_deg: float = DEFAULT_MATCH_RADIUS_DEG,
-                 max_snap_separation_deg: float = DEFAULT_MAX_SEPARATION_DEG, loading: float = 0.05,
+                 max_snap_separation_deg: float = DEFAULT_MAX_SEPARATION_DEG,
+                 owned_seats: Optional[Sequence[str]] = None, loading: float = 0.05,
                  nfft: int = 1024, agc_target_db: Optional[float] = None, output_callback: Optional[Callable[[object], None]] = None,
                  doa_source_factory: Optional[Callable[..., Any]] = None,
                  mixer_factory: Optional[Callable[..., Any]] = None,
@@ -372,6 +381,7 @@ class MultiBeamController:
         self._hop_s = self.blocksize / self.sample_rate
         self._n = int(n_beams)
         self._snap = bool(snap)
+        self._owned_seats: Optional[AbstractSet[str]] = frozenset(owned_seats) if owned_seats is not None else None
         self._max_snap = float(max_snap_separation_deg)
         self._off_nadir = float(off_nadir_deg)
         self._plan_dt = 1.0 / max(1.0, float(plan_hz))
@@ -437,7 +447,8 @@ class MultiBeamController:
             return
         res = doa.detect(cov, freqs, self._geom, off_nadir_deg=self._off_nadir, max_talkers=self._n)
         dets = [(d.azimuth_deg, d.salience_db) for d in res.detections] if res.active else []
-        targets = snap_targets(self._config, self._array_id, dets, snap=self._snap, max_separation_deg=self._max_snap)
+        targets = snap_targets(self._config, self._array_id, dets, snap=self._snap,
+                               max_separation_deg=self._max_snap, allowed_seats=self._owned_seats)
         slots = self._tracker.update(targets, now)
         self._mixer.set_slots(slots)
         rec = self._recorder
