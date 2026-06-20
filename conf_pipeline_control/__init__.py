@@ -121,7 +121,7 @@ from .beam_engine import BeamEngine, Location  # noqa: F401  (optional A/B wrapp
 from .agc import TargetLoudnessAgc  # noqa: F401  (shared target-loudness AGC)
 from .preamp import HwGain, InputPreamp, PreampHost  # noqa: F401  (shared mic-input preamp / front-end gain)
 from .multikit import KitSpec, KitStatus, MultiKitController  # noqa: F401  (dual-POLARIS cross-array automix)
-from .multibeam import BeamStatus, MultiBeamController  # noqa: F401  (single-array multi-talker "capture everyone")
+from .multibeam import BeamStatus, MultiBeamController, MultiTrackRecorder  # noqa: F401  (single-array multi-talker "capture everyone")
 
 
 def controls_available() -> bool:
@@ -152,7 +152,7 @@ __all__ = [
     "VirtualMicGrid",
     "BeamEngine", "Location",
     "TargetLoudnessAgc", "InputPreamp", "HwGain", "PreampHost", "MultiKitController", "KitSpec", "KitStatus",
-    "MultiBeamController", "BeamStatus",
+    "MultiBeamController", "BeamStatus", "MultiTrackRecorder",
     "MicController", "MicState", "SimulatedMicController",
     "DEFAULT_DESIGN_FREQ_HZ", "DEFAULT_TARGET_ELEVATION_M", "RESPONSE_FLOOR_DB",
     "SPEECH_BAND_LO_HZ", "SPEECH_BAND_HI_HZ", "SPEECH_OCTAVE_CENTERS_HZ",

@@ -514,3 +514,86 @@ class MultiBeamController:
     def __exit__(self, *exc: object) -> None:
         self.stop()
 
+
+# --------------------------------------------------------------------------- per-person recorder
+def _safe_label(label: str) -> str:
+    """Filename-safe slug of a seat/beam label."""
+    return "".join(ch if ch.isalnum() or ch in "-_" else "-" for ch in label).strip("-") or "beam"
+
+
+class MultiTrackRecorder:
+    """Record the per-beam monos as separate, labelled WAV tracks — the per-person deliverable.
+
+    Fed each block while recording (cheap in-memory append — **no file I/O on the audio thread**); on
+    :meth:`write` it concatenates each beam and writes one mono WAV per beam (named by its current
+    seat/label) plus the combined mixed feed. Reuses the stdlib ``wave`` writer pattern from
+    ``ab_capture``. For a bounded "record tracks" clip — accumulation grows with duration."""
+
+    def __init__(self, n_beams: int, sample_rate: float):
+        self._n = int(n_beams)
+        self._sr = int(round(float(sample_rate)))
+        self._beam_chunks: List[List[Any]] = [[] for _ in range(self._n)]
+        self._mixed_chunks: List[Any] = []
+        self._labels = [f"beam{i + 1}" for i in range(self._n)]
+        self._recording = False
+
+    @property
+    def recording(self) -> bool:
+        return self._recording
+
+    def start(self) -> None:
+        self._beam_chunks = [[] for _ in range(self._n)]
+        self._mixed_chunks = []
+        self._recording = True
+
+    def stop(self) -> None:
+        self._recording = False
+
+    def set_labels(self, labels: Sequence[Optional[str]]) -> None:
+        """Update each beam's track label (e.g. the seat it currently holds) — reflected in the filename."""
+        for i, lab in enumerate(labels[: self._n]):
+            if lab:
+                self._labels[i] = str(lab)
+
+    def feed(self, monos: Sequence[object], mixed: Optional[object] = None) -> None:
+        if not self._recording:
+            return
+        import numpy as np
+
+        for i in range(self._n):
+            if i < len(monos):
+                self._beam_chunks[i].append(np.asarray(monos[i], dtype=np.float32).copy())
+        if mixed is not None:
+            self._mixed_chunks.append(np.asarray(mixed, dtype=np.float32).copy())
+
+    def write(self, out_dir: str, *, prefix: str = "capture") -> List[str]:
+        """Write one WAV per recorded beam (``<prefix>_<k>_<label>.wav``) + ``<prefix>_mixed.wav``.
+        Returns the written paths (empty if nothing was recorded)."""
+        import os
+        import wave
+
+        import numpy as np
+
+        os.makedirs(out_dir, exist_ok=True)
+
+        def _wav(path: str, mono: Any) -> None:
+            x = np.clip(np.asarray(mono, dtype=np.float32), -1.0, 1.0)
+            with wave.open(path, "wb") as w:
+                w.setnchannels(1)
+                w.setsampwidth(2)
+                w.setframerate(self._sr)
+                w.writeframes((x * 32767.0).astype("<i2").tobytes())
+
+        written: List[str] = []
+        for i in range(self._n):
+            if not self._beam_chunks[i]:
+                continue
+            path = os.path.join(out_dir, f"{prefix}_{i + 1}_{_safe_label(self._labels[i])}.wav")
+            _wav(path, np.concatenate(self._beam_chunks[i]))
+            written.append(path)
+        if self._mixed_chunks:
+            path = os.path.join(out_dir, f"{prefix}_mixed.wav")
+            _wav(path, np.concatenate(self._mixed_chunks))
+            written.append(path)
+        return written
+
