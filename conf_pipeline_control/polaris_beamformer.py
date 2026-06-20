@@ -550,37 +550,44 @@ def compose_nulls(
     target_az: float,
     budget: int,
     *,
+    exclusion: Sequence[float] = (),
     min_sep_deg: float = DEFAULT_NULL_MIN_SEP_DEG,
     merge_sep_deg: float = DEFAULT_NULL_MERGE_SEP_DEG,
     seat_null_max_count: Optional[int] = None,
 ) -> list:
-    """Merge two competing null sources into one budgeted, deterministic null list for the steered beam.
+    """Merge the competing null sources into one budgeted, deterministic null list for the steered beam.
 
-    ``detected`` are interferer bearings the DOA layer is seeing *right now* (#13 auto-null); ``seats``
-    are *speculative* empty-seat bearings (room-aware). **Adaptive evidence beats static geometry:**
-    detected nulls fill the ``budget`` (= M−1) first, seat nulls fill only what remains — a measured
-    interferer is never crowded out by a speculative seat null. All bearings are array-relative
-    azimuths (deg). The single owner of the final null set: both callers feed lists in here, neither
-    pushes to the beam directly. Steps: (1) drop nulls within ``min_sep_deg`` of the look from BOTH
-    lists *before* budgeting (so a near-look null can't consume budget — and would otherwise make the
-    LCMV constraint matrix singular); (2) drop a seat within ``merge_sep_deg`` of a detected null
-    (same null, one constraint); (3) fill detected (capped at budget), then seats — ordered
-    nearest-to-look first (an empty seat acoustically close to the talker leaks most), optionally
-    self-capped by ``seat_null_max_count`` to reserve headroom for live talkers."""
+    Three tiers, in precedence order — **measured evidence beats high-intent geometry beats speculation**:
+    ``detected`` interferer bearings the DOA layer is seeing *right now* (#13 auto-null) fill the
+    ``budget`` (= M−1) first; then ``exclusion`` — user-DRAWN no-pickup zones (e.g. a door), high intent
+    but still geometry; then ``seats`` — *speculative* empty-seat bearings. A measured interferer is never
+    crowded out by an exclusion or seat null, and a user's explicit door null outranks a speculative empty
+    seat. All bearings are array-relative azimuths (deg); the callers feed lists in here, none pushes to
+    the beam directly. Steps: (1) drop nulls within ``min_sep_deg`` of the look from EVERY list *before*
+    budgeting (a near-look null would consume budget and make the LCMV constraint matrix singular);
+    (2) cross-source dedupe within ``merge_sep_deg`` (exclusion vs detected, seat vs both) — one null, one
+    constraint; (3) fill detected (capped at budget), then exclusions, then seats — seats ordered
+    nearest-to-look first, optionally self-capped by ``seat_null_max_count`` to reserve headroom. When the
+    budget fills before an exclusion fits, it is dropped — the caller surfaces that (never silent)."""
     if budget <= 0:
         return []
     det = _dedupe_az([float(d) for d in detected if _az_sep(float(d), target_az) >= min_sep_deg], merge_sep_deg)
+    # user-drawn EXCLUSION zones (e.g. a door) — high-intent but speculative geometry: rank ABOVE empty-seat
+    # nulls, BELOW measured interferers. Deduped against the detected set so one null isn't double-spent.
+    excl = [float(e) for e in exclusion if _az_sep(float(e), target_az) >= min_sep_deg]
+    excl = _dedupe_az([e for e in excl if not _near_any(e, det, merge_sep_deg)], merge_sep_deg)
     seat = [float(s) for s in seats if _az_sep(float(s), target_az) >= min_sep_deg]
-    seat = [s for s in seat if not _near_any(s, det, merge_sep_deg)]    # cross-source dedupe
+    seat = [s for s in seat if not _near_any(s, det, merge_sep_deg) and not _near_any(s, excl, merge_sep_deg)]
     seat = _dedupe_az(seat, merge_sep_deg)
     seat.sort(key=lambda s: _az_sep(s, target_az))                     # deterministic: nearest-to-look first
     if seat_null_max_count is not None:
         seat = seat[:max(0, int(seat_null_max_count))]
-    final = list(det[:budget])                                        # detected win the budget
-    for s in seat:
-        if len(final) >= budget:
-            break
-        final.append(s)
+    final = list(det[:budget])                                        # 1) measured interferers win the budget
+    for tier in (excl, seat):                                         # 2) user exclusions, then 3) empty seats
+        for s in tier:
+            if len(final) >= budget:
+                break
+            final.append(s)
     return final
 
 

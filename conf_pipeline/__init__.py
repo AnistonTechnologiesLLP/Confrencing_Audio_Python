@@ -194,6 +194,8 @@ from .coverage_sim import (  # noqa: F401
 from .seat_mapper import (  # noqa: F401
     SeatMatch,
     azimuth_for_array_point,
+    azimuth_in_pickup_zone,
+    exclusion_zone_azimuths,
     nearest_seat,
     nearest_seat_for_array,
     room_seats,

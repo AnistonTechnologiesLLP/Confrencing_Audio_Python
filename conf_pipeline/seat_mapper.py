@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Iterable, Optional
+from typing import Iterable, Optional, Tuple
 
 from .model import (
     MicrophoneArray,
@@ -29,6 +29,7 @@ from .model import (
     _norm_bearing,
     angular_separation_deg,
     bearing_to_deg,
+    is_pickup_zone,
 )
 
 # Beyond this angular gap the detected direction is treated as "between seats" → no match. The
@@ -210,3 +211,72 @@ def azimuth_for_array_point(config: SystemConfig, array_id: str, point: Point2D)
     if array.position is None or array.bearing_deg is None:
         return None
     return _array_relative_azimuth(array.position, array.bearing_deg, point)
+
+
+# --------------------------------------------------------------------------- #
+# Zone geometry — exclusion (door) nulls + "is this detection inside a pickup zone?"
+# These feed the live "cut the door / anyone outside the pickup area" behaviour in the auto-follow modes.
+# --------------------------------------------------------------------------- #
+def _posed_array(config: SystemConfig, array_id: str) -> Optional[Tuple[MicrophoneArray, Point2D, float]]:
+    """The placed, bearing'd ``MicrophoneArray`` + its (position, bearing_deg), or ``None`` (unknown / not
+    an array / unposed). Narrows the two Optionals for the callers."""
+    array = next((d for d in config.devices if d.id == array_id), None)
+    if not isinstance(array, MicrophoneArray) or array.position is None or array.bearing_deg is None:
+        return None
+    return array, array.position, array.bearing_deg
+
+
+def _shape_corners(shape: object) -> list:
+    """The corner points of a zone shape — a polygon's points, or a rect's four corners."""
+    pts = getattr(shape, "points", None)
+    if pts:
+        return list(pts)
+    o = getattr(shape, "origin", None)
+    if o is None:
+        return []
+    w, h = float(getattr(shape, "width", 0.0)), float(getattr(shape, "height", 0.0))
+    return [o, Point2D(o.x + w, o.y), Point2D(o.x + w, o.y + h), Point2D(o.x, o.y + h)]
+
+
+def _centroid(pts: list) -> Point2D:
+    n = max(1, len(pts))
+    return Point2D(sum(p.x for p in pts) / n, sum(p.y for p in pts) / n)
+
+
+def exclusion_zone_azimuths(config: SystemConfig, array_id: str) -> list:
+    """The **array-relative** azimuths (deg, ``0°`` = +Y clockwise — the steered-beam / DOA frame) of the
+    CENTRES of this array's no-pickup (exclusion) zones — e.g. a door drawn as a No-pickup area — for
+    pushing to the steered beam as nulls (see
+    :func:`conf_pipeline_control.polaris_beamformer.compose_nulls`). Empty if the array is unknown, unposed
+    (no ``position`` / ``bearing_deg``), or has no exclusion zones."""
+    posed = _posed_array(config, array_id)
+    if posed is None:
+        return []
+    array, pos, bear = posed
+    return [_array_relative_azimuth(pos, bear, _centroid(_shape_corners(z.shape)))
+            for z in array.zones if not is_pickup_zone(z)]
+
+
+def azimuth_in_pickup_zone(config: SystemConfig, array_id: str, azimuth_deg: float,
+                           *, margin_deg: float = 8.0) -> bool:
+    """True if a detected **array-relative** azimuth points into ANY pickup zone of the array. Each zone is
+    treated as the angular sector its corners subtend from the array, widened by ``margin_deg`` (DOA jitter
+    / hysteresis). False if the array is unknown / unposed or has no pickup zones — the caller decides what
+    "no pickup zones" means (typically: capture everything)."""
+    posed = _posed_array(config, array_id)
+    if posed is None:
+        return False
+    array, pos, bear = posed
+    az = float(azimuth_deg)
+    for z in array.zones:
+        if not is_pickup_zone(z):
+            continue
+        corners = _shape_corners(z.shape)
+        if not corners:
+            continue
+        center = _array_relative_azimuth(pos, bear, _centroid(corners))
+        half = max((angular_separation_deg(center, _array_relative_azimuth(pos, bear, c)) for c in corners),
+                   default=0.0)
+        if angular_separation_deg(az, center) <= half + margin_deg:
+            return True
+    return False
