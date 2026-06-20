@@ -395,6 +395,16 @@ def test_transient_suppress_flows_to_steered_cfg(win):
     panel.live_beameng_transient.setChecked(False)
 
 
+def test_voice_gate_flows_to_steered_cfg(win):
+    """The A/B-card 'Mute non-speech' checkbox adds voice_gate to the steered back-end cfg."""
+    panel = win.panels["live"]
+    base = {"radius_m": 0.04}
+    assert "voice_gate" not in panel._beameng_steered_cfg(base)
+    panel.live_beameng_voicegate.setChecked(True)
+    assert panel._beameng_steered_cfg(base)["voice_gate"] is True
+    panel.live_beameng_voicegate.setChecked(False)
+
+
 def test_beameng_seat_nulling_pushes_other_seats(win):
     """The A/B-engine 'Null the other seats' path: with a matched target seat, push the OTHER seats'
     bearings to the steered back-end via the engine; clear when disabled."""

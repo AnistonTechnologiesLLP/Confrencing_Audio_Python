@@ -1083,6 +1083,9 @@ class PolarisBeamformer(PreampHost, MicController):
         transient_suppress: bool = False,                              # duck impulsive table taps / knocks (after AEC, before dereverb)
         transient_threshold_db: float = 12.0,                          # crest (dB) that flags an impulsive onset
         transient_depth_db: float = -12.0,                             # how far to duck a confirmed tap
+        voice_gate: bool = False,                                      # mute non-speech (gaps & noise) at the END of the chain
+        voice_gate_threshold: float = 0.35,                           # speech-presence score above which the gate opens
+        voice_gate_floor_db: float = -15.0,                           # shallow floor (duck, not mute)
         dereverb: bool = False,                                          # real-time late-reverb suppression (pre-NR)
         dereverb_t60: float = DEFAULT_DEREVERB_T60,                      # assumed room RT60 (s)
         dereverb_beta: float = DEFAULT_DEREVERB_BETA,                    # late-reverb over-subtraction strength
@@ -1191,6 +1194,12 @@ class PolarisBeamformer(PreampHost, MicController):
         self._transient_threshold_db = float(transient_threshold_db)
         self._transient_depth_db = float(transient_depth_db)
         self._transient: Optional[Any] = None
+        # 'voice only' output gate: duck non-speech (gaps / steady noise / rustle) at the END of the chain,
+        # downstream of the AGC (so the AGC can't chase the gate). OFF by default; built in _setup_runtime.
+        self.voice_gate = bool(voice_gate)
+        self._voice_gate_threshold = float(voice_gate_threshold)
+        self._voice_gate_floor_db = float(voice_gate_floor_db)
+        self._voice_gate: Optional[Any] = None
         # real-time dereverberation (StreamingDereverb): runs BEFORE the noise reducer; built in _setup_runtime.
         self.dereverb = bool(dereverb)
         self._dereverb_t60 = float(dereverb_t60)
@@ -1638,6 +1647,14 @@ class PolarisBeamformer(PreampHost, MicController):
                 depth_db=self._transient_depth_db)
         else:
             self._transient = None
+        # 'voice only' output gate: built only when enabled (needs numpy + the scorer).
+        if self.voice_gate:
+            from .voice_gate import VoiceOnlyGate
+            self._voice_gate = VoiceOnlyGate(
+                self.sample_rate, threshold=self._voice_gate_threshold,
+                floor_db=self._voice_gate_floor_db)
+        else:
+            self._voice_gate = None
         # real-time dereverb (StreamingDereverb): runs on the mono BEFORE the noise reducer; off unless enabled.
         if self.dereverb:
             from .streaming_cleaner import StreamingDereverb   # lazy: avoids a module-load import cycle
@@ -1692,6 +1709,8 @@ class PolarisBeamformer(PreampHost, MicController):
             mono = self._apply_agc(mono)              # target-loudness normalize (before the linear band-limit)
         if self._lp_kernel is not None:
             mono = self._band_limit(mono)
+        if self._voice_gate is not None:
+            mono = self._voice_gate.process(mono)     # 'voice only' — mute non-speech (LAST stage, Invariant A)
         rms = float(np.sqrt(np.mean(mono * mono))) if mono.size else 0.0
         self._level = min(1.0, rms)
         self._accumulate_covariance(block)
@@ -1833,6 +1852,8 @@ class PolarisBeamformer(PreampHost, MicController):
             self._peq.reset()              # drop the biquad ring (fresh state on re-activation)
         if self._transient is not None:
             self._transient.reset()        # drop the de-thump envelope + lookahead tail
+        if self._voice_gate is not None:
+            self._voice_gate.reset()       # fresh scorer + gain (re-acquire speech on the next block)
         with self._beam_lock:
             self._beam.reset()             # drop the strategy's streaming history; rebuilt on next process
 

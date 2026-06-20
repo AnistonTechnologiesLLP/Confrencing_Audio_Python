@@ -439,6 +439,13 @@ class LivePanel(PanelBase):
         )
         self.live_autosteer_transient.setEnabled(False)      # enabled when auto-steer is ticked (pre-connect)
         asf.addRow("Taps", self.live_autosteer_transient)
+        self.live_autosteer_voicegate = QCheckBox("Mute non-speech (gate gaps & noise)")
+        self.live_autosteer_voicegate.setToolTip(
+            "Duck the output when the sound isn't speech (gaps, rustle, steady hum). Onset-safe shallow duck, "
+            "not a hard mute. Does NOT remove a competing person in the zone — that's spatial nulling. Fixed at Connect."
+        )
+        self.live_autosteer_voicegate.setEnabled(False)      # enabled when auto-steer is ticked (pre-connect)
+        asf.addRow("Voice only", self.live_autosteer_voicegate)
         self.live_autosteer_aec = QCheckBox("Cancel echo (needs far-end playout)")
         self.live_autosteer_aec.setToolTip(
             "Cancel the room's loudspeaker echo from the followed talker using the PC's playback (the far-end "
@@ -555,6 +562,14 @@ class LivePanel(PanelBase):
         )
         self.live_beameng_transient.setEnabled(False)        # enabled when the engine is ticked
         ef.addRow("Taps", self.live_beameng_transient)
+        self.live_beameng_voicegate = QCheckBox("Mute non-speech (gate gaps & noise)")
+        self.live_beameng_voicegate.setToolTip(
+            "Duck the output when the sound isn't speech — between phrases, paper rustle, a steady fan/hum. "
+            "Runs last (after the AGC); onset-safe (a shallow duck, not a hard mute). It does NOT remove a "
+            "competing PERSON inside the pickup zone — that's done spatially by zone nulling. Fixed at Connect."
+        )
+        self.live_beameng_voicegate.setEnabled(False)        # enabled when the engine is ticked
+        ef.addRow("Voice only", self.live_beameng_voicegate)
         self.live_beameng_aec = QCheckBox("Cancel echo (needs far-end playout)")
         self.live_beameng_aec.setToolTip(
             "Cancel the room's loudspeaker echo from the beam output using the PC's playback (the far-end / "
@@ -939,6 +954,7 @@ class LivePanel(PanelBase):
         self.live_autosteer_depth.setEnabled(on)
         self.live_autosteer_dereverb.setEnabled(on)
         self.live_autosteer_transient.setEnabled(on)
+        self.live_autosteer_voicegate.setEnabled(on)
         self.live_autosteer_aec.setEnabled(on)
 
     def _on_autosteer_toggled(self):
@@ -965,6 +981,7 @@ class LivePanel(PanelBase):
         self.live_beameng_nr_engine.setEnabled(on)
         self.live_beameng_dereverb.setEnabled(on)
         self.live_beameng_transient.setEnabled(on)
+        self.live_beameng_voicegate.setEnabled(on)
         self.live_beameng_aec.setEnabled(on)
         self.live_beameng_adaptnull.setEnabled(on)
         if on:
@@ -1420,6 +1437,7 @@ class LivePanel(PanelBase):
                 post_nr_amount=_clean_amount(self.live_autosteer_depth),  # cleaning amount (keeps the voice full-bodied)
                 dereverb=self.live_autosteer_dereverb.isChecked(),      # real-time room-echo suppression
                 transient_suppress=self.live_autosteer_transient.isChecked(),   # de-thump table taps / knocks
+                voice_gate=self.live_autosteer_voicegate.isChecked(),           # mute non-speech (gaps & noise)
                 aec=self.live_autosteer_aec.isChecked(),                # cancel far-end loudspeaker echo
             )
             ctrl.ctrl.set_gain_db(float(self.live_gain.value()))
@@ -1462,6 +1480,8 @@ class LivePanel(PanelBase):
             cfg["dereverb"] = True                    # real-time late-reverb suppression before the cleaner
         if self.live_beameng_transient.isChecked():
             cfg["transient_suppress"] = True          # de-thump impulsive table taps / knocks (before dereverb)
+        if self.live_beameng_voicegate.isChecked():
+            cfg["voice_gate"] = True                  # mute non-speech at the end of the chain
         if self.live_beameng_aec.isChecked():
             cfg["aec"] = True                         # cancel far-end loudspeaker echo (loopback reference)
         return cfg

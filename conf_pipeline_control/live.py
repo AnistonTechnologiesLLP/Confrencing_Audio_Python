@@ -87,6 +87,9 @@ class LiveBeamController(PreampHost, MicController):
         transient_suppress: bool = False,       # duck impulsive table taps / knocks (after AEC, before dereverb)
         transient_threshold_db: float = 12.0,
         transient_depth_db: float = -12.0,
+        voice_gate: bool = False,               # mute non-speech (gaps & noise) at the end of the chain
+        voice_gate_threshold: float = 0.35,
+        voice_gate_floor_db: float = -15.0,
         dereverb: bool = False,
         dereverb_t60: float = DEFAULT_DEREVERB_T60,
         dereverb_beta: float = DEFAULT_DEREVERB_BETA,
@@ -128,6 +131,10 @@ class LiveBeamController(PreampHost, MicController):
         self.transient_suppress = bool(transient_suppress)
         self._transient_threshold_db = float(transient_threshold_db)
         self._transient_depth_db = float(transient_depth_db)
+        # 'voice only' output gate at the end of the chain (duck non-speech). OFF by default.
+        self.voice_gate = bool(voice_gate)
+        self._voice_gate_threshold = float(voice_gate_threshold)
+        self._voice_gate_floor_db = float(voice_gate_floor_db)
         # real-time dereverb on the mono output, BEFORE the noise reducer (same StreamingDereverb the A/B
         # engine uses). OFF by default. Built in _build_post_nr().
         self.dereverb = bool(dereverb)
@@ -161,6 +168,7 @@ class LiveBeamController(PreampHost, MicController):
         self._post_nr: Any = None  # post-beam noise reducer (StreamingCleaner / _PostNoiseSuppressor), or None
         self._peq: Any = None      # parametric EQ (StreamingPeq) on the cleaned mono, or None
         self._transient: Any = None  # transient (table-tap) suppressor, runs after AEC before dereverb, or None
+        self._voice_gate: Any = None # 'voice only' output gate (VoiceOnlyGate), runs last, or None
         self._dereverb: Any = None # real-time dereverb (StreamingDereverb), runs before the noise reducer, or None
         self._aec: Any = None      # live echo canceller (StreamingAec), runs before dereverb, or None
         self._ref_capture: Any = None  # far-end reference source (ReferenceCapture) for the AEC, or None
@@ -290,6 +298,12 @@ class LiveBeamController(PreampHost, MicController):
                 self.samplerate, threshold_db=self._transient_threshold_db, depth_db=self._transient_depth_db)
         else:
             self._transient = None
+        if self.voice_gate:
+            from .voice_gate import VoiceOnlyGate
+            self._voice_gate = VoiceOnlyGate(
+                self.samplerate, threshold=self._voice_gate_threshold, floor_db=self._voice_gate_floor_db)
+        else:
+            self._voice_gate = None
         # live AEC (StreamingAec): device-free here; the far-end reference STREAM opens in _open().
         if self.aec:
             from .streaming_aec import StreamingAec
@@ -507,6 +521,8 @@ class LiveBeamController(PreampHost, MicController):
             out = self._post_nr.process(out, False)
         if self._peq is not None:
             out = self._peq.process(out)              # parametric EQ (tone) on the cleaned mono
+        if self._voice_gate is not None:
+            out = self._voice_gate.process(out)       # 'voice only' — mute non-speech (last stage)
         if raw_ab is not None:
             cap.feed(raw_ab, out)                     # A/B proof: raw beam vs the cleaned (pre-gain) mono
 

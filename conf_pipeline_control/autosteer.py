@@ -90,6 +90,7 @@ class AutoSteerController:
         peq: bool = False,                      # parametric EQ (tone) on the cleaned mono
         peq_bands: Optional[Sequence[dict]] = None,
         transient_suppress: bool = False,       # duck impulsive table taps / knocks
+        voice_gate: bool = False,               # mute non-speech (gaps & noise)
         dereverb: bool = False,
         dereverb_t60: float = DEFAULT_DEREVERB_T60,
         dereverb_beta: float = DEFAULT_DEREVERB_BETA,
@@ -134,6 +135,7 @@ class AutoSteerController:
             peq=peq,
             peq_bands=peq_bands,
             transient_suppress=transient_suppress,
+            voice_gate=voice_gate,
             dereverb=dereverb,
             dereverb_t60=dereverb_t60,
             dereverb_beta=dereverb_beta,
