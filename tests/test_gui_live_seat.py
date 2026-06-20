@@ -215,6 +215,86 @@ def test_multibeam_record_toggle_preconnect_is_noop(win):
     panel.live_mb_record.setChecked(False)
 
 
+def test_kit_rows_add_remove_and_distinct_guard(win):
+    """The dynamic Hardware kit list grows/shrinks and the distinct-device guard reads it back."""
+    panel = win.panels["live"]
+    n0 = len(panel._kit_rows)
+    panel._add_kit_row()
+    panel._add_kit_row()
+    assert len(panel._kit_rows) == n0 + 2
+    a, b = panel._kit_rows[-2], panel._kit_rows[-1]
+    for kr, dev in ((a, 4), (b, 5)):                               # force known distinct device data
+        kr.device.clear()
+        kr.device.addItem(f"[{dev}]", dev)
+    assert panel._kits_distinct()
+    b.device.clear()
+    b.device.addItem("[4]", 4)                                     # now both are device 4
+    assert not panel._kits_distinct()
+    panel._remove_kit_row(b)
+    assert len(panel._kit_rows) == n0 + 1
+
+
+def test_capture_everyone_routes_to_multiroom_with_two_kits(win, monkeypatch):
+    """≥2 kit rows ⇒ _multibeam_connect builds the MultiRoomController (not the single-array engine)."""
+    import conf_pipeline_control as cc
+
+    class _FakeRoom:
+        def __init__(self, *a, **k):
+            self.started = False
+
+        def set_gain_db(self, v):
+            pass
+
+        def set_mute(self, v):
+            pass
+
+        def read_level(self):
+            return 0.0
+
+        def status(self):
+            return []
+
+        def start(self):
+            self.started = True
+
+        def stop(self):
+            self.started = False
+
+        def record_tracks(self, on):
+            pass
+
+    fake = _FakeRoom()
+    monkeypatch.setattr(cc, "controls_available", lambda: True)
+    monkeypatch.setattr(cc, "MultiRoomController", lambda *a, **k: fake)
+    panel = win.panels["live"]
+    panel._add_kit_row()
+    panel._add_kit_row()
+    for kr, dev in zip(panel._kit_rows[-2:], (4, 5)):
+        kr.device.clear()
+        kr.device.addItem(f"[{dev}]", dev)
+        kr.array.clear()
+        kr.array.addItem("A", "A")
+    panel._multibeam_connect()
+    assert panel._multiroom is fake and fake.started
+    assert panel._active_ctl() is fake
+    panel._multiroom = None                                        # teardown (no real stop needed)
+
+
+def test_kits_section_visibility_follows_listening_mode(win):
+    panel = win.panels["live"]
+
+    def pick(mode):
+        panel.live_listening_mode.setCurrentIndex(panel.live_listening_mode.findData(mode))
+        panel._on_listening_mode_changed()
+
+    pick("table")
+    assert panel._kits_section.isHidden()
+    pick("multibeam")
+    assert not panel._kits_section.isHidden()
+    pick("manual")
+    assert not panel._kits_section.isHidden()
+
+
 def test_beameng_seat_nulling_pushes_other_seats(win):
     """The A/B-engine 'Null the other seats' path: with a matched target seat, push the OTHER seats'
     bearings to the steered back-end via the engine; clear when disabled."""
