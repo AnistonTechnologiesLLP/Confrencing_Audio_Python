@@ -1080,6 +1080,9 @@ class PolarisBeamformer(PreampHost, MicController):
         post_nr_preserve_level: bool = DEFAULT_POST_NR_PRESERVE_LEVEL,  # restore the level the cleaner removes (no weak voice)
         peq: bool = False,                                              # parametric EQ (tone) on the cleaned mono, after NR / before AGC
         peq_bands: Optional[Sequence[dict]] = None,                     # PEQ bands [{freqHz,gainDb,q,type}]; None/[] = no-op
+        transient_suppress: bool = False,                              # duck impulsive table taps / knocks (after AEC, before dereverb)
+        transient_threshold_db: float = 12.0,                          # crest (dB) that flags an impulsive onset
+        transient_depth_db: float = -12.0,                             # how far to duck a confirmed tap
         dereverb: bool = False,                                          # real-time late-reverb suppression (pre-NR)
         dereverb_t60: float = DEFAULT_DEREVERB_T60,                      # assumed room RT60 (s)
         dereverb_beta: float = DEFAULT_DEREVERB_BETA,                    # late-reverb over-subtraction strength
@@ -1181,6 +1184,13 @@ class PolarisBeamformer(PreampHost, MicController):
         self.peq = bool(peq)
         self._peq_bands = list(peq_bands) if peq_bands else None
         self._peq: Optional[Any] = None
+        # transient (table-tap / knock) suppressor: a temporal de-thump on the mono, AFTER AEC and BEFORE
+        # dereverb (kill the impulse before the reverb/NR smear it). OFF by default; built in _setup_runtime.
+        # Its duck_active flag FREEZES the AGC so the AGC doesn't chase the dip (Invariant B).
+        self.transient_suppress = bool(transient_suppress)
+        self._transient_threshold_db = float(transient_threshold_db)
+        self._transient_depth_db = float(transient_depth_db)
+        self._transient: Optional[Any] = None
         # real-time dereverberation (StreamingDereverb): runs BEFORE the noise reducer; built in _setup_runtime.
         self.dereverb = bool(dereverb)
         self._dereverb_t60 = float(dereverb_t60)
@@ -1620,6 +1630,14 @@ class PolarisBeamformer(PreampHost, MicController):
         # it live; runs on the cleaned mono AFTER the noise reducer, BEFORE the AGC.
         from .peq import StreamingPeq
         self._peq = StreamingPeq(self.sample_rate, self._peq_bands if self.peq else None)
+        # transient suppressor (de-thump): built only when enabled (needs numpy/scipy).
+        if self.transient_suppress:
+            from .transient import StreamingTransientSuppressor
+            self._transient = StreamingTransientSuppressor(
+                self.sample_rate, threshold_db=self._transient_threshold_db,
+                depth_db=self._transient_depth_db)
+        else:
+            self._transient = None
         # real-time dereverb (StreamingDereverb): runs on the mono BEFORE the noise reducer; off unless enabled.
         if self.dereverb:
             from .streaming_cleaner import StreamingDereverb   # lazy: avoids a module-load import cycle
@@ -1660,6 +1678,8 @@ class PolarisBeamformer(PreampHost, MicController):
             # far-end-activity gate and stays bounded via its leaky, magnitude-clipped NLMS. (A residual /
             # coherence double-talk detector inside StreamingAec is the documented upgrade.)
             mono = self._aec.process(mono, ref, near_end_active=False)  # cancel far-end echo first
+        if self._transient is not None:
+            mono = self._transient.process(mono)      # de-thump table taps BEFORE dereverb/NR smear them
         if self._dereverb is not None:
             mono = self._dereverb.process(mono, self._noise_gate)  # suppress late reverb BEFORE the noise reducer
         if self._post_nr is not None:
@@ -1811,6 +1831,8 @@ class PolarisBeamformer(PreampHost, MicController):
             self._post_nr.reset()          # drop NR streaming + floor history; its lock serializes vs an in-flight process()
         if self._peq is not None:
             self._peq.reset()              # drop the biquad ring (fresh state on re-activation)
+        if self._transient is not None:
+            self._transient.reset()        # drop the de-thump envelope + lookahead tail
         with self._beam_lock:
             self._beam.reset()             # drop the strategy's streaming history; rebuilt on next process
 
@@ -1961,8 +1983,12 @@ class PolarisBeamformer(PreampHost, MicController):
 
     def _apply_agc(self, mono: Any) -> Any:
         """Normalize the beam-output block toward ``agc_target_db`` via the shared TargetLoudnessAgc
-        (slewed, clamped, held through silence). No-op unless ``agc_target_db`` was set."""
-        return self._agc.process(mono) if self._agc is not None else mono
+        (slewed, clamped, held through silence). No-op unless ``agc_target_db`` was set. FREEZES the AGC
+        while the transient suppressor is ducking, so it doesn't chase the dip (Invariant B)."""
+        if self._agc is None:
+            return mono
+        freeze = self._transient is not None and bool(self._transient.duck_active)
+        return self._agc.process(mono, freeze=freeze)
 
     def _band_limit(self, mono: Any) -> Any:
         np = self._np

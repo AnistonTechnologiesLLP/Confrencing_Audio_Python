@@ -84,6 +84,9 @@ class LiveBeamController(PreampHost, MicController):
         post_nr_preserve_level: bool = DEFAULT_POST_NR_PRESERVE_LEVEL,
         peq: bool = False,                      # parametric EQ (tone) on the cleaned mono, after NR
         peq_bands: Optional[Sequence[dict]] = None,   # PEQ bands [{freqHz,gainDb,q,type}]; None/[] = no-op
+        transient_suppress: bool = False,       # duck impulsive table taps / knocks (after AEC, before dereverb)
+        transient_threshold_db: float = 12.0,
+        transient_depth_db: float = -12.0,
         dereverb: bool = False,
         dereverb_t60: float = DEFAULT_DEREVERB_T60,
         dereverb_beta: float = DEFAULT_DEREVERB_BETA,
@@ -121,6 +124,10 @@ class LiveBeamController(PreampHost, MicController):
         # _build_post_nr(), live-tweakable via set_peq_bands. No-op when no bands.
         self.peq = bool(peq)
         self._peq_bands = list(peq_bands) if peq_bands else None
+        # transient (table-tap) suppressor on the mono, AFTER AEC and BEFORE dereverb. OFF by default.
+        self.transient_suppress = bool(transient_suppress)
+        self._transient_threshold_db = float(transient_threshold_db)
+        self._transient_depth_db = float(transient_depth_db)
         # real-time dereverb on the mono output, BEFORE the noise reducer (same StreamingDereverb the A/B
         # engine uses). OFF by default. Built in _build_post_nr().
         self.dereverb = bool(dereverb)
@@ -153,6 +160,7 @@ class LiveBeamController(PreampHost, MicController):
         self._ola: Any = None      # numpy (FRAME,) overlap-add tail
         self._post_nr: Any = None  # post-beam noise reducer (StreamingCleaner / _PostNoiseSuppressor), or None
         self._peq: Any = None      # parametric EQ (StreamingPeq) on the cleaned mono, or None
+        self._transient: Any = None  # transient (table-tap) suppressor, runs after AEC before dereverb, or None
         self._dereverb: Any = None # real-time dereverb (StreamingDereverb), runs before the noise reducer, or None
         self._aec: Any = None      # live echo canceller (StreamingAec), runs before dereverb, or None
         self._ref_capture: Any = None  # far-end reference source (ReferenceCapture) for the AEC, or None
@@ -276,6 +284,12 @@ class LiveBeamController(PreampHost, MicController):
         # parametric EQ: always built (a true no-op when no bands) so set_peq_bands can engage it live.
         from .peq import StreamingPeq
         self._peq = StreamingPeq(self.samplerate, self._peq_bands if self.peq else None)
+        if self.transient_suppress:
+            from .transient import StreamingTransientSuppressor
+            self._transient = StreamingTransientSuppressor(
+                self.samplerate, threshold_db=self._transient_threshold_db, depth_db=self._transient_depth_db)
+        else:
+            self._transient = None
         # live AEC (StreamingAec): device-free here; the far-end reference STREAM opens in _open().
         if self.aec:
             from .streaming_aec import StreamingAec
@@ -485,6 +499,8 @@ class LiveBeamController(PreampHost, MicController):
             rc = self._ref_capture                    # read once: teardown may null it on the control thread
             ref = rc.recent(out.shape[0]) if rc is not None else None
             out = self._aec.process(out, ref, near_end_active=False)
+        if self._transient is not None:
+            out = self._transient.process(out)        # de-thump table taps before dereverb/NR
         if self._dereverb is not None:
             out = self._dereverb.process(out, False)
         if self._post_nr is not None:

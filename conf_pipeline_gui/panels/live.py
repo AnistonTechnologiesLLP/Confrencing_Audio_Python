@@ -432,6 +432,13 @@ class LivePanel(PanelBase):
         )
         self.live_autosteer_dereverb.setEnabled(False)       # enabled when auto-steer is ticked (pre-connect)
         asf.addRow("Dereverb", self.live_autosteer_dereverb)
+        self.live_autosteer_transient = QCheckBox("Suppress taps / knocks")
+        self.live_autosteer_transient.setToolTip(
+            "Duck impulsive table taps / knocks on the followed talker (a de-thump). Preserves speech "
+            "plosives via a short lookahead. Fixed at Connect."
+        )
+        self.live_autosteer_transient.setEnabled(False)      # enabled when auto-steer is ticked (pre-connect)
+        asf.addRow("Taps", self.live_autosteer_transient)
         self.live_autosteer_aec = QCheckBox("Cancel echo (needs far-end playout)")
         self.live_autosteer_aec.setToolTip(
             "Cancel the room's loudspeaker echo from the followed talker using the PC's playback (the far-end "
@@ -541,6 +548,13 @@ class LivePanel(PanelBase):
         )
         self.live_beameng_dereverb.setEnabled(False)         # enabled when the engine is ticked
         ef.addRow("Dereverb", self.live_beameng_dereverb)
+        self.live_beameng_transient = QCheckBox("Suppress taps / knocks")
+        self.live_beameng_transient.setToolTip(
+            "Duck impulsive table taps / knocks — a temporal de-thump before the dereverb / noise reducer. "
+            "Preserves speech plosives via a short lookahead (adds ~12 ms latency). Fixed at Connect."
+        )
+        self.live_beameng_transient.setEnabled(False)        # enabled when the engine is ticked
+        ef.addRow("Taps", self.live_beameng_transient)
         self.live_beameng_aec = QCheckBox("Cancel echo (needs far-end playout)")
         self.live_beameng_aec.setToolTip(
             "Cancel the room's loudspeaker echo from the beam output using the PC's playback (the far-end / "
@@ -924,6 +938,7 @@ class LivePanel(PanelBase):
         self.live_autosteer_clean.setEnabled(on)
         self.live_autosteer_depth.setEnabled(on)
         self.live_autosteer_dereverb.setEnabled(on)
+        self.live_autosteer_transient.setEnabled(on)
         self.live_autosteer_aec.setEnabled(on)
 
     def _on_autosteer_toggled(self):
@@ -949,6 +964,7 @@ class LivePanel(PanelBase):
         self.live_beameng_nr_depth.setEnabled(on)
         self.live_beameng_nr_engine.setEnabled(on)
         self.live_beameng_dereverb.setEnabled(on)
+        self.live_beameng_transient.setEnabled(on)
         self.live_beameng_aec.setEnabled(on)
         self.live_beameng_adaptnull.setEnabled(on)
         if on:
@@ -1403,6 +1419,7 @@ class LivePanel(PanelBase):
                 post_nr_floor_db=nr_floor_db, post_nr_oversub=nr_oversub,
                 post_nr_amount=_clean_amount(self.live_autosteer_depth),  # cleaning amount (keeps the voice full-bodied)
                 dereverb=self.live_autosteer_dereverb.isChecked(),      # real-time room-echo suppression
+                transient_suppress=self.live_autosteer_transient.isChecked(),   # de-thump table taps / knocks
                 aec=self.live_autosteer_aec.isChecked(),                # cancel far-end loudspeaker echo
             )
             ctrl.ctrl.set_gain_db(float(self.live_gain.value()))
@@ -1443,6 +1460,8 @@ class LivePanel(PanelBase):
             cfg["post_nr_engine"] = self.live_beameng_nr_engine.currentData()   # AI OM-LSA cleaner vs light gate
         if self.live_beameng_dereverb.isChecked():
             cfg["dereverb"] = True                    # real-time late-reverb suppression before the cleaner
+        if self.live_beameng_transient.isChecked():
+            cfg["transient_suppress"] = True          # de-thump impulsive table taps / knocks (before dereverb)
         if self.live_beameng_aec.isChecked():
             cfg["aec"] = True                         # cancel far-end loudspeaker echo (loopback reference)
         return cfg

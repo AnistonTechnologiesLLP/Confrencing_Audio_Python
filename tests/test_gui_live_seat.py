@@ -385,6 +385,16 @@ def test_peq_pushes_bands_to_active_session(win):
     panel._beam_engine = None                             # teardown
 
 
+def test_transient_suppress_flows_to_steered_cfg(win):
+    """The A/B-card 'Suppress taps / knocks' checkbox adds transient_suppress to the steered back-end cfg."""
+    panel = win.panels["live"]
+    base = {"radius_m": 0.04}
+    assert "transient_suppress" not in panel._beameng_steered_cfg(base)
+    panel.live_beameng_transient.setChecked(True)
+    assert panel._beameng_steered_cfg(base)["transient_suppress"] is True
+    panel.live_beameng_transient.setChecked(False)
+
+
 def test_beameng_seat_nulling_pushes_other_seats(win):
     """The A/B-engine 'Null the other seats' path: with a matched target seat, push the OTHER seats'
     bearings to the steered back-end via the engine; clear when disabled."""
