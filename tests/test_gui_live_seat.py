@@ -379,6 +379,18 @@ def test_transient_suppress_flows_to_steered_cfg(win):
     panel.live_beameng_transient.setChecked(False)
 
 
+def test_speech_band_present_and_flows_to_steered_cfg(win):
+    """The Hardware-card 'Capture human voice only (speech band)' checkbox exists, defaults off, and adds
+    speech_band to the A/B steered cfg when ticked."""
+    panel = win.panels["live"]
+    base = {"radius_m": 0.04}
+    assert hasattr(panel, "live_speech_band") and not panel.live_speech_band.isChecked()
+    assert "speech_band" not in panel._beameng_steered_cfg(base)
+    panel.live_speech_band.setChecked(True)
+    assert panel._beameng_steered_cfg(base)["speech_band"] is True
+    panel.live_speech_band.setChecked(False)
+
+
 def test_voice_gate_flows_to_steered_cfg(win):
     """The A/B-card 'Mute non-speech' checkbox adds voice_gate to the steered back-end cfg."""
     panel = win.panels["live"]

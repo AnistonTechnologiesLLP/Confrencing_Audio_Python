@@ -78,6 +78,11 @@ def main() -> int:
                          'highpass|lowpass), applied after cleaning, before AGC. e.g. "1000:6:1:bell"')
     ap.add_argument("--hum-notch", action="store_true",
                     help="preset: narrow 50 Hz mains-hum notches (50/100/150/200 Hz, Q=10, -12 dB bells)")
+    ap.add_argument("--speech-band", action="store_true",
+                    help="capture human voice only: high-pass the output to the speech band (cut sub-speech "
+                         "rumble / HVAC / mains hum); the array's ~5.6 kHz top stays")
+    ap.add_argument("--speech-hp-hz", type=float, default=90.0,
+                    help="speech high-pass corner in Hz (default 90; lower to ~75 for deep voices)")
     args = ap.parse_args()
 
     if not cc.controls_available():
@@ -116,6 +121,8 @@ def main() -> int:
         preamp_gain_db=args.preamp_gain_db,
         peq=bool(peq_bands),
         peq_bands=peq_bands,
+        speech_band=args.speech_band,
+        speech_highpass_hz=args.speech_hp_hz,
     )
 
     print(

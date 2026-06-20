@@ -250,6 +250,14 @@ class LivePanel(PanelBase):
         ctl_row.addWidget(self.live_active_lbl)
         ctl_row.addStretch(1)
         hw.body_lay.addLayout(ctl_row)
+        self.live_speech_band = QCheckBox("Capture human voice only (speech band)")
+        self.live_speech_band.setToolTip(
+            "High-pass the captured audio at ~90 Hz so sub-speech rumble, HVAC and 50 Hz mains hum are removed "
+            "(the array's ~5.6 kHz top stays). It only removes OUT-OF-BAND energy — it can't remove a competing "
+            "voice, music, or a tap's mid-band energy that sit INSIDE the speech band (use the voice gate / tap "
+            "suppressor / zone nulling for those). Applies to every live mode; fixed at Connect."
+        )
+        hw.body_lay.addWidget(self.live_speech_band)
 
         lay.addWidget(hw)
 
@@ -1255,6 +1263,7 @@ class LivePanel(PanelBase):
                     samplerate=float(rate),
                     monitor=self.live_monitor.isChecked(),
                     output_device=self.live_out_device.currentData(),
+                    speech_band=self.live_speech_band.isChecked(),   # capture-only-speech high-pass
                 )
             else:
                 ctl = cc.SimulatedMicController(geom)
@@ -1356,6 +1365,7 @@ class LivePanel(PanelBase):
                 gate_when_empty=self.live_autosteer_gate.isChecked(),
                 monitor=self.live_monitor.isChecked(),
                 output_device=self.live_out_device.currentData(),
+                speech_band=self.live_speech_band.isChecked(),         # capture-only-speech high-pass
                 post_nr=clean is not None,                              # AI cleaning on the auto-steer output
                 post_nr_engine=clean or "gate",
                 post_nr_floor_db=nr_floor_db, post_nr_oversub=nr_oversub,
@@ -1412,6 +1422,8 @@ class LivePanel(PanelBase):
             cfg["voice_gate"] = True                  # mute non-speech at the end of the chain
         if self.live_beameng_aec.isChecked():
             cfg["aec"] = True                         # cancel far-end loudspeaker echo (loopback reference)
+        if self.live_speech_band.isChecked():
+            cfg["speech_band"] = True                 # capture-only-speech high-pass (~90 Hz)
         return cfg
 
     def _beameng_connect(self):

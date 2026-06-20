@@ -188,3 +188,31 @@ def test_peq_off_by_default_is_noop_object():
     bf = PolarisBeamformer()                                   # no peq cfg
     bf._setup_runtime()
     assert bf._peq is not None and bf._peq._sections is None   # built but idle (true no-op)
+
+
+# --------------------------------------------------------------------------- #
+# Speech band — the ~90 Hz capture high-pass (a one-band StreamingPeq highpass)
+# --------------------------------------------------------------------------- #
+def test_speech_highpass_cuts_rumble_keeps_speech():
+    """The 90 Hz speech high-pass strongly attenuates sub-speech rumble / mains hum but passes the speech
+    band (the missing half of the speech band-pass; the ~5.6 kHz top is the existing band-limit)."""
+    bands = [{"freqHz": 90.0, "gainDb": 0.0, "q": 0.707, "type": "highpass"}]
+    assert _steady_db(StreamingPeq(FS, bands), 40) < -12.0     # deep rumble strongly cut
+    assert _steady_db(StreamingPeq(FS, bands), 50) < -6.0      # 50 Hz mains-hum region attenuated
+    assert abs(_steady_db(StreamingPeq(FS, bands), 250)) < 2.0    # a low speech fundamental ~passes
+    assert abs(_steady_db(StreamingPeq(FS, bands), 2000)) < 1.5   # the speech band passes
+
+
+def test_speech_band_wires_into_both_chains():
+    from conf_pipeline_control.live import LiveBeamController
+    from conf_pipeline_control.polaris_beamformer import PolarisBeamformer
+    from conf_pipeline_control import sensibel_8
+    bf = PolarisBeamformer(speech_band=True)
+    bf._setup_runtime()
+    assert bf._speech_hp is not None and bf._speech_hp._sections is not None   # engaged
+    off = PolarisBeamformer()
+    off._setup_runtime()
+    assert off._speech_hp is None                              # off by default
+    ctrl = LiveBeamController(sensibel_8(), speech_band=True)
+    ctrl._build_post_nr()
+    assert ctrl._speech_hp is not None and ctrl._speech_hp._sections is not None

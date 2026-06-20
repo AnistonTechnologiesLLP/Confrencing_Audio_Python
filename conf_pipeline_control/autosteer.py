@@ -103,6 +103,8 @@ class AutoSteerController:
         post_nr_preserve_level: bool = DEFAULT_POST_NR_PRESERVE_LEVEL,
         peq: bool = False,                      # parametric EQ (tone) on the cleaned mono
         peq_bands: Optional[Sequence[dict]] = None,
+        speech_band: bool = False,              # high-pass to the speech band (cut sub-speech rumble/hum)
+        speech_highpass_hz: float = 90.0,
         transient_suppress: bool = False,       # duck impulsive table taps / knocks
         voice_gate: bool = False,               # mute non-speech (gaps & noise)
         dereverb: bool = False,
@@ -154,6 +156,8 @@ class AutoSteerController:
             post_nr_preserve_level=post_nr_preserve_level,
             peq=peq,
             peq_bands=peq_bands,
+            speech_band=speech_band,
+            speech_highpass_hz=speech_highpass_hz,
             transient_suppress=transient_suppress,
             voice_gate=voice_gate,
             dereverb=dereverb,

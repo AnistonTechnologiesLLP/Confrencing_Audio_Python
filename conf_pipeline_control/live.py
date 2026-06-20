@@ -84,6 +84,8 @@ class LiveBeamController(PreampHost, MicController):
         post_nr_preserve_level: bool = DEFAULT_POST_NR_PRESERVE_LEVEL,
         peq: bool = False,                      # parametric EQ (tone) on the cleaned mono, after NR
         peq_bands: Optional[Sequence[dict]] = None,   # PEQ bands [{freqHz,gainDb,q,type}]; None/[] = no-op
+        speech_band: bool = False,              # high-pass the mono to the speech band (cut sub-speech rumble/hum)
+        speech_highpass_hz: float = 90.0,       # speech high-pass corner (Hz)
         transient_suppress: bool = False,       # duck impulsive table taps / knocks (after AEC, before dereverb)
         transient_threshold_db: float = 12.0,
         transient_depth_db: float = -12.0,
@@ -127,6 +129,10 @@ class LiveBeamController(PreampHost, MicController):
         # _build_post_nr(), live-tweakable via set_peq_bands. No-op when no bands.
         self.peq = bool(peq)
         self._peq_bands = list(peq_bands) if peq_bands else None
+        # speech band-limit: a high-pass biquad on the beam mono, BEFORE the cleaners (cut sub-speech rumble/
+        # hum). The frequency-domain beam's own top-end limit is the band's top. OFF by default.
+        self.speech_band = bool(speech_band)
+        self._speech_highpass_hz = float(speech_highpass_hz)
         # transient (table-tap) suppressor on the mono, AFTER AEC and BEFORE dereverb. OFF by default.
         self.transient_suppress = bool(transient_suppress)
         self._transient_threshold_db = float(transient_threshold_db)
@@ -167,6 +173,7 @@ class LiveBeamController(PreampHost, MicController):
         self._ola: Any = None      # numpy (FRAME,) overlap-add tail
         self._post_nr: Any = None  # post-beam noise reducer (StreamingCleaner / _PostNoiseSuppressor), or None
         self._peq: Any = None      # parametric EQ (StreamingPeq) on the cleaned mono, or None
+        self._speech_hp: Any = None  # speech high-pass (one-band StreamingPeq), runs first on the mono, or None
         self._transient: Any = None  # transient (table-tap) suppressor, runs after AEC before dereverb, or None
         self._voice_gate: Any = None # 'voice only' output gate (VoiceOnlyGate), runs last, or None
         self._dereverb: Any = None # real-time dereverb (StreamingDereverb), runs before the noise reducer, or None
@@ -292,6 +299,9 @@ class LiveBeamController(PreampHost, MicController):
         # parametric EQ: always built (a true no-op when no bands) so set_peq_bands can engage it live.
         from .peq import StreamingPeq
         self._peq = StreamingPeq(self.samplerate, self._peq_bands if self.peq else None)
+        self._speech_hp = StreamingPeq(self.samplerate, [
+            {"freqHz": self._speech_highpass_hz, "gainDb": 0.0, "q": 0.707, "type": "highpass"}
+        ]) if self.speech_band else None
         if self.transient_suppress:
             from .transient import StreamingTransientSuppressor
             self._transient = StreamingTransientSuppressor(
@@ -502,8 +512,10 @@ class LiveBeamController(PreampHost, MicController):
         self._ola[-_HOP:] = 0.0
         self._ola += y
         out = self._ola[:_HOP].copy()
+        if self._speech_hp is not None:
+            out = self._speech_hp.process(out)        # speech band: cut sub-speech rumble BEFORE the cleaners
 
-        cap = self._ab_capture                        # A/B proof: snapshot the RAW beam before any cleaner
+        cap = self._ab_capture                        # A/B proof: snapshot the (speech-banded) beam before any cleaner
         raw_ab = out if (cap is not None and not cap.done) else None
 
         # post-beam enhancement on the mono, before the meter and gain — so the meter, recording and monitor

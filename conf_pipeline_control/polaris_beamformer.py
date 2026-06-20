@@ -1087,6 +1087,8 @@ class PolarisBeamformer(PreampHost, MicController):
         post_nr_preserve_level: bool = DEFAULT_POST_NR_PRESERVE_LEVEL,  # restore the level the cleaner removes (no weak voice)
         peq: bool = False,                                              # parametric EQ (tone) on the cleaned mono, after NR / before AGC
         peq_bands: Optional[Sequence[dict]] = None,                     # PEQ bands [{freqHz,gainDb,q,type}]; None/[] = no-op
+        speech_band: bool = False,                                     # high-pass the mono to the speech band (cut sub-speech rumble/hum)
+        speech_highpass_hz: float = 90.0,                              # speech high-pass corner (Hz)
         transient_suppress: bool = False,                              # duck impulsive table taps / knocks (after AEC, before dereverb)
         transient_threshold_db: float = 12.0,                          # crest (dB) that flags an impulsive onset
         transient_depth_db: float = -12.0,                             # how far to duck a confirmed tap
@@ -1195,6 +1197,12 @@ class PolarisBeamformer(PreampHost, MicController):
         self.peq = bool(peq)
         self._peq_bands = list(peq_bands) if peq_bands else None
         self._peq: Optional[Any] = None
+        # speech band-limit: a single high-pass biquad on the beam mono, applied BEFORE the cleaners + AGC so
+        # sub-speech rumble / HVAC / mains hum is gone before it pollutes the noise floor or makes the AGC
+        # pump. The existing ~5.6 kHz low-pass (_band_limit) is the top of the band. OFF by default.
+        self.speech_band = bool(speech_band)
+        self._speech_highpass_hz = float(speech_highpass_hz)
+        self._speech_hp: Optional[Any] = None
         # transient (table-tap / knock) suppressor: a temporal de-thump on the mono, AFTER AEC and BEFORE
         # dereverb (kill the impulse before the reverb/NR smear it). OFF by default; built in _setup_runtime.
         # Its duck_active flag FREEZES the AGC so the AGC doesn't chase the dip (Invariant B).
@@ -1654,6 +1662,10 @@ class PolarisBeamformer(PreampHost, MicController):
         # it live; runs on the cleaned mono AFTER the noise reducer, BEFORE the AGC.
         from .peq import StreamingPeq
         self._peq = StreamingPeq(self.sample_rate, self._peq_bands if self.peq else None)
+        # speech high-pass: a one-band high-pass StreamingPeq (reuse the biquad cascade), or None when off.
+        self._speech_hp = StreamingPeq(self.sample_rate, [
+            {"freqHz": self._speech_highpass_hz, "gainDb": 0.0, "q": 0.707, "type": "highpass"}
+        ]) if self.speech_band else None
         # transient suppressor (de-thump): built only when enabled (needs numpy/scipy).
         if self.transient_suppress:
             from .transient import StreamingTransientSuppressor
@@ -1699,7 +1711,9 @@ class PolarisBeamformer(PreampHost, MicController):
         np = self._np
         with self._beam_lock:
             mono = self._beam.process(block)
-        cap = self._ab_capture                        # A/B proof: snapshot the RAW beam before any cleaner
+        if self._speech_hp is not None:
+            mono = self._speech_hp.process(mono)      # speech band: cut sub-speech rumble BEFORE cleaners/AGC
+        cap = self._ab_capture                        # A/B proof: snapshot the (speech-banded) beam before any cleaner
         raw_ab = mono if (cap is not None and not cap.done) else None
         if self._aec is not None:
             rc = self._ref_capture                    # read once: teardown may null it on the control thread
@@ -1865,6 +1879,8 @@ class PolarisBeamformer(PreampHost, MicController):
             self._post_nr.reset()          # drop NR streaming + floor history; its lock serializes vs an in-flight process()
         if self._peq is not None:
             self._peq.reset()              # drop the biquad ring (fresh state on re-activation)
+        if self._speech_hp is not None:
+            self._speech_hp.reset()        # drop the speech high-pass biquad state
         if self._transient is not None:
             self._transient.reset()        # drop the de-thump envelope + lookahead tail
         if self._voice_gate is not None:

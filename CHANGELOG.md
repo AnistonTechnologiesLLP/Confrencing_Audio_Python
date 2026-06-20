@@ -17,6 +17,14 @@ the TS sibling is at matching v5 parity. The desktop app is presented as
   defaults instead of the removed card's beam-count / snap / record controls).
 
 ### Added
+- **Capture human voice only (speech band)** — an opt-in ~90 Hz high-pass on the captured audio (a
+  one-band `StreamingPeq` high-pass, reused) that removes sub-speech rumble / HVAC / 50 Hz mains hum; the
+  array's existing ~5.6 kHz low-pass is the top, so the result is a ~90 Hz–5.6 kHz speech band. Applied
+  right after the beam (before the cleaners + AGC, so rumble never pollutes the noise floor or pumps the
+  AGC) in BOTH live chains; a global **"Capture human voice only (speech band)"** checkbox in the Hardware
+  card (OFF by default, every mode) + `area_autosteer.py --speech-band [--speech-hp-hz 90]`. Honest scope:
+  removes OUT-OF-band energy only — not a competing voice / music / a tap's mid-band energy that sit inside
+  the speech band (use the voice gate / tap suppressor / zone nulling for those).
 - **Voice-focus DSP suite — parametric EQ, tap suppressor, "voice only" gate, and a door / out-of-area cut.**
   Four new opt-in real-time stages on the live beam (all OFF by default, lazy-numpy, realtime-safe; the live
   chain is now `preamp → beam → AEC → transient → dereverb → noise-reduce → PEQ → AGC → band-limit → voice-gate`):
