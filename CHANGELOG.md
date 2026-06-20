@@ -10,6 +10,30 @@ the TS sibling is at matching v5 parity. The desktop app is presented as
 ## [Unreleased]
 
 ### Added
+- **Voice-focus DSP suite — parametric EQ, tap suppressor, "voice only" gate, and a door / out-of-area cut.**
+  Four new opt-in real-time stages on the live beam (all OFF by default, lazy-numpy, realtime-safe; the live
+  chain is now `preamp → beam → AEC → transient → dereverb → noise-reduce → PEQ → AGC → band-limit → voice-gate`):
+  - **Parametric EQ (`conf_pipeline_control.peq.StreamingPeq`)** — a live 4-band RBJ-biquad cascade
+    (bell / low|high shelf / high|low pass) on the cleaned output, reusing the shared PEQ model. A LIVE
+    "Tone — parametric EQ" card (tweakable while connected) + a one-click **"Hum notch (50 Hz)"** preset that
+    notches mains hum + its in-band harmonics (50/100/150/200 Hz) — more transparent on tonal hum than the
+    broadband cleaner. CLI: `area_autosteer.py --peq "freqHz:gainDb:q:type,…"` / `--hum-notch`.
+  - **Table-tap / transient suppressor (`conf_pipeline_control.transient.StreamingTransientSuppressor`)** —
+    a temporal de-thump that ducks impulsive knocks/taps (structure-borne, so spatial nulls can't catch them)
+    while **preserving speech plosives** (a short-lookahead "burst-followed-by-voicing ⇒ keep / decays ⇒
+    duck" classifier). Freezes the output AGC while ducking so it doesn't chase the dip. GUI "Suppress taps /
+    knocks" on the A/B-engine + auto-steer cards.
+  - **"Voice only" gate (`conf_pipeline_control.voice_gate.VoiceOnlyGate`)** — duck the output when the sound
+    isn't speech (gaps between phrases, paper rustle, steady hum), reusing the syllabic-modulation
+    speech-presence scorer. Onset-safe: fast attack + a shallow floor (a duck, never a hard mute) so the first
+    syllable is never clipped. GUI "Mute non-speech (gate gaps & noise)". *It does NOT remove a competing
+    human voice inside the pickup zone (that's speech) — only the spatial zone-nulling does.*
+  - **Door / out-of-area cut in auto-steer** — the auto-follow mode can now actively null your **No-pickup
+    (door) zones** and drop any talker whose direction is **outside your pickup areas / who left their seat**
+    (`conf_pipeline.seat_mapper.exclusion_zone_azimuths` / `azimuth_in_pickup_zone`; a third **exclusion tier**
+    in `compose_nulls`, ranked *detected interferer > user-drawn door > speculative empty seat*). GUI "Cut the
+    door & anyone outside the pickup area". *Needs the array bearing + drawn zones; it can't cut someone who
+    STANDS UP in place — that changes elevation, not direction, which a planar array can't see.*
 - **Multi-array room capture — combine N POLARIS kits into one room-wide "capture everyone"**
   (`conf_pipeline_control.multiroom.MultiRoomController` + `RoomKitSpec`; a dynamic add/remove **kit list
   in the LIVE Hardware card**; `conf_pipeline.seat_mapper.seats_owned_by_array`) — add ≥2 kits (each its
