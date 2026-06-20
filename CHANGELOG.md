@@ -10,6 +10,20 @@ the TS sibling is at matching v5 parity. The desktop app is presented as
 ## [Unreleased]
 
 ### Added
+- **Capture everyone — simultaneous multi-talker automix + per-person tracks**
+  (`conf_pipeline_control.multibeam`: `MultiBeamController` + `MultiTrackRecorder`; `scripts/capture_everyone.py`)
+  — instead of committing to one dominant talker, this forms **several beams at once** (one per active
+  talker) and automixes them into a single combined feed, **and** records a separate WAV track per person.
+  Talkers are detected by DOA and **snapped to defined room seats** for a stable, jitter-free aim (hybrid —
+  free DOA where no seat is near; reuses `conf_pipeline.seat_mapper`). Each beam steers to its talker while
+  **nulling the others** (multi-look LCMV over a shared FFT — N beams cost ~one), is gated by the fan-proof
+  `SpeechPresenceScorer`, and is mixed with **NOM** (number-of-open-mics) attenuation so simultaneous mics
+  don't stack their noise floors; the mixed feed gets the target-loudness AGC. Persistent **beam slots**
+  (matched by seat then bearing, with hold) keep each track on the same person across brief pauses. The
+  `MultiTrackRecorder` writes one mono WAV per beam (named by its seat) plus the mixed feed. Validated live
+  on the kit (engine streams cleanly; idle room → graceful silence). **Honest limit:** the ~40 mm 8-mic
+  array separates **2-3 well-spaced talkers** (>~40-50° apart) — closer people merge into one beam. Pure
+  planner + mixer + recorder are fully hardware-free tested (+29 tests). GUI "Capture everyone" mode to follow.
 - **Mic-input preamp — manual level trim** (`conf_pipeline_control.preamp.InputPreamp` + the `PreampHost`
   mixin; `preamp_gain_db` on every live back-end + `set_preamp_gain_db` on each live control surface; a
   "Mic input" card in the LIVE panel; CLI `--preamp-gain-db` on the live scripts) — a uniform software gain

@@ -99,6 +99,8 @@ class LivePanel(PanelBase):
         self._autosteer = None           # AutoSteerController while auto-following talkers
         self._beam_engine = None         # BeamEngine while running the steered/grid A/B
         self._twokit = None              # MultiKitController while running the dual-POLARIS automix
+        self._multibeam = None           # MultiBeamController while capturing everyone (multi-talker automix)
+        self._multibeam_rec = None       # MultiTrackRecorder while "Record tracks" is armed
         self._beameng_loc = None         # last BeamEngine current_location (for the overlay tick)
         self._ab_cap = None              # armed ABCapture during a running A/B proof, or None
         self._ab_obj = None              # the live object (engine/autosteer/ctrl) the A/B capture is on
@@ -154,6 +156,7 @@ class LivePanel(PanelBase):
         self.live_listening_mode.addItem("Clean audio (hands-off)", "clean")
         self.live_listening_mode.addItem("Manual (advanced)", "manual")
         self.live_listening_mode.addItem("Two kits (combined room)", "twokit")
+        self.live_listening_mode.addItem("Capture everyone (all talkers)", "multibeam")
         self.live_listening_mode.setToolTip(
             "Pick how the room is heard; the panel selects the right engine + sensible defaults and hides the "
             "rest. 'Clean audio (hands-off)' follows talkers and turns on AI voice cleaning. "
@@ -643,8 +646,42 @@ class LivePanel(PanelBase):
         twokit.body_lay.addWidget(self.live_twokit_status)
         lay.addWidget(twokit)
 
+        # --- CAPTURE EVERYONE: one array, a beam per talker, NOM-automix + per-person tracks ---
+        multibeam = Card("Capture everyone — all talkers at once")
+        mb_intro = QLabel("Form a beam per person (detected and snapped to room seats), mix them into one "
+                          "feed, and optionally record a separate track per person. Honest limit: this "
+                          "~40 mm array separates 2-3 well-spaced talkers; closer people merge into one beam.")
+        mb_intro.setWordWrap(True)
+        multibeam.body_lay.addWidget(mb_intro)
+        mbf = QFormLayout()
+        mbf.setRowWrapPolicy(QFormLayout.WrapLongRows)
+        mbf.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+        self.live_mb_beams = NoWheelDoubleSpinBox()
+        self.live_mb_beams.setRange(1, 3)
+        self.live_mb_beams.setDecimals(0)
+        self.live_mb_beams.setValue(3)
+        self.live_mb_beams.setToolTip("Max simultaneous beams. 2-3 is the small array's realistic ceiling.")
+        mbf.addRow("Beams", self.live_mb_beams)
+        self.live_mb_snap = QCheckBox("Snap each beam to the nearest room seat")
+        self.live_mb_snap.setChecked(True)
+        self.live_mb_snap.setToolTip("Hybrid aim: lock a beam to a defined seat for a stable, jitter-free "
+                                     "pickup; fall back to free direction-finding where no seat is near.")
+        mbf.addRow("Aim", self.live_mb_snap)
+        self.live_mb_record = QPushButton("Record per-person tracks")
+        self.live_mb_record.setCheckable(True)
+        self.live_mb_record.setToolTip("While capturing, record each beam to its own WAV (named by seat) "
+                                       "plus the mixed feed; choose a folder when you stop.")
+        self.live_mb_record.clicked.connect(self._on_multibeam_record_toggled)
+        mbf.addRow("Tracks", self.live_mb_record)
+        multibeam.body_lay.addLayout(mbf)
+        self.live_mb_status = QLabel("Pick this mode, then Connect. Speak from different seats.")
+        self.live_mb_status.setWordWrap(True)
+        multibeam.body_lay.addWidget(self.live_mb_status)
+        lay.addWidget(multibeam)
+
         # keep card refs so the Listening-mode selector can collapse the irrelevant ones
-        self._live_cards = {"hw": hw, "mic": mic, "beam": beam, "steer": steer, "eng": eng, "ov": ov, "twokit": twokit}
+        self._live_cards = {"hw": hw, "mic": mic, "beam": beam, "steer": steer, "eng": eng, "ov": ov,
+                            "twokit": twokit, "multibeam": multibeam}
 
         lay.addStretch(1)
 
@@ -719,7 +756,7 @@ class LivePanel(PanelBase):
         """True if any live session (beamformer, OCTOVOX, auto-steer, or A/B engine) is active."""
         return (self._live_ctl is not None or self._clean_monitor is not None
                 or self._autosteer is not None or self._beam_engine is not None
-                or self._twokit is not None)
+                or self._twokit is not None or self._multibeam is not None)
 
     def _active_ctl(self):
         """The active session's mute/gain control surface — the A/B engine (duck-typed:
@@ -727,6 +764,8 @@ class LivePanel(PanelBase):
         controller; ``None`` if none is connected. Sessions are mutually exclusive."""
         if self._twokit is not None:
             return self._twokit
+        if self._multibeam is not None:
+            return self._multibeam
         if self._beam_engine is not None:
             return self._beam_engine
         if self._autosteer is not None:
@@ -749,7 +788,7 @@ class LivePanel(PanelBase):
             i = self.live_beameng_mode.findData("steered")
             if i >= 0:
                 self.live_beameng_mode.setCurrentIndex(i)
-        elif mode in ("table", "twokit"):
+        elif mode in ("table", "twokit", "multibeam"):
             self.live_autosteer.setChecked(False)
             self.live_beameng.setChecked(False)
             self.live_octovox.setChecked(False)
@@ -758,15 +797,17 @@ class LivePanel(PanelBase):
             i = self.live_autosteer_clean.findData("omlsa")
             if i >= 0:
                 self.live_autosteer_clean.setCurrentIndex(i)
-        # show only the cards relevant to the chosen mode ("manual" shows all)
+        # show only the cards relevant to the chosen mode ("manual" reveals every card)
         show = {
             "follow": {"hw", "steer"},
             "clean": {"hw", "steer"},
             "seat": {"hw", "eng"},
             "table": {"hw", "beam"},
-            "manual": {"hw", "beam", "steer", "eng", "ov", "twokit"},
             "twokit": {"twokit"},
+            "multibeam": {"hw", "mic", "multibeam"},
         }.get(mode, {"hw", "beam"})
+        if mode == "manual":
+            show = set(self._live_cards)          # advanced: every card (stays correct as cards are added)
         for key, card in self._live_cards.items():
             card.set_open(key in show)
 
@@ -1097,6 +1138,9 @@ class LivePanel(PanelBase):
             return
         if self.live_listening_mode.currentData() == "twokit":
             self._twokit_connect()
+            return
+        if self.live_listening_mode.currentData() == "multibeam":
+            self._multibeam_connect()
             return
         if self.live_beameng.isChecked():
             self._beameng_connect()
@@ -1586,7 +1630,85 @@ class LivePanel(PanelBase):
         self.live_twokit_status.setText("Two kits connected — speak in each area; the active kit is output.")
         self._notify_session_changed()
 
+    def _multibeam_connect(self):
+        """Start capture-everyone: a beam per talker on ONE array, snapped to seats, NOM-automixed."""
+        if not cc.controls_available():
+            self.live_mb_status.setText("Capture-everyone needs the [control] extra (numpy + sounddevice).")
+            return
+        array_id = self._live_array_id()
+        if array_id is None:
+            self.live_mb_status.setText("Pick an array on the Hardware card first.")
+            return
+        mask = self._live_active_mask()
+        rate = float(self.live_rate.currentData() or 44100)
+        n_beams = int(self.live_mb_beams.value())
+        try:
+            ctrl = cc.MultiBeamController(
+                self.state.config, array_id, device=self.live_device.currentData(),
+                radius_m=float(self.live_radius.value()), sample_rate=rate, n_beams=n_beams,
+                snap=self.live_mb_snap.isChecked(),
+                active_mask=(list(mask) if (any(mask) and not all(mask)) else None))
+            ctrl.set_gain_db(float(self.live_gain.value()))
+            ctrl.set_mute(self.live_mute.isChecked())
+            if self.live_mb_record.isChecked():
+                rec = cc.MultiTrackRecorder(n_beams, rate)
+                rec.start()
+                ctrl.set_recorder(rec)
+                self._multibeam_rec = rec
+            ctrl.start()
+        except Exception as exc:                          # hardware open / config → report, stay disconnected
+            self.live_mb_status.setText(f"Capture-everyone connect failed: {exc}")
+            self._multibeam_rec = None
+            return
+        self._multibeam = ctrl
+        self._push_preamp_gain()
+        self._session_array_id = array_id
+        self.live_connect.setText("Disconnect")
+        self.live_mute.setEnabled(True)
+        self.live_gain.setEnabled(True)
+        self.live_mb_status.setText("Capturing — speak from different seats; each talker gets its own beam.")
+        self._notify_session_changed()
+
+    def _on_multibeam_record_toggled(self):
+        """Arm/disarm per-person recording. Mid-session it attaches/detaches the recorder live; when the
+        session ends (or recording is turned off) the tracks are written via the folder picker."""
+        if self._multibeam is None:
+            return                                        # pre-connect: just remembers the armed state
+        if self.live_mb_record.isChecked():
+            rec = cc.MultiTrackRecorder(int(self.live_mb_beams.value()), self._multibeam.sample_rate)
+            rec.start()
+            self._multibeam.set_recorder(rec)
+            self._multibeam_rec = rec
+            self.live_mb_status.setText("Recording per-person tracks …")
+        else:
+            self._multibeam.set_recorder(None)
+            self._write_multibeam_tracks()
+
+    def _write_multibeam_tracks(self):
+        """Flush the armed recorder to a user-chosen folder (no-op if nothing was recorded)."""
+        rec, self._multibeam_rec = self._multibeam_rec, None
+        if rec is None:
+            return
+        rec.stop()
+        from PySide6.QtWidgets import QFileDialog
+
+        out = QFileDialog.getExistingDirectory(self, "Save per-person tracks to …")
+        if not out:
+            return
+        paths = rec.write(out, prefix="capture")
+        self.live_mb_status.setText(f"Wrote {len(paths)} track(s) to {out}")
+
     def _live_disconnect(self):
+        if self._multibeam is not None:
+            try:
+                self._multibeam.stop()
+            finally:
+                self._multibeam = None
+            self.live_mute.setEnabled(True)
+            self.live_gain.setEnabled(True)
+            self._write_multibeam_tracks()                # flush any armed recording
+            self.live_mb_record.setChecked(False)
+            self.live_mb_status.setText("Disconnected.")
         if self._twokit is not None:
             try:
                 self._twokit.stop()
@@ -1975,6 +2097,23 @@ class LivePanel(PanelBase):
             parts.append(f"{tag} Kit {s.index + 1}: DOA {doa}{err}")
         self.live_twokit_status.setText("     ".join(parts))
 
+    def _tick_multibeam(self):
+        """Drive the level meter + per-beam 'who's talking' readout for capture-everyone."""
+        mb = self._multibeam
+        if mb is None:
+            return
+
+        def _pct(lvl):
+            return 0.0 if lvl <= 1e-6 else max(0.0, min(1.0, (20.0 * math.log10(lvl) + 60.0) / 60.0))
+
+        self.live_meter.set_level(_pct(mb.read_level()))
+        live = [b for b in mb.status() if b.active]
+        if not live:
+            self.live_mb_status.setText("Capturing — waiting for talkers …")
+        else:
+            cells = "   ".join(f"● {b.seat_id or f'{b.azimuth_deg:.0f}°'}" for b in live)
+            self.live_mb_status.setText(f"{len(live)} talking:   {cells}")
+
     def _tick_live_meter(self):
         """Update the level meter on a dB scale (−60 dB → 0 %, 0 dB → 100 %), so
         normal speech picked up by a ceiling array is clearly visible rather than
@@ -1986,6 +2125,9 @@ class LivePanel(PanelBase):
         if self._twokit is not None:
             self._tick_twokit()
             self._publish_overlay()
+            return
+        if self._multibeam is not None:
+            self._tick_multibeam()
             return
         if self._beam_engine is not None:
             self._tick_beameng()
