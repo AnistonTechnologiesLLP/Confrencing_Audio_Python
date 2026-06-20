@@ -703,3 +703,42 @@ def test_show_live_guide_menu_action(win):
     assert win.state.mode == "live"
     assert win.panels["live"]._guide_card.isVisible()     # force-shown by the menu
     _clear_guide_flag()
+
+
+def _config_two_arrays():
+    c = cp.create_config("rt", "2026-01-01T00:00:00Z")
+    c = cp.add_device(c, cp.create_microphone_array("A1", "Array 1", position=Point2D(0.0, 0.0)))
+    c = cp.add_device(c, cp.create_microphone_array("A2", "Array 2", position=Point2D(2.0, 0.0)))
+    return c
+
+
+def _force_devices(panel, indices):
+    panel.live_device.clear()
+    for d in indices:
+        panel.live_device.addItem(f"[{d}]", d)
+    panel._array_device.clear()                           # start clean (ignore the box's real devices)
+
+
+def test_each_array_keeps_its_own_input_device(win):
+    """Switching the Array dropdown follows that array's device, and a second array defaults to a
+    DIFFERENT device — never the same one the first array took."""
+    panel = win.panels["live"]
+    panel.state.set_config(_config_two_arrays())          # live_array → A1, A2 (A1 current)
+    _force_devices(panel, (4, 5, 6))
+    panel.live_array.setCurrentIndex(panel.live_array.findData("A1"))
+    panel.live_device.setCurrentIndex(panel.live_device.findData(6))   # A1 → device 6
+    assert panel._array_device.get("A1") == 6
+    panel.live_array.setCurrentIndex(panel.live_array.findData("A2"))  # switch to A2
+    assert panel.live_device.currentData() != 6           # did NOT reuse A1's device
+    panel.live_array.setCurrentIndex(panel.live_array.findData("A1"))  # back to A1
+    assert panel.live_device.currentData() == 6           # A1's device remembered
+
+
+def test_per_array_device_falls_back_when_only_one_device(win):
+    """A single available device is shared by both arrays — no crash."""
+    panel = win.panels["live"]
+    panel.state.set_config(_config_two_arrays())
+    _force_devices(panel, (7,))
+    panel.live_array.setCurrentIndex(panel.live_array.findData("A2"))
+    panel.live_array.setCurrentIndex(panel.live_array.findData("A1"))
+    assert panel.live_device.currentData() == 7
