@@ -706,9 +706,68 @@ class LivePanel(PanelBase):
         multibeam.body_lay.addWidget(self.live_mb_status)
         lay.addWidget(multibeam)
 
+        # --- TONE: parametric EQ on the cleaned output (after the cleaners, before the AGC) ---
+        peq = Card("Tone — parametric EQ", collapsed=True)
+        peq.setToolTip("Shape the cleaned voice's tone with up to 4 bands (bell / shelf / pass). Applied "
+                       "AFTER noise cleaning and BEFORE the output AGC — so a big boost is re-leveled by "
+                       "the AGC as loudness, not tone. Adjustable live while connected.")
+        pf = QFormLayout()
+        pf.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+        self.live_peq_enable = QCheckBox("Enable tone shaping")
+        self.live_peq_enable.toggled.connect(lambda *_a: None if self._refreshing else self._on_peq_changed())
+        pf.addRow("PEQ", self.live_peq_enable)
+        peq.body_lay.addLayout(pf)
+        hdr = QHBoxLayout()
+        for _t, _w in (("On", 24), ("Type", 92), ("Freq", 78), ("Gain", 72), ("Q", 56)):
+            _lb = QLabel(_t)
+            _lb.setMinimumWidth(_w)
+            hdr.addWidget(_lb)
+        hdr.addStretch(1)
+        peq.body_lay.addLayout(hdr)
+        self._peq_rows = []
+        for _ in range(cc.PEQ_MAX_BANDS if hasattr(cc, "PEQ_MAX_BANDS") else 4):
+            rl = QHBoxLayout()
+            on = QCheckBox()
+            typ = QComboBox()
+            for _label, _data in (("Bell", "bell"), ("Low shelf", "lowShelf"), ("High shelf", "highShelf"),
+                                  ("High-pass", "highpass"), ("Low-pass", "lowpass")):
+                typ.addItem(_label, _data)
+            freq = NoWheelDoubleSpinBox()
+            freq.setRange(20.0, 20000.0)
+            freq.setDecimals(0)
+            freq.setValue(1000.0)
+            freq.setSuffix(" Hz")
+            gain = NoWheelDoubleSpinBox()
+            gain.setRange(-15.0, 15.0)
+            gain.setDecimals(1)
+            gain.setValue(0.0)
+            gain.setSuffix(" dB")
+            qspin = NoWheelDoubleSpinBox()
+            qspin.setRange(0.1, 10.0)
+            qspin.setDecimals(2)
+            qspin.setSingleStep(0.1)
+            qspin.setValue(1.0)
+            r = {"on": on, "type": typ, "freq": freq, "gain": gain, "q": qspin}
+            on.toggled.connect(lambda *_a: None if self._refreshing else self._on_peq_changed())
+            typ.currentIndexChanged.connect(lambda *_a: None if self._refreshing else self._on_peq_changed())
+            for _sp in (freq, gain, qspin):
+                _sp.valueChanged.connect(lambda *_a: None if self._refreshing else self._on_peq_changed())
+            for _w in (on, typ, freq, gain, qspin):
+                rl.addWidget(_w)
+            rl.addStretch(1)
+            self._peq_rows.append(r)
+            peq.body_lay.addLayout(rl)
+        hum = QPushButton("Hum notch (50 Hz)")
+        hum.setToolTip("One-click preset: narrow notches at 50 Hz mains hum + its in-band harmonics "
+                       "(50/100/150/200 Hz, Q≈10, −12 dB) — more transparent on tonal hum than the broadband "
+                       "noise cleaner (no musical-noise artefacts).")
+        hum.clicked.connect(self._peq_hum_notch_preset)
+        peq.body_lay.addWidget(hum)
+        lay.addWidget(peq)
+
         # keep card refs so the Listening-mode selector can collapse the irrelevant ones
         self._live_cards = {"hw": hw, "mic": mic, "beam": beam, "steer": steer, "eng": eng, "ov": ov,
-                            "twokit": twokit, "multibeam": multibeam}
+                            "twokit": twokit, "multibeam": multibeam, "peq": peq}
 
         lay.addStretch(1)
 
@@ -846,10 +905,10 @@ class LivePanel(PanelBase):
                 self.live_autosteer_clean.setCurrentIndex(i)
         # show only the cards relevant to the chosen mode ("manual" reveals every card)
         show = {
-            "follow": {"hw", "steer"},
-            "clean": {"hw", "steer"},
-            "seat": {"hw", "eng"},
-            "table": {"hw", "beam"},
+            "follow": {"hw", "steer", "peq"},
+            "clean": {"hw", "steer", "peq"},
+            "seat": {"hw", "eng", "peq"},
+            "table": {"hw", "beam", "peq"},
             "twokit": {"twokit"},
             "multibeam": {"hw", "mic", "multibeam"},
         }.get(mode, {"hw", "beam"})
@@ -2006,9 +2065,49 @@ class LivePanel(PanelBase):
     def _on_preamp_gain_changed(self, _v):
         self._push_preamp_gain()
 
+    # ---- parametric EQ (tone) ----
+    def _peq_bands(self):
+        """The enabled PEQ bands as model dicts ([] when tone shaping is off / no band ticked)."""
+        if not self.live_peq_enable.isChecked():
+            return []
+        out = []
+        for r in self._peq_rows:
+            if r["on"].isChecked():
+                out.append({"freqHz": float(r["freq"].value()), "gainDb": float(r["gain"].value()),
+                            "q": float(r["q"].value()), "type": r["type"].currentData()})
+        return out
+
+    def _push_peq(self):
+        """Push the current PEQ bands to the active session (duck-typed — capture-everyone / 2-kit have no
+        PEQ stage, so guard with hasattr). Re-tunable live, like the monitor gain."""
+        ctl = self._active_ctl()
+        if ctl is not None and hasattr(ctl, "set_peq_bands"):
+            ctl.set_peq_bands(self._peq_bands() or None)
+
+    def _on_peq_changed(self):
+        self._push_peq()
+
+    def _peq_hum_notch_preset(self):
+        """Fill the bands with 50 Hz mains-hum notches (50/100/150/200 Hz, Q=10, −12 dB bells) + enable."""
+        self._refreshing = True
+        try:
+            for r, f in zip(self._peq_rows, (50.0, 100.0, 150.0, 200.0)):
+                r["on"].setChecked(True)
+                i = r["type"].findData("bell")
+                if i >= 0:
+                    r["type"].setCurrentIndex(i)
+                r["freq"].setValue(f)
+                r["gain"].setValue(-12.0)
+                r["q"].setValue(10.0)
+            self.live_peq_enable.setChecked(True)
+        finally:
+            self._refreshing = False
+        self._push_peq()
+
     def _notify_session_changed(self):
         """Tell the shell (ModeBar live dot) the session state flipped, and mark the Connect/Disconnect
         button destructive while a session runs (it reads 'Disconnect' then)."""
+        self._push_peq()                  # apply the current tone (PEQ) to a freshly-connected session
         set_danger(self.live_connect, self._live_busy())
         w = self.window()
         if hasattr(w, "_live_session_changed"):

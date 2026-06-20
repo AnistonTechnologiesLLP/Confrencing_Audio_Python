@@ -338,6 +338,53 @@ def test_arrays_section_always_present(win):
     assert hasattr(panel, "_arrays_section") and hasattr(panel, "live_arrays_status")
 
 
+# --------------------------------------------------------------------------- #
+# Tone — parametric EQ (PEQ)
+# --------------------------------------------------------------------------- #
+def test_peq_card_present_and_default_off(win):
+    panel = win.panels["live"]
+    assert "peq" in panel._live_cards
+    assert hasattr(panel, "live_peq_enable") and not panel.live_peq_enable.isChecked()
+    assert len(panel._peq_rows) == 4
+    assert panel._peq_bands() == []                       # off → no bands
+
+
+def test_peq_hum_notch_preset_fills_50hz_bands(win):
+    panel = win.panels["live"]
+    panel._peq_hum_notch_preset()
+    bands = panel._peq_bands()
+    assert [b["freqHz"] for b in bands] == [50.0, 100.0, 150.0, 200.0]
+    assert all(b["type"] == "bell" and b["gainDb"] == -12.0 and b["q"] == 10.0 for b in bands)
+    panel.live_peq_enable.setChecked(False)               # teardown
+
+
+def test_peq_pushes_bands_to_active_session(win):
+    """Editing a PEQ band while a session is live pushes the bands to the active controller; disabling
+    pushes None (duck-typed via _active_ctl, like the monitor gain)."""
+    cap = {}
+
+    class _FakeEng:
+        def set_peq_bands(self, bands): cap["bands"] = bands
+        def set_mute(self, v): pass
+        def set_gain_db(self, v): pass
+        def read_level(self): return 0.0
+
+    panel = win.panels["live"]
+    panel._beam_engine = _FakeEng()
+    assert panel._active_ctl() is panel._beam_engine
+    panel.live_peq_enable.setChecked(True)
+    r = panel._peq_rows[0]
+    r["on"].setChecked(True)
+    r["freq"].setValue(1000.0)
+    r["gain"].setValue(8.0)
+    panel._on_peq_changed()
+    assert cap["bands"] and cap["bands"][0]["freqHz"] == 1000.0 and cap["bands"][0]["gainDb"] == 8.0
+    panel.live_peq_enable.setChecked(False)
+    panel._on_peq_changed()
+    assert cap["bands"] is None                           # disabled → None (true bypass)
+    panel._beam_engine = None                             # teardown
+
+
 def test_beameng_seat_nulling_pushes_other_seats(win):
     """The A/B-engine 'Null the other seats' path: with a matched target seat, push the OTHER seats'
     bearings to the steered back-end via the engine; clear when disabled."""
