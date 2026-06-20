@@ -169,6 +169,52 @@ def test_preamp_push_skips_a_controller_without_the_setter(win):
     panel._beam_engine = None                                      # drop the non-conformant stub before fixture teardown
 
 
+def test_multibeam_mode_and_card_present(win):
+    """The 'Capture everyone' listening mode + card are wired in."""
+    panel = win.panels["live"]
+    assert "multibeam" in panel._live_cards
+    items = [panel.live_listening_mode.itemData(i) for i in range(panel.live_listening_mode.count())]
+    assert "multibeam" in items
+
+
+def test_multibeam_active_ctl_routes_mute_and_gain(win):
+    """With a capture-everyone session active, _active_ctl resolves to it and the transport Mute/Gain
+    route to the engine's mixed-feed trim (duck-typed, like the A/B engine)."""
+    class _FakeMB:
+        def __init__(self):
+            self.gain = None
+            self.mute = None
+
+        def set_gain_db(self, v):
+            self.gain = float(v)
+
+        def set_mute(self, v):
+            self.mute = bool(v)
+
+        def read_level(self):
+            return 0.0
+
+    panel = win.panels["live"]
+    mb = _FakeMB()
+    panel._multibeam = mb
+    assert panel._active_ctl() is mb
+    panel.live_gain.setValue(-6)
+    panel._live_gain_changed(-6)
+    assert mb.gain == -6.0
+    panel.live_mute.setChecked(True)
+    panel._live_toggle_mute()
+    assert mb.mute is True
+    panel._multibeam = None                                        # teardown
+
+
+def test_multibeam_record_toggle_preconnect_is_noop(win):
+    """Arming 'Record per-person tracks' before connecting just remembers the state — never raises."""
+    panel = win.panels["live"]
+    panel.live_mb_record.setChecked(True)
+    panel._on_multibeam_record_toggled()
+    panel.live_mb_record.setChecked(False)
+
+
 def test_beameng_seat_nulling_pushes_other_seats(win):
     """The A/B-engine 'Null the other seats' path: with a matched target seat, push the OTHER seats'
     bearings to the steered back-end via the engine; clear when disabled."""

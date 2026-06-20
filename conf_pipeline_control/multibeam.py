@@ -395,6 +395,8 @@ class MultiBeamController:
         self._plan_thread: Optional[threading.Thread] = None
         self._stream: Any = None
         self._recorder: Any = None
+        self._gain_db = 0.0
+        self._muted = False
 
     @property
     def n_beams(self) -> int:
@@ -408,6 +410,21 @@ class MultiBeamController:
         """Attach (or clear with ``None``) a `MultiTrackRecorder` the engine feeds per block — the
         "Record tracks" hook. Atomic reference write; the audio thread reads it lock-free."""
         self._recorder = recorder
+
+    # duck-typed mute/gain on the mixed feed (so the GUI transport's _active_ctl surface reaches it)
+    def set_gain_db(self, gain_db: float) -> None:
+        self._gain_db = float(gain_db)
+
+    def set_mute(self, muted: bool) -> None:
+        self._muted = bool(muted)
+
+    @property
+    def muted(self) -> bool:
+        return self._muted
+
+    @property
+    def gain_db(self) -> float:
+        return self._gain_db
 
     # ---- core orchestration (directly callable; tests drive these with stubs) ----
     def plan(self, t: Optional[float] = None) -> None:
@@ -439,6 +456,10 @@ class MultiBeamController:
         mixed, monos, _gates = self._mixer.process_block(block)
         if self._agc is not None:
             mixed = self._agc.process(mixed)
+        if self._muted:
+            mixed = np.zeros_like(np.asarray(mixed, dtype=np.float32))
+        elif self._gain_db != 0.0:
+            mixed = (np.asarray(mixed, dtype=np.float32) * (10.0 ** (self._gain_db / 20.0))).astype(np.float32)
         arr = np.asarray(mixed)
         lvl = float(np.sqrt(np.mean(arr * arr))) if arr.size else 0.0
         with self._lock:
