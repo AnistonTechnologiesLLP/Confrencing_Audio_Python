@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import threading
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, Sequence
 
 from . import doa
 from .beamformer import MODE_SUPERDIRECTIVE, design_multi_bearings
@@ -87,6 +87,8 @@ class AutoSteerController:
         post_nr_oversub: float = DEFAULT_POST_NR_OVERSUB,
         post_nr_amount: float = DEFAULT_POST_NR_AMOUNT,
         post_nr_preserve_level: bool = DEFAULT_POST_NR_PRESERVE_LEVEL,
+        peq: bool = False,                      # parametric EQ (tone) on the cleaned mono
+        peq_bands: Optional[Sequence[dict]] = None,
         dereverb: bool = False,
         dereverb_t60: float = DEFAULT_DEREVERB_T60,
         dereverb_beta: float = DEFAULT_DEREVERB_BETA,
@@ -128,6 +130,8 @@ class AutoSteerController:
             post_nr_oversub=post_nr_oversub,
             post_nr_amount=post_nr_amount,
             post_nr_preserve_level=post_nr_preserve_level,
+            peq=peq,
+            peq_bands=peq_bands,
             dereverb=dereverb,
             dereverb_t60=dereverb_t60,
             dereverb_beta=dereverb_beta,
@@ -147,6 +151,10 @@ class AutoSteerController:
         self._last_sig: Optional[tuple[tuple, tuple]] = None  # quantized (looks, nulls) signature
         self._hold = 0
         self.error = ""
+
+    def set_peq_bands(self, bands: Optional[Sequence[dict]] = None) -> None:
+        """Forward live parametric-EQ band changes to the underlying live controller."""
+        self.ctrl.set_peq_bands(bands)
 
     # ---- lifecycle ----
     def start(self) -> None:

@@ -23,7 +23,7 @@ import math
 import queue
 import threading
 import wave
-from typing import Any, Optional
+from typing import Any, Optional, Sequence
 
 from .audio import controls_available, missing_dependencies
 from .beamformer import BeamDesign
@@ -82,6 +82,8 @@ class LiveBeamController(PreampHost, MicController):
         post_nr_minstat: bool = DEFAULT_POST_NR_MINSTAT,
         post_nr_amount: float = DEFAULT_POST_NR_AMOUNT,
         post_nr_preserve_level: bool = DEFAULT_POST_NR_PRESERVE_LEVEL,
+        peq: bool = False,                      # parametric EQ (tone) on the cleaned mono, after NR
+        peq_bands: Optional[Sequence[dict]] = None,   # PEQ bands [{freqHz,gainDb,q,type}]; None/[] = no-op
         dereverb: bool = False,
         dereverb_t60: float = DEFAULT_DEREVERB_T60,
         dereverb_beta: float = DEFAULT_DEREVERB_BETA,
@@ -115,6 +117,10 @@ class LiveBeamController(PreampHost, MicController):
         self._post_nr_minstat = bool(post_nr_minstat)
         self._post_nr_amount = min(1.0, max(0.0, float(post_nr_amount)))
         self._post_nr_preserve_level = bool(post_nr_preserve_level)
+        # parametric EQ (StreamingPeq): tone-shape the cleaned mono AFTER the noise reducer; built in
+        # _build_post_nr(), live-tweakable via set_peq_bands. No-op when no bands.
+        self.peq = bool(peq)
+        self._peq_bands = list(peq_bands) if peq_bands else None
         # real-time dereverb on the mono output, BEFORE the noise reducer (same StreamingDereverb the A/B
         # engine uses). OFF by default. Built in _build_post_nr().
         self.dereverb = bool(dereverb)
@@ -146,6 +152,7 @@ class LiveBeamController(PreampHost, MicController):
         self._inbuf: Any = None    # numpy (FRAME, M) sliding input
         self._ola: Any = None      # numpy (FRAME,) overlap-add tail
         self._post_nr: Any = None  # post-beam noise reducer (StreamingCleaner / _PostNoiseSuppressor), or None
+        self._peq: Any = None      # parametric EQ (StreamingPeq) on the cleaned mono, or None
         self._dereverb: Any = None # real-time dereverb (StreamingDereverb), runs before the noise reducer, or None
         self._aec: Any = None      # live echo canceller (StreamingAec), runs before dereverb, or None
         self._ref_capture: Any = None  # far-end reference source (ReferenceCapture) for the AEC, or None
@@ -266,12 +273,23 @@ class LiveBeamController(PreampHost, MicController):
                 gmin_db=self._dereverb_gmin_db, frame=self._post_nr_frame)
         else:
             self._dereverb = None
+        # parametric EQ: always built (a true no-op when no bands) so set_peq_bands can engage it live.
+        from .peq import StreamingPeq
+        self._peq = StreamingPeq(self.samplerate, self._peq_bands if self.peq else None)
         # live AEC (StreamingAec): device-free here; the far-end reference STREAM opens in _open().
         if self.aec:
             from .streaming_aec import StreamingAec
             self._aec = StreamingAec(self.samplerate, n_taps=self._aec_n_taps, mu=self._aec_mu)
         else:
             self._aec = None
+
+    def set_peq_bands(self, bands: Optional[Sequence[dict]] = None) -> None:
+        """Set/replace the parametric-EQ bands live (``[{freqHz,gainDb,q,type}]``); ``None``/``[]`` disables.
+        Applied on the next block (StreamingPeq rebinds atomically — no audio-thread lock)."""
+        self._peq_bands = list(bands) if bands else None
+        self.peq = bool(self._peq_bands)
+        if self._peq is not None:
+            self._peq.set_bands(self._peq_bands)
 
     def _start_ref_capture(self) -> None:
         """Open the far-end reference source when AEC is on (never raises; degrades to no reference)."""
@@ -471,6 +489,8 @@ class LiveBeamController(PreampHost, MicController):
             out = self._dereverb.process(out, False)
         if self._post_nr is not None:
             out = self._post_nr.process(out, False)
+        if self._peq is not None:
+            out = self._peq.process(out)              # parametric EQ (tone) on the cleaned mono
         if raw_ab is not None:
             cap.feed(raw_ab, out)                     # A/B proof: raw beam vs the cleaned (pre-gain) mono
 
