@@ -89,6 +89,15 @@ def test_compose_nulls_backward_compatible_without_exclusion():
     assert compose_nulls([30.0], [120.0], 0.0, 2) == [30.0, 120.0]   # unchanged when no exclusion passed
 
 
+def test_beamformer_set_exclusion_nulls_feeds_the_arbiter():
+    from conf_pipeline_control.polaris_beamformer import PolarisBeamformer
+    bf = PolarisBeamformer()
+    bf.set_exclusion_nulls([60.0, 120.0])
+    assert bf._exclusion_nulls == [60.0, 120.0]                       # stored for compose_nulls' exclusion tier
+    bf.set_exclusion_nulls(None)
+    assert bf._exclusion_nulls == []                                 # cleared
+
+
 # --------------------------------------------------------------------------- #
 # auto-steer zone-cut policy (the pure helper the control loop uses)
 # --------------------------------------------------------------------------- #

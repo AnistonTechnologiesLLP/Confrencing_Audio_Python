@@ -762,7 +762,7 @@ class LivePanel(PanelBase):
         hdr.addStretch(1)
         peq.body_lay.addLayout(hdr)
         self._peq_rows = []
-        for _ in range(cc.PEQ_MAX_BANDS if hasattr(cc, "PEQ_MAX_BANDS") else 4):
+        for _ in range(4):                                   # conf_pipeline.model.PEQ_MAX_BANDS
             rl = QHBoxLayout()
             on = QCheckBox()
             typ = QComboBox()

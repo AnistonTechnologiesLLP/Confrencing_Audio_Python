@@ -43,6 +43,7 @@ class VoiceOnlyGate:
         self._release_ms = max(0.1, float(release_ms))
         self._mod_ref = mod_ref
         self._scorer: Any = None
+        self._scorer_hop = 0.0              # the hop_seconds the scorer's EMAs were built for
         self._gain = 1.0
         self._prev_rms = 0.0
         self.gate_open = True               # telemetry (Invariant K)
@@ -50,11 +51,15 @@ class VoiceOnlyGate:
         self.score = 1.0
 
     def _ensure(self, hop_seconds: float) -> None:
-        if self._scorer is None:
-            from .multikit import DEFAULT_MOD_REF, SpeechPresenceScorer   # lazy: reuse the 2-kit scorer
-            self._scorer = SpeechPresenceScorer(
-                hop_seconds=hop_seconds,
-                mod_ref=self._mod_ref if self._mod_ref is not None else DEFAULT_MOD_REF)
+        # Rebuild the scorer if the block cadence changes (driver-chosen / a short final block) — the EMA
+        # alphas are derived from hop_seconds, so a stale cadence would mis-weight the modulation estimate.
+        if self._scorer is not None and abs(hop_seconds - self._scorer_hop) < 1e-5:
+            return
+        from .multikit import DEFAULT_MOD_REF, SpeechPresenceScorer       # lazy: reuse the 2-kit scorer
+        self._scorer = SpeechPresenceScorer(
+            hop_seconds=hop_seconds,
+            mod_ref=self._mod_ref if self._mod_ref is not None else DEFAULT_MOD_REF)
+        self._scorer_hop = hop_seconds
 
     def process(self, block: Any, noise_gate: Any = None) -> Any:
         try:

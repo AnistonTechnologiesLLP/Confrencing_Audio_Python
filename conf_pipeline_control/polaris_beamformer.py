@@ -1155,6 +1155,7 @@ class PolarisBeamformer(PreampHost, MicController):
         self.seat_null_max_count = seat_null_max_count
         self._switch_margin_deg = float(switch_margin_deg)   # tracker hysteresis; bounds talker-exclusion
         self._explicit_nulls: list = []      # caller-supplied seat/manual bearings (set_nulls); DOA reads
+        self._exclusion_nulls: list = []     # user-drawn exclusion-zone (door) bearings (set_exclusion_nulls)
         self._active_nulls: list = []        # bearings actually nulled this tick (telemetry)
         self.beam_bandlimit_hz = beam_bandlimit_hz
         # target-loudness AGC on the beam OUTPUT (control-pure: driven by output RMS, NOT distance/room).
@@ -1403,6 +1404,12 @@ class PolarisBeamformer(PreampHost, MicController):
         time-domain tiers have no null degrees of freedom). ``None``/``[]`` clears them."""
         self._explicit_nulls = [float(b) for b in (bearings or [])]
 
+    def set_exclusion_nulls(self, bearings: Optional[Sequence[float]] = None) -> None:
+        """Set the user-drawn EXCLUSION-zone (e.g. door) bearings (deg) to null. These rank above speculative
+        empty-seat nulls and below measured interferers in :func:`compose_nulls`. ``None``/``[]`` clears them.
+        Frequency-domain modes only (the time-domain tiers have no null degrees of freedom)."""
+        self._exclusion_nulls = [float(b) for b in (bearings or [])]
+
     def set_peq_bands(self, bands: Optional[Sequence[dict]] = None) -> None:
         """Set/replace the parametric-EQ bands live (``[{freqHz,gainDb,q,type}]``); ``None``/``[]`` disables
         it. Applied on the next block — StreamingPeq rebinds atomically, so no audio-thread lock is held."""
@@ -1445,6 +1452,7 @@ class PolarisBeamformer(PreampHost, MicController):
             detected = [d.azimuth_deg for d in dets if _az_sep(d.azimuth_deg, look_az) >= talker_guard]
         return compose_nulls(
             detected, list(self._explicit_nulls), look_az, self.geometry.n_active - 1,
+            exclusion=list(self._exclusion_nulls),
             min_sep_deg=self.null_min_sep_deg, merge_sep_deg=self.null_merge_sep_deg,
             seat_null_max_count=self.seat_null_max_count,
         )
