@@ -23,8 +23,10 @@ people merge into one beam/slot.
 """
 from __future__ import annotations
 
+import threading
+import time
 from dataclasses import dataclass
-from typing import List, Optional, Sequence, Tuple
+from typing import Any, Callable, List, Optional, Sequence, Tuple
 
 from conf_pipeline.model import angular_separation_deg
 from conf_pipeline.seat_mapper import (
@@ -33,7 +35,7 @@ from conf_pipeline.seat_mapper import (
     seat_azimuth_for_array,
 )
 
-from .geometry import ArrayGeometry
+from .geometry import SOUND_SPEED_MPS, ArrayGeometry, sensibel_8, with_active_channels
 
 DEFAULT_N_BEAMS = 3                 # the small array's practical ceiling (2-3 separable talkers)
 DEFAULT_HOLD_SECONDS = 0.6          # keep a beam through a brief pause before releasing the slot
@@ -267,3 +269,248 @@ class MultiBeamMixer:
             b.reset()
         for s in self._scorers:
             s.reset()
+
+
+# --------------------------------------------------------------------------- DOA source + controller
+class _CovarianceTap:
+    """Accumulate a DOA band covariance from raw ``(n, M)`` blocks — a sliding Hann STFT with an EMA
+    outer-product, band-limited to the DOA band. The default ``doa_source`` for `MultiBeamController`:
+    :meth:`process_block` runs on the audio thread; :meth:`snapshot_covariance` is read by the planner.
+    Only the small covariance update/copy is locked — the FFT/outer-product run lock-free."""
+
+    def __init__(self, geom: ArrayGeometry, sample_rate: float, *, frame: int = 1024, alpha: float = 0.05):
+        import numpy as np
+
+        from . import doa
+
+        self._F = int(frame)
+        self._H = self._F // 2
+        self._a = float(alpha)
+        M = geom.n_channels
+        self._win = np.hanning(self._F).astype(float)
+        self._inbuf = np.zeros((self._F, M), dtype=float)
+        self._inq = np.zeros((0, M), dtype=float)
+        freqs_full = np.fft.rfftfreq(self._F, d=1.0 / float(sample_rate))
+        self._band = doa.band_indices(freqs_full)
+        self._freqs = freqs_full[self._band]
+        self._cov: Any = None
+        self._lock = threading.Lock()
+
+    def process_block(self, block: object) -> None:
+        import numpy as np
+
+        x = np.asarray(block, dtype=float)
+        self._inq = np.concatenate([self._inq, x], axis=0)
+        while self._inq.shape[0] >= self._H:
+            hop = self._inq[: self._H]
+            self._inq = self._inq[self._H:]
+            self._inbuf[: -self._H] = self._inbuf[self._H:]
+            self._inbuf[-self._H:] = hop
+            X = np.fft.rfft(self._inbuf * self._win[:, None], axis=0)
+            xb = X[self._band, :]
+            inst = xb[:, :, None] * np.conj(xb[:, None, :])              # (n_band, M, M) — lock-free
+            with self._lock:
+                self._cov = inst.astype(complex) if self._cov is None else self._cov + self._a * (inst - self._cov)
+
+    def snapshot_covariance(self) -> Tuple[Any, Any]:
+        with self._lock:
+            if self._cov is None:
+                return None, None
+            return self._cov.copy(), self._freqs
+
+    def reset(self) -> None:
+        with self._lock:
+            self._cov = None
+
+
+@dataclass(frozen=True)
+class BeamStatus:
+    """One beam's published state for the GUI: which seat/azimuth it holds and whether it's live."""
+
+    index: int
+    azimuth_deg: Optional[float]
+    seat_id: Optional[str]
+    active: bool
+    held: bool
+    level: float
+
+
+class MultiBeamController:
+    """Capture **everyone** on one array: detect talkers → snap to seats → run N beams → NOM-automix.
+
+    The audio callback dispatches each raw block to the DOA source (covariance) and the mixer (N beams →
+    mixed + per-beam monos), AGC-normalizes the mixed feed, emits it, and stashes the monos for the
+    recorder. A control thread ticks the planner (`doa.detect` → `snap_targets` → `BeamSlotTracker` →
+    `mixer.set_slots`) at ``plan_hz``. Stub-injectable (``doa_source_factory`` / ``mixer_factory`` /
+    ``output_stream_factory`` / ``time_fn``) so the orchestration is fully hardware-free testable; the
+    real `start`/`stop` open a sounddevice stream + the plan thread."""
+
+    def __init__(self, config: object, array_id: Optional[str], *, device: Optional[int] = None,
+                 radius_m: float = 0.04, active_mask: Optional[Sequence[bool]] = None,
+                 dead_capsule: Optional[int] = None, sample_rate: float = 44100.0, block_ms: float = 32.0,
+                 n_beams: int = DEFAULT_N_BEAMS, snap: bool = True, plan_hz: float = 8.0,
+                 off_nadir_deg: float = 90.0, hold_seconds: float = DEFAULT_HOLD_SECONDS,
+                 match_radius_deg: float = DEFAULT_MATCH_RADIUS_DEG,
+                 max_snap_separation_deg: float = DEFAULT_MAX_SEPARATION_DEG, loading: float = 0.05,
+                 nfft: int = 1024, agc_target_db: Optional[float] = None, output_callback: Optional[Callable[[object], None]] = None,
+                 doa_source_factory: Optional[Callable[..., Any]] = None,
+                 mixer_factory: Optional[Callable[..., Any]] = None,
+                 output_stream_factory: Optional[Callable[..., Any]] = None,
+                 time_fn: Optional[Callable[[], float]] = None):
+        mask: Optional[List[bool]] = list(active_mask) if active_mask is not None else None
+        if mask is None and dead_capsule is not None:
+            mask = [i != int(dead_capsule) for i in range(8)]
+        geom = sensibel_8(radius_m=radius_m)
+        if mask is not None:
+            geom = with_active_channels(geom, mask)
+        self._geom = geom
+        self._config = config
+        self._array_id = array_id
+        self.device = device
+        self.sample_rate = float(sample_rate)
+        self.blocksize = max(1, int(round(self.sample_rate * block_ms / 1000.0)))
+        self._hop_s = self.blocksize / self.sample_rate
+        self._n = int(n_beams)
+        self._snap = bool(snap)
+        self._max_snap = float(max_snap_separation_deg)
+        self._off_nadir = float(off_nadir_deg)
+        self._plan_dt = 1.0 / max(1.0, float(plan_hz))
+        self._time = time_fn or time.monotonic
+        self._tracker = BeamSlotTracker(n_slots=self._n, hold_seconds=hold_seconds, match_radius_deg=match_radius_deg)
+        self._mixer = (mixer_factory or (lambda: MultiBeamMixer(
+            geom, self.sample_rate, SOUND_SPEED_MPS, n_beams=self._n, off_nadir_deg=off_nadir_deg,
+            loading=loading, frame=nfft, hop_seconds=self._hop_s)))()
+        self._doa = (doa_source_factory or (lambda: _CovarianceTap(geom, self.sample_rate, frame=nfft)))()
+        self._output_stream_factory = output_stream_factory
+        self._output_cb = output_callback
+        from .agc import TargetLoudnessAgc
+        self._agc = TargetLoudnessAgc(target_db=agc_target_db) if agc_target_db is not None else None
+        self._lock = threading.Lock()
+        self._slots: List[BeamSlot] = [BeamSlot(i, None, None, False, False) for i in range(self._n)]
+        self._monos: List[object] = []
+        self._level = 0.0
+        self._streaming = False
+        self.error: Optional[str] = None
+        self._stop = threading.Event()
+        self._plan_thread: Optional[threading.Thread] = None
+        self._stream: Any = None
+
+    @property
+    def n_beams(self) -> int:
+        return self._n
+
+    @property
+    def streaming(self) -> bool:
+        return self._streaming
+
+    # ---- core orchestration (directly callable; tests drive these with stubs) ----
+    def plan(self, t: Optional[float] = None) -> None:
+        """One control-thread tick: detect talkers → snap → assign to slots → re-aim the mixer."""
+        from . import doa
+
+        now = self._time() if t is None else float(t)
+        cov, freqs = self._doa.snapshot_covariance()
+        if cov is None:
+            return
+        res = doa.detect(cov, freqs, self._geom, off_nadir_deg=self._off_nadir, max_talkers=self._n)
+        dets = [(d.azimuth_deg, d.salience_db) for d in res.detections] if res.active else []
+        targets = snap_targets(self._config, self._array_id, dets, snap=self._snap, max_separation_deg=self._max_snap)
+        slots = self._tracker.update(targets, now)
+        self._mixer.set_slots(slots)
+        with self._lock:
+            self._slots = slots
+
+    def process_block(self, block: object) -> object:
+        """One audio-thread block: feed the DOA covariance + the mixer, AGC the mixed feed, emit it, and
+        stash the per-beam monos for the recorder. Returns the mixed mono."""
+        import numpy as np
+
+        self._doa.process_block(block)                          # accumulate covariance (mono ignored)
+        mixed, monos, _gates = self._mixer.process_block(block)
+        if self._agc is not None:
+            mixed = self._agc.process(mixed)
+        arr = np.asarray(mixed)
+        lvl = float(np.sqrt(np.mean(arr * arr))) if arr.size else 0.0
+        with self._lock:
+            self._monos = list(monos)
+            self._level = lvl
+        if self._output_cb is not None:
+            try:
+                self._output_cb(mixed)                          # realtime: never throw into the callback
+            except Exception as exc:
+                self.error = f"output_callback raised: {exc}"
+        return mixed
+
+    # ---- introspection ----
+    def latest_tracks(self) -> List[object]:
+        """The most recent per-beam monos (the per-person tracks) — copied for the recorder."""
+        with self._lock:
+            return list(self._monos)
+
+    def read_level(self) -> float:
+        with self._lock:
+            return self._level
+
+    def status(self) -> List[BeamStatus]:
+        with self._lock:
+            slots, lvl = list(self._slots), self._level
+        return [BeamStatus(s.index, s.azimuth_deg, s.seat_id, s.active, s.held, lvl if s.active else 0.0)
+                for s in slots]
+
+    def reset(self) -> None:
+        self._tracker.reset()
+        self._mixer.reset()
+        self._doa.reset()
+
+    # ---- live: open the array stream + the planner thread ----
+    def start(self) -> None:
+        from .audio import controls_available
+
+        if not controls_available():
+            raise RuntimeError('Live capture needs the [control] extra: pip install -e ".[control]"')
+        import sounddevice as sd
+
+        self._stop.clear()
+        self._stream = sd.InputStream(
+            samplerate=self.sample_rate, channels=8, blocksize=self.blocksize,
+            device=self.device, dtype="float32", callback=self._cb)
+        self._stream.start()
+        self._plan_thread = threading.Thread(target=self._plan_loop, name="multibeam-plan", daemon=True)
+        self._plan_thread.start()
+        self._streaming = True
+
+    def _cb(self, indata: Any, frames: int, time_info: Any, status: Any) -> None:
+        try:
+            self.process_block(indata)
+        except Exception as exc:                                # never throw into the PortAudio callback
+            self.error = f"audio callback raised: {exc}"
+
+    def _plan_loop(self) -> None:
+        while not self._stop.is_set():
+            try:
+                self.plan()
+            except Exception as exc:
+                self.error = f"plan tick raised: {exc}"
+            self._stop.wait(self._plan_dt)
+
+    def stop(self) -> None:
+        self._stop.set()
+        th = self._plan_thread
+        if th is not None:
+            th.join(timeout=2.0)
+            self._plan_thread = None
+        if self._stream is not None:
+            try:
+                self._stream.stop()
+                self._stream.close()
+            finally:
+                self._stream = None
+        self._streaming = False
+
+    def __enter__(self) -> "MultiBeamController":
+        self.start()
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self.stop()
+
