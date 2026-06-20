@@ -446,6 +446,14 @@ class LivePanel(PanelBase):
         )
         self.live_autosteer_voicegate.setEnabled(False)      # enabled when auto-steer is ticked (pre-connect)
         asf.addRow("Voice only", self.live_autosteer_voicegate)
+        self.live_autosteer_zonecut = QCheckBox("Cut the door & anyone outside the pickup area")
+        self.live_autosteer_zonecut.setToolTip(
+            "Actively null your No-pickup (door) zones AND drop any talker whose direction is outside your "
+            "pickup areas / who left their seat. Needs the array's bearing set + pickup/exclusion zones drawn "
+            "in DESIGN. (It can't cut someone who STANDS UP in place — that changes elevation, not direction.)"
+        )
+        self.live_autosteer_zonecut.setEnabled(False)        # enabled when auto-steer is ticked (pre-connect)
+        asf.addRow("Zone cut", self.live_autosteer_zonecut)
         self.live_autosteer_aec = QCheckBox("Cancel echo (needs far-end playout)")
         self.live_autosteer_aec.setToolTip(
             "Cancel the room's loudspeaker echo from the followed talker using the PC's playback (the far-end "
@@ -955,6 +963,7 @@ class LivePanel(PanelBase):
         self.live_autosteer_dereverb.setEnabled(on)
         self.live_autosteer_transient.setEnabled(on)
         self.live_autosteer_voicegate.setEnabled(on)
+        self.live_autosteer_zonecut.setEnabled(on)
         self.live_autosteer_aec.setEnabled(on)
 
     def _on_autosteer_toggled(self):
@@ -1439,6 +1448,9 @@ class LivePanel(PanelBase):
                 transient_suppress=self.live_autosteer_transient.isChecked(),   # de-thump table taps / knocks
                 voice_gate=self.live_autosteer_voicegate.isChecked(),           # mute non-speech (gaps & noise)
                 aec=self.live_autosteer_aec.isChecked(),                # cancel far-end loudspeaker echo
+                config=self.state.config,                               # room zones for the door / out-of-area cut
+                array_id=self._live_array_id(),
+                zone_cut=self.live_autosteer_zonecut.isChecked(),
             )
             ctrl.ctrl.set_gain_db(float(self.live_gain.value()))
             ctrl.start()

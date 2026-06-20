@@ -22,9 +22,23 @@ from __future__ import annotations
 
 import threading
 from dataclasses import dataclass
-from typing import Optional, Sequence
+from typing import Any, Optional, Sequence
 
 from . import doa
+
+
+def _apply_zone_cut(config: Any, array_id: str, in_az: list, out_az: list) -> tuple:
+    """Zone-cut policy (pure): keep only looks pointing INTO a pickup zone; null the rest plus every
+    exclusion (no-pickup / door) zone. Returns ``(kept_looks, nulls)``. The ``margin_deg`` inside
+    :func:`azimuth_in_pickup_zone` is the spatial hysteresis so a boundary-jittering bearing doesn't flap."""
+    from conf_pipeline.seat_mapper import azimuth_in_pickup_zone, exclusion_zone_azimuths
+
+    keep: list = []
+    dropped: list = []
+    for az in in_az:
+        (keep if azimuth_in_pickup_zone(config, array_id, az) else dropped).append(az)
+    nulls = list(out_az) + dropped + list(exclusion_zone_azimuths(config, array_id))
+    return keep, nulls
 from .beamformer import MODE_SUPERDIRECTIVE, design_multi_bearings
 from .geometry import ArrayGeometry
 from .live import LiveBeamController
@@ -101,9 +115,15 @@ class AutoSteerController:
         aec_ref_device: Optional[int] = None,
         preamp_gain_db: float = 0.0,            # mic-INPUT preamp gain (dB); 0 = no-op
         preamp_auto: bool = False,              # auto headroom stager (analog track)
+        config: Any = None,                     # room config — enables the zone cut (needs array bearing + zones)
+        array_id: Optional[str] = None,         # which array's zones to honour
+        zone_cut: bool = False,                 # cut the door + anyone outside the pickup area
     ):
         self.geometry = geometry
         self.sector = sector
+        self._config = config
+        self._array_id = array_id
+        self.zone_cut = bool(zone_cut)
         self.off_nadir_deg = off_nadir_deg
         self.max_talkers = max_talkers
         self.grid_step_deg = grid_step_deg
@@ -250,6 +270,10 @@ class AutoSteerController:
 
         in_az = [d.azimuth_deg for d in res.detections if d.in_sector]
         out_az = [d.azimuth_deg for d in res.detections if not d.in_sector]
+
+        # zone cut: keep only looks inside a pickup zone; null the door + anyone outside the pickup area
+        if self.zone_cut and self._config is not None and self._array_id:
+            in_az, out_az = _apply_zone_cut(self._config, self._array_id, in_az, out_az)
 
         # hysteresis: hold the last look set briefly when detections drop out
         if in_az:

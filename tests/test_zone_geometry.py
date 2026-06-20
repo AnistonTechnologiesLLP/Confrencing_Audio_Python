@@ -87,3 +87,15 @@ def test_compose_nulls_full_budget_drops_the_door():
 def test_compose_nulls_backward_compatible_without_exclusion():
     from conf_pipeline_control.polaris_beamformer import compose_nulls
     assert compose_nulls([30.0], [120.0], 0.0, 2) == [30.0, 120.0]   # unchanged when no exclusion passed
+
+
+# --------------------------------------------------------------------------- #
+# auto-steer zone-cut policy (the pure helper the control loop uses)
+# --------------------------------------------------------------------------- #
+def test_apply_zone_cut_keeps_in_zone_nulls_rest_and_door():
+    from conf_pipeline_control.autosteer import _apply_zone_cut
+    c = _cfg()                                              # pickup north (az 0), door east (az ~90)
+    keep, nulls = _apply_zone_cut(c, "A", in_az=[0.0, 180.0], out_az=[200.0])
+    assert keep == [0.0]                                    # north (in pickup) kept; south dropped
+    assert 180.0 in nulls and 200.0 in nulls               # south + the prior out-of-sector are nulled
+    assert any(abs(n - 90.0) < 5.0 for n in nulls)         # the door (east exclusion) is nulled too
