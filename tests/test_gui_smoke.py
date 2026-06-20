@@ -243,6 +243,9 @@ def test_deploy_badges_paint(win):
 def test_live_connect_disconnect_simulated(win, monkeypatch):
     import conf_pipeline_gui.panels.live as live_mod
 
+    c = cp.create_config("T", "2026-06-11T00:00:00Z")
+    c = cp.add_device(c, cp.create_microphone_array("A1", "Array"))   # an array to tick (default-on)
+    win.state.set_config(c)
     monkeypatch.setattr(live_mod.cc, "controls_available", lambda: False)
     panel = win.panels["live"]
     panel.refresh()
@@ -286,7 +289,8 @@ def test_beam_engine_ab_connect_switch_disconnect(win, monkeypatch):
 
     panel = win.panels["live"]
     panel.refresh()
-    panel.live_array.setCurrentIndex(panel.live_array.findData("A1"))
+    for r in panel._array_rows:                               # tick A1 (the sole configured array)
+        r.use.setChecked(r.array_id == "A1")
     panel.live_beameng.setChecked(True)                       # selects the engine, unchecks the others
     assert panel.live_beameng_mode.isEnabled()
     assert not panel.live_autosteer.isChecked() and not panel.live_octovox.isChecked()

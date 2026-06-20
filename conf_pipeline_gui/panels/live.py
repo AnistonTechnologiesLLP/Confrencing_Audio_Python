@@ -82,15 +82,16 @@ def _dominant_seat(config, array_id, detections):
         return None
 
 
-class _KitRow:
-    """The widgets of one dynamic 'kit' row in the Hardware card — an input device + a room array + a
-    per-kit capsule radius + a remove button (and a 'device gone' flag)."""
+class _ArrayRow:
+    """The widgets of one array row in the Hardware card — a 'Use' checkbox (is this array in the
+    session?), that array's OWN input device, and a 'device gone' flag. One row per configured
+    microphone array: tick one → a single-array session, tick several → a combined room capture."""
 
-    __slots__ = ("widget", "device", "array", "radius", "remove", "missing")
+    __slots__ = ("widget", "array_id", "use", "device", "missing")
 
-    def __init__(self, widget, device, array, radius, remove, missing):
-        self.widget, self.device, self.array = widget, device, array
-        self.radius, self.remove, self.missing = radius, remove, missing
+    def __init__(self, widget, array_id, use, device, missing):
+        self.widget, self.array_id, self.use = widget, array_id, use
+        self.device, self.missing = device, missing
 
 
 class LivePanel(PanelBase):
@@ -113,8 +114,9 @@ class LivePanel(PanelBase):
         self._twokit = None              # MultiKitController while running the dual-POLARIS automix
         self._multibeam = None           # MultiBeamController while capturing everyone (multi-talker automix)
         self._multibeam_rec = None       # MultiTrackRecorder while "Record tracks" is armed
-        self._multiroom = None           # MultiRoomController while combining ≥2 kits into one room capture
-        self._kit_rows = []              # dynamic Hardware-card device+array rows (multi-array room)
+        self._multiroom = None           # MultiRoomController while combining ≥2 arrays into one room capture
+        self._array_rows = []            # per-array Hardware rows ([Use] + the array's own input device), one per config array
+        self._array_use = {}             # array_id -> bool: is this array enabled for the session (persisted across refresh)
         self._beameng_loc = None         # last BeamEngine current_location (for the overlay tick)
         self._ab_cap = None              # armed ABCapture during a running A/B proof, or None
         self._ab_obj = None              # the live object (engine/autosteer/ctrl) the A/B capture is on
@@ -183,14 +185,27 @@ class LivePanel(PanelBase):
         lm_row.addWidget(self.live_listening_mode, 1)
         lay.addLayout(lm_row)
 
-        # --- HARDWARE: array, audio device, capsules ---
-        hw = Card("Hardware — array & audio device")
+        # --- HARDWARE: arrays (per-array Use + device), audio settings, capsules ---
+        hw = Card("Hardware — arrays & audio device")
+        # ARRAYS: one row per configured microphone array — [Use] + that array's OWN input device.
+        # Tick one → a single-array session; tick two or more → a combined room capture (populated in refresh()).
+        self._arrays_section = QWidget()
+        asx = QVBoxLayout(self._arrays_section)
+        asx.setContentsMargins(0, 0, 0, 0)
+        as_intro = QLabel("Arrays — tick the ones to use. One ticked = single-array session; two or more "
+                          "= a combined room capture (each its OWN input device; each seat is handled by "
+                          "its nearest array).")
+        as_intro.setWordWrap(True)
+        asx.addWidget(as_intro)
+        self._array_rows_lay = QVBoxLayout()
+        asx.addLayout(self._array_rows_lay)
+        self.live_arrays_status = QLabel("")
+        self.live_arrays_status.setWordWrap(True)
+        asx.addWidget(self.live_arrays_status)
+        hw.body_lay.addWidget(self._arrays_section)
         gf = QFormLayout()
         gf.setRowWrapPolicy(QFormLayout.WrapLongRows)
         gf.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
-        self.live_array = QComboBox()  # populated in refresh()
-        self.live_array.currentIndexChanged.connect(lambda *_a: None if self._refreshing else self._on_live_array_changed())
-        gf.addRow("Array", self.live_array)
         self.live_radius = NoWheelDoubleSpinBox()
         self.live_radius.setRange(0.01, 1.0)
         self.live_radius.setSingleStep(0.005)
@@ -203,9 +218,6 @@ class LivePanel(PanelBase):
             "resolution, so the number matters."
         )
         gf.addRow("Capsule radius", self.live_radius)
-        self.live_device = QComboBox()
-        self.live_device.currentIndexChanged.connect(lambda *_a: None if self._refreshing else self._on_live_device_changed())
-        gf.addRow("Input", self.live_device)
         self.live_rate = QComboBox()
         for r in ("48000", "44100", "32000", "16000"):
             self.live_rate.addItem(f"{r} Hz", int(r))
@@ -239,28 +251,6 @@ class LivePanel(PanelBase):
         ctl_row.addWidget(self.live_active_lbl)
         ctl_row.addStretch(1)
         hw.body_lay.addLayout(ctl_row)
-
-        # --- KITS: multiple arrays/devices for room-wide "capture everyone" (only shown in that mode) ---
-        self._kits_section = QWidget()
-        ks = QVBoxLayout(self._kits_section)
-        ks.setContentsMargins(0, 0, 0, 0)
-        ks_intro = QLabel("Kits — multiple arrays. Add ≥2 (each its OWN input device) to capture a whole "
-                          "room with several POLARIS units; each seat is handled by its nearest array. "
-                          "0–1 kits uses the single array above.")
-        ks_intro.setWordWrap(True)
-        ks.addWidget(ks_intro)
-        self._kit_rows_lay = QVBoxLayout()
-        ks.addLayout(self._kit_rows_lay)
-        ks_btn = QHBoxLayout()
-        self.live_kits_add = QPushButton("Add device / kit")
-        self.live_kits_add.clicked.connect(lambda *_a: None if self._refreshing else self._add_kit_row())
-        self.live_kits_status = QLabel("")
-        self.live_kits_status.setWordWrap(True)
-        ks_btn.addWidget(self.live_kits_add)
-        ks_btn.addWidget(self.live_kits_status, 1)
-        ks.addLayout(ks_btn)
-        hw.body_lay.addWidget(self._kits_section)
-        self._kits_section.setVisible(False)   # revealed only in the "Capture everyone" / manual modes
 
         lay.addWidget(hw)
 
@@ -725,7 +715,7 @@ class LivePanel(PanelBase):
         # Stop combos from demanding their full content width (long OS device
         # names) — let them fill the column and elide instead of forcing the
         # whole panel wider.
-        for combo in (self.live_array, self.live_device, self.live_rate, self.live_out_device,
+        for combo in (self.live_rate, self.live_out_device,
                       self.live_mode, self.live_beameng_mode,
                       self.live_twokit_dev_a, self.live_twokit_dev_b, self.live_twokit_arr_a,
                       self.live_twokit_arr_b, self.live_twokit_out, self.live_twokit_clean):
@@ -787,7 +777,24 @@ class LivePanel(PanelBase):
 
     # ---- live helpers ----
     def _live_array_id(self):
-        return self.live_array.currentData()
+        """The primary array = the first ticked array (single-array modes read this); None if none ticked."""
+        for r in self._array_rows:
+            if r.use.isChecked():
+                return r.array_id
+        return None
+
+    def _live_device(self):
+        """The primary (first-ticked) array's input device; None if no array is ticked."""
+        for r in self._array_rows:
+            if r.use.isChecked():
+                return r.device.currentData()
+        return None
+
+    def _active_arrays(self):
+        """The ticked arrays as (array_id, device, radius_m) — the session's array set. One entry = a
+        single-array session; two or more = a combined room capture. Radius is the shared capsule radius."""
+        rad = float(self.live_radius.value())
+        return [(r.array_id, r.device.currentData(), rad) for r in self._array_rows if r.use.isChecked()]
 
     def _live_busy(self):
         """True if any live session (beamformer, OCTOVOX, auto-steer, or A/B engine) is active."""
@@ -850,7 +857,6 @@ class LivePanel(PanelBase):
             show = set(self._live_cards)          # advanced: every card (stays correct as cards are added)
         for key, card in self._live_cards.items():
             card.set_open(key in show)
-        self._kits_section.setVisible(mode in ("multibeam", "manual"))   # multi-array kits: capture-everyone only
 
     def _sync_autosteer_nr_enabled(self) -> None:
         """Enable auto-steer's own OCTOVOX-cleaning controls when auto-steer is selected and not yet
@@ -955,35 +961,44 @@ class LivePanel(PanelBase):
         if not self._refreshing and self._live_design is not None:
             self._live_design_from_zones()
 
-    def _on_live_array_changed(self):
-        # changing the target array invalidates any prior design
+    def _on_array_use_toggled(self, row):
+        """A 'Use' checkbox flipped: remember it, invalidate any prior zone design (the array set changed),
+        match the shared sample rate to the new primary array's device, and update the status hint."""
+        self._array_use[row.array_id] = row.use.isChecked()
         self._live_design = None
         self.live_design_view.clear()
-        self._apply_array_device()                    # each array keeps its own input device
+        dev = self._live_device()
+        if dev is not None:
+            self._match_device_rate(dev)              # primary array's device → shared sample rate
+        self._update_arrays_status()
 
-    def _pick_unused_device(self, used):
-        """The first Input-combo device not already assigned to another array (or item 0 if all are taken)."""
-        for i in range(self.live_device.count()):
-            d = self.live_device.itemData(i)
-            if d is not None and d not in used:
-                return d
-        return self.live_device.itemData(0) if self.live_device.count() else None
+    def _on_array_device_changed(self, row):
+        """A per-array device picker changed: remember it for that array, and (when it is the primary/ticked
+        array driving the session) match the shared sample rate to it."""
+        self._array_device[row.array_id] = row.device.currentData()
+        if self._live_array_id() == row.array_id:
+            self._match_device_rate(row.device.currentData())
+        self._update_arrays_status()
 
-    def _apply_array_device(self):
-        """Point the Input dropdown at the SELECTED array's device — its remembered one, or (first time) a
-        device not already used by another array, so two arrays don't default to the same input."""
-        aid = self._live_array_id()
-        if aid is None:
+    def _pick_unused_device(self, devs, used):
+        """The first available input device not already assigned to another array (or the first device if
+        all are taken / none free), so two arrays don't default to the same input."""
+        for d in devs:
+            if d.index not in used:
+                return d.index
+        return devs[0].index if devs else None
+
+    def _match_device_rate(self, dev):
+        """Select the device's native sample rate so Connect doesn't fail on a rate the hardware can't open
+        (e.g. a 44100-only POLARIS vs a 48000 default)."""
+        rate = self._live_dev_rates.get(dev)
+        if not rate:
             return
-        want = self._array_device.get(aid)
-        if want is None:                              # no device for this array yet → a distinct, unused one
-            used = {d for a, d in self._array_device.items() if a != aid and d is not None}
-            want = self._pick_unused_device(used)
-        if want is not None:
-            i = self.live_device.findData(want)
-            if i >= 0 and i != self.live_device.currentIndex():
-                self.live_device.setCurrentIndex(i)   # fires _on_live_device_changed (records + rate match)
-        self._array_device[aid] = self.live_device.currentData()   # remember (incl. a defaulted pick)
+        i = self.live_rate.findData(rate)
+        if i < 0:
+            self.live_rate.addItem(f"{rate} Hz", rate)
+            i = self.live_rate.findData(rate)
+        self.live_rate.setCurrentIndex(i)
 
     def _live_aggressive_preset(self):
         """Max-directivity superdirective — safe thanks to the 80 dBA studio mics."""
@@ -1013,7 +1028,7 @@ class LivePanel(PanelBase):
         sr = self.live_rate.currentData() or 44100
         self.live_ab_btn.setEnabled(False)
         self.live_status.setText("A/B: recording 10 s — speak from the pickup zone…")
-        worker = _ABWorker(self.state.config, aid, geom, self.live_device.currentData(),
+        worker = _ABWorker(self.state.config, aid, geom, self._live_device(),
                            int(sr), 10.0, out_dir, float(self.live_freq.value()))
         worker.signals.done.connect(self._on_ab_done)
         worker.signals.failed.connect(self._on_ab_failed)
@@ -1034,21 +1049,6 @@ class LivePanel(PanelBase):
         self.live_ab_btn.setEnabled(True)
         self._ab_workers.clear()
         self.live_status.setText(f"A/B failed: {msg}")
-
-    def _on_live_device_changed(self):
-        """Remember the device for the selected array, then select the device's native sample rate so
-        Connect doesn't fail on a rate the hardware can't open (e.g. a 44100-only array vs a 48000 default)."""
-        aid = self._live_array_id()
-        if aid is not None:
-            self._array_device[aid] = self.live_device.currentData()   # this array's input device
-        rate = self._live_dev_rates.get(self.live_device.currentData())
-        if not rate:
-            return
-        i = self.live_rate.findData(rate)
-        if i < 0:
-            self.live_rate.addItem(f"{rate} Hz", rate)
-            i = self.live_rate.findData(rate)
-        self.live_rate.setCurrentIndex(i)
 
     def _live_active_changed(self):
         """A capsule was toggled: update the count, and rebuild + reapply the beam
@@ -1073,7 +1073,7 @@ class LivePanel(PanelBase):
         if not cc.controls_available():
             self.live_status.setText("Detect needs the [control] extra (numpy + sounddevice).")
             return
-        dev = self.live_device.currentData()
+        dev = self._live_device()
         sr = self.live_rate.currentData() or 48000
         self.live_status.setText("Probing capsules…")
         self.live_detect.setEnabled(False)
@@ -1119,7 +1119,7 @@ class LivePanel(PanelBase):
         sr = self.live_rate.currentData() or 44100
         self.live_status.setText("Calibrating — have someone talk from the FRONT for ~4 s…")
         self.live_calib_btn.setEnabled(False)
-        worker = _CalibWorker(geom, self.live_device.currentData(), int(sr), 90.0)
+        worker = _CalibWorker(geom, self._live_device(), int(sr), 90.0)
         worker.signals.done.connect(self._on_calib_done)
         worker.signals.failed.connect(self._on_calib_failed)
         self._calib_workers.add(worker)
@@ -1206,7 +1206,14 @@ class LivePanel(PanelBase):
             self._live_disconnect()
             return
         if self.live_listening_mode.currentData() == "twokit":
-            self._twokit_connect()
+            self._twokit_connect()                     # two separate kits — its own device/array pickers
+            return
+        active = self._active_arrays()
+        if not active:
+            self.live_status.setText("Tick at least one array to use (Hardware card).")
+            return
+        if len(active) >= 2:
+            self._multiroom_connect()                  # ≥2 arrays ticked → combined room capture (overrides the mode)
             return
         if self.live_listening_mode.currentData() == "multibeam":
             self._multibeam_connect()
@@ -1227,7 +1234,7 @@ class LivePanel(PanelBase):
                 from conf_pipeline_control.live import LiveBeamController
                 ctl = LiveBeamController(
                     geom,
-                    device=self.live_device.currentData(),
+                    device=self._live_device(),
                     samplerate=float(rate),
                     monitor=self.live_monitor.isChecked(),
                     output_device=self.live_out_device.currentData(),
@@ -1281,7 +1288,7 @@ class LivePanel(PanelBase):
         try:
             mon = cc.CleanMonitor(
                 client,
-                input_device=self.live_device.currentData(),
+                input_device=self._live_device(),
                 samplerate=int(rate),
                 chunk_seconds=float(self.live_chunk.value()),
                 target_az=target_az,
@@ -1323,7 +1330,7 @@ class LivePanel(PanelBase):
         try:
             ctrl = cc.AutoSteerController(
                 geom, sector,
-                device=self.live_device.currentData(),
+                device=self._live_device(),
                 samplerate=float(rate),
                 max_talkers=int(self.live_max_talkers.value()),
                 freq_hz=float(self.live_freq.value()),
@@ -1395,7 +1402,7 @@ class LivePanel(PanelBase):
         monitor_on = self.live_monitor.isChecked()
         try:
             eng = cc.BeamEngine(
-                device=self.live_device.currentData(),
+                device=self._live_device(),
                 fs=float(rate),
                 mode=self._beameng_mode(),
                 steered_cfg=steered_cfg,
@@ -1699,109 +1706,90 @@ class LivePanel(PanelBase):
         self.live_twokit_status.setText("Two kits connected — speak in each area; the active kit is output.")
         self._notify_session_changed()
 
-    # ---- dynamic Hardware-card kit rows (multi-array room) ----
-    def _build_kit_row(self) -> _KitRow:
+    # ---- per-array Hardware rows ([Use] + the array's own input device) ----
+    def _build_array_row(self, array_id, label) -> _ArrayRow:
         row = QWidget()
         h = QHBoxLayout(row)
         h.setContentsMargins(0, 0, 0, 0)
-        device, array = QComboBox(), QComboBox()
-        for cb in (device, array):
-            cb.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
-            cb.setMinimumContentsLength(6)
-            cb.setMinimumWidth(80)
-        radius = NoWheelDoubleSpinBox()
-        radius.setRange(0.01, 1.0)
-        radius.setSingleStep(0.005)
-        radius.setDecimals(3)
-        radius.setValue(0.04)
-        radius.setSuffix(" m")
-        remove = QPushButton("✕")
-        remove.setFixedWidth(28)
+        use = QCheckBox(label)
+        use.setToolTip("Use this array in the session. Tick one for a single-array session, or several to "
+                       "combine them into one room capture (each needs its OWN input device).")
+        device = QComboBox()
+        device.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        device.setMinimumContentsLength(6)
+        device.setMinimumWidth(80)
         missing = QLabel("")
-        kr = _KitRow(row, device, array, radius, remove, missing)
-        remove.clicked.connect(lambda *_a, r=kr: None if self._refreshing else self._remove_kit_row(r))
-        for cb in (device, array):
-            cb.currentIndexChanged.connect(lambda *_a: None if self._refreshing else self._update_kits_status())
-        for wdg in (device, array, QLabel("r"), radius, remove, missing):
-            h.addWidget(wdg)
+        kr = _ArrayRow(row, array_id, use, device, missing)
+        use.toggled.connect(lambda *_a, r=kr: None if self._refreshing else self._on_array_use_toggled(r))
+        device.currentIndexChanged.connect(
+            lambda *_a, r=kr: None if self._refreshing else self._on_array_device_changed(r))
+        h.addWidget(use)
+        h.addWidget(device, 1)
+        h.addWidget(missing)
         return kr
 
-    def _add_kit_row(self, *, device=None, array=None) -> None:
-        if self._refreshing or self._live_busy():
-            return
-        from conf_pipeline_control.audio import list_input_devices
-        kr = self._build_kit_row()
-        self._kit_rows.append(kr)
-        self._kit_rows_lay.addWidget(kr.widget)
-        arrays = [d for d in self.state.config.devices if d.type == "microphoneArray"]
-        self._populate_kit_row(kr, arrays, list_input_devices(), default_ix=len(self._kit_rows) - 1)
-        self._update_kits_status()
+    def _refresh_array_rows(self, arrays, devs) -> None:
+        """Rebuild the per-array rows from the configured arrays (one each), preserving every array's Use
+        state + chosen device by id. A new array defaults to a DISTINCT unused device; the first array is
+        ticked by default so a fresh config is a single-array session. Idle-only (signals blocked)."""
+        for kr in self._array_rows:                       # tear down the old rows
+            self._array_rows_lay.removeWidget(kr.widget)
+            kr.widget.setParent(None)
+            kr.widget.deleteLater()
+        self._array_rows = []
+        assigned: set = set()                             # devices already handed to an earlier row this pass
+        for n, a in enumerate(arrays):
+            kr = self._build_array_row(a.id, f"{a.label} · {a.id}")
+            kr.use.blockSignals(True)
+            kr.device.blockSignals(True)
+            if devs:
+                for d in devs:
+                    kr.device.addItem(f"[{d.index}] {d.name} ({d.max_input_channels}ch)", d.index)
+            else:
+                kr.device.addItem("System default", None)
+            remembered = self._array_device.get(a.id)
+            gone = remembered is not None and kr.device.findData(remembered) < 0
+            kr.missing.setText("device gone" if gone else "")
+            if remembered is not None and not gone:
+                want = remembered
+            else:                                         # new array OR its device vanished → a distinct, still-free device
+                want = self._pick_unused_device(devs, assigned)
+            ix = kr.device.findData(want) if want is not None else -1
+            if kr.device.count():
+                kr.device.setCurrentIndex(max(0, ix))
+            chosen = kr.device.currentData()
+            self._array_device[a.id] = chosen
+            if chosen is not None:
+                assigned.add(chosen)
+            on = self._array_use.get(a.id, n == 0)        # default: first array on → a single-array session
+            kr.use.setChecked(on)
+            self._array_use[a.id] = on
+            kr.use.blockSignals(False)
+            kr.device.blockSignals(False)
+            self._array_rows.append(kr)
+            self._array_rows_lay.addWidget(kr.widget)
+        self._update_arrays_status()
 
-    def _remove_kit_row(self, kr: _KitRow) -> None:
-        if self._refreshing or self._live_busy() or kr not in self._kit_rows:
-            return
-        self._kit_rows.remove(kr)
-        self._kit_rows_lay.removeWidget(kr.widget)
-        kr.widget.setParent(None)
-        kr.widget.deleteLater()
-        self._update_kits_status()
-
-    def _populate_kit_row(self, kr: _KitRow, arrays, devs, *, default_ix: int = 0) -> None:
-        cur = kr.device.currentData()
-        kr.device.blockSignals(True)
-        kr.device.clear()
-        if devs:
-            for d in devs:
-                kr.device.addItem(f"[{d.index}] {d.name} ({d.max_input_channels}ch)", d.index)
-        else:
-            kr.device.addItem("System default", None)
-        ix = kr.device.findData(cur) if cur is not None else -1
-        kr.missing.setText("device gone" if (cur is not None and ix < 0) else "")
-        if ix < 0:
-            ix = min(default_ix, kr.device.count() - 1)
-        kr.device.setCurrentIndex(max(0, ix))
-        kr.device.blockSignals(False)
-        cur = kr.array.currentData()
-        kr.array.blockSignals(True)
-        kr.array.clear()
-        for a in arrays:
-            kr.array.addItem(f"{a.label} · {a.id}", a.id)
-        ix = kr.array.findData(cur) if cur is not None else -1
-        if ix < 0:
-            ix = min(default_ix, kr.array.count() - 1)
-        if kr.array.count():
-            kr.array.setCurrentIndex(max(0, ix))
-        kr.array.blockSignals(False)
-
-    def _refresh_kit_rows(self, arrays, devs) -> None:
-        for i, kr in enumerate(self._kit_rows):
-            self._populate_kit_row(kr, arrays, devs, default_ix=i)
-
-    def _read_kit_specs(self):
-        return [(kr.device.currentData(), kr.array.currentData(), float(kr.radius.value()))
-                for kr in self._kit_rows]
-
-    def _kits_distinct(self) -> bool:
-        devs = [d for (d, _a, _r) in self._read_kit_specs() if d is not None]
+    def _active_distinct(self) -> bool:
+        devs = [d for (_a, d, _r) in self._active_arrays() if d is not None]
         return len(devs) == len(set(devs))
 
-    def _update_kits_status(self) -> None:
-        n = len(self._kit_rows)
-        if n == 0:
-            self.live_kits_status.setText("No kits — Capture-everyone uses the single array above.")
+    def _update_arrays_status(self) -> None:
+        n = len(self._active_arrays())
+        if not self._array_rows:
+            self.live_arrays_status.setText("No arrays configured — add one in DESIGN.")
+        elif n == 0:
+            self.live_arrays_status.setText("Tick at least one array to use.")
         elif n == 1:
-            self.live_kits_status.setText("1 kit — add another for a multi-array room.")
-        elif not self._kits_distinct():
-            self.live_kits_status.setText("Two kits share a device — pick a DISTINCT input per kit.")
+            self.live_arrays_status.setText("1 array — single-array session.")
+        elif not self._active_distinct():
+            self.live_arrays_status.setText("Two ticked arrays share a device — pick a DISTINCT input per array.")
         else:
-            self.live_kits_status.setText(f"{n} kits — distinct devices ✓ (combined into one room capture).")
+            self.live_arrays_status.setText(f"{n} arrays — combined room capture (each seat → its nearest array).")
 
     def _multibeam_connect(self):
-        """Start capture-everyone: ONE array (a beam per talker, snapped to seats, NOM-automixed), or —
-        when ≥2 Hardware kit rows are configured — combine those arrays into a room-wide capture."""
-        if len(self._kit_rows) >= 2:
-            self._multiroom_connect()
-            return
+        """Start capture-everyone on a SINGLE array (a beam per talker, snapped to seats, NOM-automixed).
+        Ticking ≥2 arrays routes to the combined room capture instead (see _live_toggle_connect)."""
         if not cc.controls_available():
             self.live_mb_status.setText("Capture-everyone needs the [control] extra (numpy + sounddevice).")
             return
@@ -1814,7 +1802,7 @@ class LivePanel(PanelBase):
         n_beams = int(self.live_mb_beams.value())
         try:
             ctrl = cc.MultiBeamController(
-                self.state.config, array_id, device=self.live_device.currentData(),
+                self.state.config, array_id, device=self._live_device(),
                 radius_m=float(self.live_radius.value()), sample_rate=rate, n_beams=n_beams,
                 snap=self.live_mb_snap.isChecked(),
                 active_mask=(list(mask) if (any(mask) and not all(mask)) else None))
@@ -1840,17 +1828,17 @@ class LivePanel(PanelBase):
         self._notify_session_changed()
 
     def _multiroom_connect(self):
-        """Combine the ≥2 Hardware kit rows into one room-wide capture (each array owns its nearest seats)."""
+        """Combine the ticked arrays (≥2) into one room-wide capture (each array owns its nearest seats)."""
         if not cc.controls_available():
-            self.live_kits_status.setText("Capture-everyone needs the [control] extra (numpy + sounddevice).")
+            self.live_arrays_status.setText("Capture-everyone needs the [control] extra (numpy + sounddevice).")
             return
-        if not self._kits_distinct():
-            self.live_kits_status.setText("Each kit needs a DISTINCT input device — fix the kits and Connect.")
+        if not self._active_distinct():
+            self.live_arrays_status.setText("Each ticked array needs a DISTINCT input device — fix it and Connect.")
             return
         rate = float(self.live_rate.currentData() or 44100)
         n_beams = int(self.live_mb_beams.value())
         specs = [cc.RoomKitSpec(device=dev, array_id=aid, radius_m=rad)
-                 for (dev, aid, rad) in self._read_kit_specs()]
+                 for (aid, dev, rad) in self._active_arrays()]
         try:
             ctrl = cc.MultiRoomController(self.state.config, specs, sample_rate=rate, n_beams=n_beams,
                                           snap=self.live_mb_snap.isChecked())
@@ -1862,7 +1850,7 @@ class LivePanel(PanelBase):
             if self.live_mb_record.isChecked():
                 ctrl.record_tracks(True)
         except Exception as exc:                              # hardware open / distinct-device → report, stay off
-            self.live_kits_status.setText(f"Room capture connect failed: {exc}")
+            self.live_arrays_status.setText(f"Room capture connect failed: {exc}")
             self._multibeam_rec = None
             return
         self._multiroom = ctrl
@@ -1870,7 +1858,7 @@ class LivePanel(PanelBase):
         self.live_connect.setText("Disconnect")
         self.live_mute.setEnabled(True)
         self.live_gain.setEnabled(True)
-        self.live_kits_status.setText(f"Room capture — {len(specs)} kits; each seat goes to its nearest array.")
+        self.live_arrays_status.setText(f"Room capture — {len(specs)} arrays; each seat goes to its nearest array.")
         self._notify_session_changed()
 
     def _on_multibeam_record_toggled(self):
@@ -1917,7 +1905,7 @@ class LivePanel(PanelBase):
                 out = QFileDialog.getExistingDirectory(self, "Save per-person tracks to …")
                 if out:
                     paths = mr.write_tracks(out, prefix="room")
-                    self.live_kits_status.setText(f"Wrote {len(paths)} track(s) to {out}")
+                    self.live_arrays_status.setText(f"Wrote {len(paths)} track(s) to {out}")
             self.live_mb_record.setChecked(False)
         if self._multibeam is not None:
             try:
@@ -2349,7 +2337,7 @@ class LivePanel(PanelBase):
             tag = "⚠" if k.dead else "●"
             seats = ",".join(b.seat_id or f"{b.azimuth_deg:.0f}°" for b in k.beams if b.active) or "—"
             parts.append(f"{tag} {k.array_id or f'kit{k.index + 1}'}: {seats}")
-        self.live_kits_status.setText("    ".join(parts))
+        self.live_arrays_status.setText("    ".join(parts))
 
     def _tick_live_meter(self):
         """Update the level meter on a dB scale (−60 dB → 0 %, 0 dB → 100 %), so
@@ -2461,43 +2449,16 @@ class LivePanel(PanelBase):
             # pickers rebuild only when idle; a running session keeps its combos
             # stable (the room switcher may have swapped in another room's devices)
             if not self._live_busy():
-                # array picker (preserve selection)
-                cur = self._live_array_id()
-                self.live_array.blockSignals(True)
-                self.live_array.clear()
                 arrays = [d for d in self.state.config.devices if d.type == "microphoneArray"]
-                for a in arrays:
-                    placed = "" if a.position else "  (no position)"
-                    self.live_array.addItem(f"{a.label} · {a.id}{placed}", a.id)
-                if cur is not None:
-                    idx = self.live_array.findData(cur)
-                    if idx >= 0:
-                        self.live_array.setCurrentIndex(idx)
-                self.live_array.blockSignals(False)
-                # restore the SELECTED array's remembered device (falls back to the shown one)
-                curd = self._array_device.get(self._live_array_id(), self.live_device.currentData())
-                self.live_device.blockSignals(True)
-                self.live_device.clear()
                 from conf_pipeline_control.audio import list_input_devices
                 devs = list_input_devices()
-                self._live_dev_rates = {}
-                if devs:
-                    for d in devs:
-                        self.live_device.addItem(f"[{d.index}] {d.name} ({d.max_input_channels}ch)", d.index)
-                        self._live_dev_rates[d.index] = int(d.default_samplerate)
-                else:
-                    self.live_device.addItem("System default", None)
-                if curd is not None:
-                    i = self.live_device.findData(curd)
-                    if i >= 0:
-                        self.live_device.setCurrentIndex(i)
-                self.live_device.blockSignals(False)
-                if self.live_device.currentData() != curd:
-                    self._on_live_device_changed()  # device changed — match its native rate
-                # (an unchanged device keeps the user's manually chosen rate)
-                aid = self._live_array_id()
-                if aid is not None and aid not in self._array_device:
-                    self._array_device[aid] = self.live_device.currentData()   # seed so other arrays default distinct
+                self._live_dev_rates = {d.index: int(d.default_samplerate) for d in devs}
+                # per-array rows: one [Use]+device row per configured array (preserves Use + device by id;
+                # a new array defaults to a distinct device, the first array ticked → single-array session)
+                self._refresh_array_rows(arrays, devs)
+                dev = self._live_device()                    # match the shared sample rate to the primary array's device
+                if dev is not None:
+                    self._match_device_rate(dev)
 
                 # output devices (for monitoring)
                 from conf_pipeline_control.audio import list_output_devices
@@ -2514,6 +2475,5 @@ class LivePanel(PanelBase):
                 self.live_out_device.blockSignals(False)
 
                 self._refresh_twokit_pickers(arrays, devs)   # 2-kit device/array/output pickers
-                self._refresh_kit_rows(arrays, devs)         # dynamic multi-array Hardware kit rows
         finally:
             self._refreshing = False

@@ -215,84 +215,127 @@ def test_multibeam_record_toggle_preconnect_is_noop(win):
     panel.live_mb_record.setChecked(False)
 
 
-def test_kit_rows_add_remove_and_distinct_guard(win):
-    """The dynamic Hardware kit list grows/shrinks and the distinct-device guard reads it back."""
+# --------------------------------------------------------------------------- #
+# Per-array Hardware rows: [Use] + each array's own input device (single vs combined)
+# --------------------------------------------------------------------------- #
+class _Dev:                                                       # stand-in for an audio.InputDevice
+    def __init__(self, index, name="dev", max_input_channels=8, default_samplerate=44100):
+        self.index, self.name = index, name
+        self.max_input_channels, self.default_samplerate = max_input_channels, default_samplerate
+
+
+_DEVS3 = [_Dev(4), _Dev(5), _Dev(6)]
+
+
+def _arrays(panel):
+    return [d for d in panel.state.config.devices if d.type == "microphoneArray"]
+
+
+def _build_rows(panel, devs):
+    """Rebuild the per-array rows with a KNOWN device list (deterministic, machine-independent)."""
+    panel._array_device.clear()
+    panel._array_use.clear()
+    panel._refresh_array_rows(_arrays(panel), devs)
+
+
+def test_array_rows_one_per_config_array_with_use_and_device(win):
+    """One row per configured array, each with a Use checkbox + its own device combo; the first array is
+    ticked by default (a fresh config is a single-array session)."""
     panel = win.panels["live"]
-    n0 = len(panel._kit_rows)
-    panel._add_kit_row()
-    panel._add_kit_row()
-    assert len(panel._kit_rows) == n0 + 2
-    a, b = panel._kit_rows[-2], panel._kit_rows[-1]
-    for kr, dev in ((a, 4), (b, 5)):                               # force known distinct device data
-        kr.device.clear()
-        kr.device.addItem(f"[{dev}]", dev)
-    assert panel._kits_distinct()
-    b.device.clear()
-    b.device.addItem("[4]", 4)                                     # now both are device 4
-    assert not panel._kits_distinct()
-    panel._remove_kit_row(b)
-    assert len(panel._kit_rows) == n0 + 1
+    panel.state.set_config(_config_two_arrays())
+    _build_rows(panel, _DEVS3)
+    rows = {r.array_id: r for r in panel._array_rows}
+    assert set(rows) == {"A1", "A2"}
+    assert rows["A1"].use.isChecked() and not rows["A2"].use.isChecked()   # first on by default
+    assert panel._live_array_id() == "A1"                                  # primary = first ticked
 
 
-def test_capture_everyone_routes_to_multiroom_with_two_kits(win, monkeypatch):
-    """≥2 kit rows ⇒ _multibeam_connect builds the MultiRoomController (not the single-array engine)."""
+def test_each_array_defaults_to_a_distinct_device(win):
+    """Two arrays each get their OWN device; the second defaults to a DIFFERENT input than the first
+    (never the same one), and each row's device is remembered."""
+    panel = win.panels["live"]
+    panel.state.set_config(_config_two_arrays())
+    _build_rows(panel, _DEVS3)
+    rows = {r.array_id: r for r in panel._array_rows}
+    d1, d2 = rows["A1"].device.currentData(), rows["A2"].device.currentData()
+    assert d1 != d2                                                        # distinct defaults
+    assert panel._array_device["A1"] == d1 and panel._array_device["A2"] == d2
+
+
+def test_arrays_share_device_when_only_one_available(win):
+    """A single available device is shared by both arrays — no crash, both bind to it."""
+    panel = win.panels["live"]
+    panel.state.set_config(_config_two_arrays())
+    _build_rows(panel, [_Dev(7)])
+    rows = {r.array_id: r for r in panel._array_rows}
+    assert rows["A1"].device.currentData() == 7 and rows["A2"].device.currentData() == 7
+
+
+def test_one_ticked_array_is_a_single_array_session(win):
+    """Ticking exactly one array → _active_arrays has one entry; _live_device follows that array's device."""
+    panel = win.panels["live"]
+    panel.state.set_config(_config_two_arrays())
+    _build_rows(panel, _DEVS3)
+    rows = {r.array_id: r for r in panel._array_rows}
+    rows["A1"].use.setChecked(True)
+    rows["A2"].use.setChecked(False)
+    active = panel._active_arrays()
+    assert len(active) == 1 and active[0][0] == "A1"
+    assert panel._live_device() == rows["A1"].device.currentData()
+
+
+def test_no_ticked_array_guards_connect(win):
+    """Zero ticked arrays → Connect is refused with a guidance message and no session starts."""
+    panel = win.panels["live"]
+    panel.state.set_config(_config_two_arrays())
+    _build_rows(panel, _DEVS3)
+    for r in panel._array_rows:
+        r.use.setChecked(False)
+    panel._live_toggle_connect()
+    assert not panel._live_busy()
+    assert "at least one array" in panel.live_status.text().lower()
+
+
+def test_two_ticked_arrays_route_to_combined_room(win, monkeypatch):
+    """Ticking ≥2 arrays ⇒ _live_toggle_connect builds the MultiRoomController over the ticked arrays'
+    (array_id, distinct device) — the combined room capture, not a single-array engine."""
     import conf_pipeline_control as cc
 
+    captured = {}
+
     class _FakeRoom:
-        def __init__(self, *a, **k):
+        def __init__(self, config, specs, **k):
+            captured["specs"] = specs
             self.started = False
 
-        def set_gain_db(self, v):
-            pass
+        def set_gain_db(self, v): pass
+        def set_mute(self, v): pass
+        def read_level(self): return 0.0
+        def status(self): return []
+        def record_tracks(self, on): pass
+        def start(self): self.started = True
+        def stop(self): self.started = False
 
-        def set_mute(self, v):
-            pass
-
-        def read_level(self):
-            return 0.0
-
-        def status(self):
-            return []
-
-        def start(self):
-            self.started = True
-
-        def stop(self):
-            self.started = False
-
-        def record_tracks(self, on):
-            pass
-
-    fake = _FakeRoom()
     monkeypatch.setattr(cc, "controls_available", lambda: True)
-    monkeypatch.setattr(cc, "MultiRoomController", lambda *a, **k: fake)
+    monkeypatch.setattr(cc, "MultiRoomController", _FakeRoom)
     panel = win.panels["live"]
-    panel._add_kit_row()
-    panel._add_kit_row()
-    for kr, dev in zip(panel._kit_rows[-2:], (4, 5)):
-        kr.device.clear()
-        kr.device.addItem(f"[{dev}]", dev)
-        kr.array.clear()
-        kr.array.addItem("A", "A")
-    panel._multibeam_connect()
-    assert panel._multiroom is fake and fake.started
-    assert panel._active_ctl() is fake
-    panel._multiroom = None                                        # teardown (no real stop needed)
+    panel.state.set_config(_config_two_arrays())
+    _build_rows(panel, _DEVS3)
+    for r in panel._array_rows:
+        r.use.setChecked(True)                                            # tick BOTH arrays
+    panel._live_toggle_connect()
+    assert isinstance(panel._multiroom, _FakeRoom) and panel._multiroom.started
+    assert panel._active_ctl() is panel._multiroom
+    specs = captured["specs"]
+    assert [s.array_id for s in specs] == ["A1", "A2"]
+    assert len({s.device for s in specs}) == 2                            # distinct device per array
+    panel._multiroom = None                                              # teardown (no real stop needed)
 
 
-def test_kits_section_visibility_follows_listening_mode(win):
+def test_arrays_section_always_present(win):
+    """The per-array list lives in the (always-shown) Hardware card — no separate visibility toggle."""
     panel = win.panels["live"]
-
-    def pick(mode):
-        panel.live_listening_mode.setCurrentIndex(panel.live_listening_mode.findData(mode))
-        panel._on_listening_mode_changed()
-
-    pick("table")
-    assert panel._kits_section.isHidden()
-    pick("multibeam")
-    assert not panel._kits_section.isHidden()
-    pick("manual")
-    assert not panel._kits_section.isHidden()
+    assert hasattr(panel, "_arrays_section") and hasattr(panel, "live_arrays_status")
 
 
 def test_beameng_seat_nulling_pushes_other_seats(win):
@@ -792,33 +835,3 @@ def _config_two_arrays():
     return c
 
 
-def _force_devices(panel, indices):
-    panel.live_device.clear()
-    for d in indices:
-        panel.live_device.addItem(f"[{d}]", d)
-    panel._array_device.clear()                           # start clean (ignore the box's real devices)
-
-
-def test_each_array_keeps_its_own_input_device(win):
-    """Switching the Array dropdown follows that array's device, and a second array defaults to a
-    DIFFERENT device — never the same one the first array took."""
-    panel = win.panels["live"]
-    panel.state.set_config(_config_two_arrays())          # live_array → A1, A2 (A1 current)
-    _force_devices(panel, (4, 5, 6))
-    panel.live_array.setCurrentIndex(panel.live_array.findData("A1"))
-    panel.live_device.setCurrentIndex(panel.live_device.findData(6))   # A1 → device 6
-    assert panel._array_device.get("A1") == 6
-    panel.live_array.setCurrentIndex(panel.live_array.findData("A2"))  # switch to A2
-    assert panel.live_device.currentData() != 6           # did NOT reuse A1's device
-    panel.live_array.setCurrentIndex(panel.live_array.findData("A1"))  # back to A1
-    assert panel.live_device.currentData() == 6           # A1's device remembered
-
-
-def test_per_array_device_falls_back_when_only_one_device(win):
-    """A single available device is shared by both arrays — no crash."""
-    panel = win.panels["live"]
-    panel.state.set_config(_config_two_arrays())
-    _force_devices(panel, (7,))
-    panel.live_array.setCurrentIndex(panel.live_array.findData("A2"))
-    panel.live_array.setCurrentIndex(panel.live_array.findData("A1"))
-    assert panel.live_device.currentData() == 7
