@@ -22,9 +22,23 @@ from __future__ import annotations
 
 import threading
 from dataclasses import dataclass
-from typing import Optional
+from typing import Any, Optional, Sequence
 
 from . import doa
+
+
+def _apply_zone_cut(config: Any, array_id: str, in_az: list, out_az: list) -> tuple:
+    """Zone-cut policy (pure): keep only looks pointing INTO a pickup zone; null the rest plus every
+    exclusion (no-pickup / door) zone. Returns ``(kept_looks, nulls)``. The ``margin_deg`` inside
+    :func:`azimuth_in_pickup_zone` is the spatial hysteresis so a boundary-jittering bearing doesn't flap."""
+    from conf_pipeline.seat_mapper import azimuth_in_pickup_zone, exclusion_zone_azimuths
+
+    keep: list = []
+    dropped: list = []
+    for az in in_az:
+        (keep if azimuth_in_pickup_zone(config, array_id, az) else dropped).append(az)
+    nulls = list(out_az) + dropped + list(exclusion_zone_azimuths(config, array_id))
+    return keep, nulls
 from .beamformer import MODE_SUPERDIRECTIVE, design_multi_bearings
 from .geometry import ArrayGeometry
 from .live import LiveBeamController
@@ -87,6 +101,10 @@ class AutoSteerController:
         post_nr_oversub: float = DEFAULT_POST_NR_OVERSUB,
         post_nr_amount: float = DEFAULT_POST_NR_AMOUNT,
         post_nr_preserve_level: bool = DEFAULT_POST_NR_PRESERVE_LEVEL,
+        peq: bool = False,                      # parametric EQ (tone) on the cleaned mono
+        peq_bands: Optional[Sequence[dict]] = None,
+        transient_suppress: bool = False,       # duck impulsive table taps / knocks
+        voice_gate: bool = False,               # mute non-speech (gaps & noise)
         dereverb: bool = False,
         dereverb_t60: float = DEFAULT_DEREVERB_T60,
         dereverb_beta: float = DEFAULT_DEREVERB_BETA,
@@ -97,9 +115,15 @@ class AutoSteerController:
         aec_ref_device: Optional[int] = None,
         preamp_gain_db: float = 0.0,            # mic-INPUT preamp gain (dB); 0 = no-op
         preamp_auto: bool = False,              # auto headroom stager (analog track)
+        config: Any = None,                     # room config — enables the zone cut (needs array bearing + zones)
+        array_id: Optional[str] = None,         # which array's zones to honour
+        zone_cut: bool = False,                 # cut the door + anyone outside the pickup area
     ):
         self.geometry = geometry
         self.sector = sector
+        self._config = config
+        self._array_id = array_id
+        self.zone_cut = bool(zone_cut)
         self.off_nadir_deg = off_nadir_deg
         self.max_talkers = max_talkers
         self.grid_step_deg = grid_step_deg
@@ -128,6 +152,10 @@ class AutoSteerController:
             post_nr_oversub=post_nr_oversub,
             post_nr_amount=post_nr_amount,
             post_nr_preserve_level=post_nr_preserve_level,
+            peq=peq,
+            peq_bands=peq_bands,
+            transient_suppress=transient_suppress,
+            voice_gate=voice_gate,
             dereverb=dereverb,
             dereverb_t60=dereverb_t60,
             dereverb_beta=dereverb_beta,
@@ -147,6 +175,10 @@ class AutoSteerController:
         self._last_sig: Optional[tuple[tuple, tuple]] = None  # quantized (looks, nulls) signature
         self._hold = 0
         self.error = ""
+
+    def set_peq_bands(self, bands: Optional[Sequence[dict]] = None) -> None:
+        """Forward live parametric-EQ band changes to the underlying live controller."""
+        self.ctrl.set_peq_bands(bands)
 
     # ---- lifecycle ----
     def start(self) -> None:
@@ -238,6 +270,10 @@ class AutoSteerController:
 
         in_az = [d.azimuth_deg for d in res.detections if d.in_sector]
         out_az = [d.azimuth_deg for d in res.detections if not d.in_sector]
+
+        # zone cut: keep only looks inside a pickup zone; null the door + anyone outside the pickup area
+        if self.zone_cut and self._config is not None and self._array_id:
+            in_az, out_az = _apply_zone_cut(self._config, self._array_id, in_az, out_az)
 
         # hysteresis: hold the last look set briefly when detections drop out
         if in_az:

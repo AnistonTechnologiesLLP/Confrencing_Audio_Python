@@ -338,6 +338,89 @@ def test_arrays_section_always_present(win):
     assert hasattr(panel, "_arrays_section") and hasattr(panel, "live_arrays_status")
 
 
+# --------------------------------------------------------------------------- #
+# Tone — parametric EQ (PEQ)
+# --------------------------------------------------------------------------- #
+def test_peq_card_present_and_default_off(win):
+    panel = win.panels["live"]
+    assert "peq" in panel._live_cards
+    assert hasattr(panel, "live_peq_enable") and not panel.live_peq_enable.isChecked()
+    assert len(panel._peq_rows) == 4
+    assert panel._peq_bands() == []                       # off → no bands
+
+
+def test_peq_hum_notch_preset_fills_50hz_bands(win):
+    panel = win.panels["live"]
+    panel._peq_hum_notch_preset()
+    bands = panel._peq_bands()
+    assert [b["freqHz"] for b in bands] == [50.0, 100.0, 150.0, 200.0]
+    assert all(b["type"] == "bell" and b["gainDb"] == -12.0 and b["q"] == 10.0 for b in bands)
+    panel.live_peq_enable.setChecked(False)               # teardown
+
+
+def test_peq_pushes_bands_to_active_session(win):
+    """Editing a PEQ band while a session is live pushes the bands to the active controller; disabling
+    pushes None (duck-typed via _active_ctl, like the monitor gain)."""
+    cap = {}
+
+    class _FakeEng:
+        def set_peq_bands(self, bands): cap["bands"] = bands
+        def set_mute(self, v): pass
+        def set_gain_db(self, v): pass
+        def read_level(self): return 0.0
+
+    panel = win.panels["live"]
+    panel._beam_engine = _FakeEng()
+    assert panel._active_ctl() is panel._beam_engine
+    panel.live_peq_enable.setChecked(True)
+    r = panel._peq_rows[0]
+    r["on"].setChecked(True)
+    r["freq"].setValue(1000.0)
+    r["gain"].setValue(8.0)
+    panel._on_peq_changed()
+    assert cap["bands"] and cap["bands"][0]["freqHz"] == 1000.0 and cap["bands"][0]["gainDb"] == 8.0
+    panel.live_peq_enable.setChecked(False)
+    panel._on_peq_changed()
+    assert cap["bands"] is None                           # disabled → None (true bypass)
+    panel._beam_engine = None                             # teardown
+
+
+def test_transient_suppress_flows_to_steered_cfg(win):
+    """The A/B-card 'Suppress taps / knocks' checkbox adds transient_suppress to the steered back-end cfg."""
+    panel = win.panels["live"]
+    base = {"radius_m": 0.04}
+    assert "transient_suppress" not in panel._beameng_steered_cfg(base)
+    panel.live_beameng_transient.setChecked(True)
+    assert panel._beameng_steered_cfg(base)["transient_suppress"] is True
+    panel.live_beameng_transient.setChecked(False)
+
+
+def test_voice_gate_flows_to_steered_cfg(win):
+    """The A/B-card 'Mute non-speech' checkbox adds voice_gate to the steered back-end cfg."""
+    panel = win.panels["live"]
+    base = {"radius_m": 0.04}
+    assert "voice_gate" not in panel._beameng_steered_cfg(base)
+    panel.live_beameng_voicegate.setChecked(True)
+    assert panel._beameng_steered_cfg(base)["voice_gate"] is True
+    panel.live_beameng_voicegate.setChecked(False)
+
+
+def test_cleaner_none_option_disables_post_nr(win):
+    """The A/B Cleaner combo has a 'None' option (data None, OM-LSA still the default); selecting it disables
+    the post-NR cleaner even with 'Suppress steady noise' ticked."""
+    panel = win.panels["live"]
+    base = {"radius_m": 0.04}
+    assert None in [panel.live_beameng_nr_engine.itemData(i)
+                    for i in range(panel.live_beameng_nr_engine.count())]   # None is offered
+    assert panel.live_beameng_nr_engine.currentData() == "omlsa"            # default stays OM-LSA
+    panel.live_beameng_postnr.setChecked(True)
+    assert panel._beameng_steered_cfg(base).get("post_nr") is True          # a real cleaner → on
+    panel.live_beameng_nr_engine.setCurrentIndex(0)                         # 'None (no cleaner)'
+    assert "post_nr" not in panel._beameng_steered_cfg(base)               # None → cleaner off
+    panel.live_beameng_postnr.setChecked(False)
+    panel.live_beameng_nr_engine.setCurrentIndex(panel.live_beameng_nr_engine.findData("omlsa"))
+
+
 def test_beameng_seat_nulling_pushes_other_seats(win):
     """The A/B-engine 'Null the other seats' path: with a matched target seat, push the OTHER seats'
     bearings to the steered back-end via the engine; clear when disabled."""

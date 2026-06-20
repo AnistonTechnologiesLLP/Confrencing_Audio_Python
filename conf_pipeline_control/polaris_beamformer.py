@@ -550,37 +550,44 @@ def compose_nulls(
     target_az: float,
     budget: int,
     *,
+    exclusion: Sequence[float] = (),
     min_sep_deg: float = DEFAULT_NULL_MIN_SEP_DEG,
     merge_sep_deg: float = DEFAULT_NULL_MERGE_SEP_DEG,
     seat_null_max_count: Optional[int] = None,
 ) -> list:
-    """Merge two competing null sources into one budgeted, deterministic null list for the steered beam.
+    """Merge the competing null sources into one budgeted, deterministic null list for the steered beam.
 
-    ``detected`` are interferer bearings the DOA layer is seeing *right now* (#13 auto-null); ``seats``
-    are *speculative* empty-seat bearings (room-aware). **Adaptive evidence beats static geometry:**
-    detected nulls fill the ``budget`` (= M−1) first, seat nulls fill only what remains — a measured
-    interferer is never crowded out by a speculative seat null. All bearings are array-relative
-    azimuths (deg). The single owner of the final null set: both callers feed lists in here, neither
-    pushes to the beam directly. Steps: (1) drop nulls within ``min_sep_deg`` of the look from BOTH
-    lists *before* budgeting (so a near-look null can't consume budget — and would otherwise make the
-    LCMV constraint matrix singular); (2) drop a seat within ``merge_sep_deg`` of a detected null
-    (same null, one constraint); (3) fill detected (capped at budget), then seats — ordered
-    nearest-to-look first (an empty seat acoustically close to the talker leaks most), optionally
-    self-capped by ``seat_null_max_count`` to reserve headroom for live talkers."""
+    Three tiers, in precedence order — **measured evidence beats high-intent geometry beats speculation**:
+    ``detected`` interferer bearings the DOA layer is seeing *right now* (#13 auto-null) fill the
+    ``budget`` (= M−1) first; then ``exclusion`` — user-DRAWN no-pickup zones (e.g. a door), high intent
+    but still geometry; then ``seats`` — *speculative* empty-seat bearings. A measured interferer is never
+    crowded out by an exclusion or seat null, and a user's explicit door null outranks a speculative empty
+    seat. All bearings are array-relative azimuths (deg); the callers feed lists in here, none pushes to
+    the beam directly. Steps: (1) drop nulls within ``min_sep_deg`` of the look from EVERY list *before*
+    budgeting (a near-look null would consume budget and make the LCMV constraint matrix singular);
+    (2) cross-source dedupe within ``merge_sep_deg`` (exclusion vs detected, seat vs both) — one null, one
+    constraint; (3) fill detected (capped at budget), then exclusions, then seats — seats ordered
+    nearest-to-look first, optionally self-capped by ``seat_null_max_count`` to reserve headroom. When the
+    budget fills before an exclusion fits, it is dropped — the caller surfaces that (never silent)."""
     if budget <= 0:
         return []
     det = _dedupe_az([float(d) for d in detected if _az_sep(float(d), target_az) >= min_sep_deg], merge_sep_deg)
+    # user-drawn EXCLUSION zones (e.g. a door) — high-intent but speculative geometry: rank ABOVE empty-seat
+    # nulls, BELOW measured interferers. Deduped against the detected set so one null isn't double-spent.
+    excl = [float(e) for e in exclusion if _az_sep(float(e), target_az) >= min_sep_deg]
+    excl = _dedupe_az([e for e in excl if not _near_any(e, det, merge_sep_deg)], merge_sep_deg)
     seat = [float(s) for s in seats if _az_sep(float(s), target_az) >= min_sep_deg]
-    seat = [s for s in seat if not _near_any(s, det, merge_sep_deg)]    # cross-source dedupe
+    seat = [s for s in seat if not _near_any(s, det, merge_sep_deg) and not _near_any(s, excl, merge_sep_deg)]
     seat = _dedupe_az(seat, merge_sep_deg)
     seat.sort(key=lambda s: _az_sep(s, target_az))                     # deterministic: nearest-to-look first
     if seat_null_max_count is not None:
         seat = seat[:max(0, int(seat_null_max_count))]
-    final = list(det[:budget])                                        # detected win the budget
-    for s in seat:
-        if len(final) >= budget:
-            break
-        final.append(s)
+    final = list(det[:budget])                                        # 1) measured interferers win the budget
+    for tier in (excl, seat):                                         # 2) user exclusions, then 3) empty seats
+        for s in tier:
+            if len(final) >= budget:
+                break
+            final.append(s)
     return final
 
 
@@ -1078,6 +1085,14 @@ class PolarisBeamformer(PreampHost, MicController):
         post_nr_engine: str = DEFAULT_POST_NR_ENGINE,                   # "gate" | "omlsa" | "wiener" (OCTOVOX cleaner)
         post_nr_amount: float = DEFAULT_POST_NR_AMOUNT,                 # cleaning amount (1.0 full; <1 gentler/less muffled)
         post_nr_preserve_level: bool = DEFAULT_POST_NR_PRESERVE_LEVEL,  # restore the level the cleaner removes (no weak voice)
+        peq: bool = False,                                              # parametric EQ (tone) on the cleaned mono, after NR / before AGC
+        peq_bands: Optional[Sequence[dict]] = None,                     # PEQ bands [{freqHz,gainDb,q,type}]; None/[] = no-op
+        transient_suppress: bool = False,                              # duck impulsive table taps / knocks (after AEC, before dereverb)
+        transient_threshold_db: float = 12.0,                          # crest (dB) that flags an impulsive onset
+        transient_depth_db: float = -12.0,                             # how far to duck a confirmed tap
+        voice_gate: bool = False,                                      # mute non-speech (gaps & noise) at the END of the chain
+        voice_gate_threshold: float = 0.35,                           # speech-presence score above which the gate opens
+        voice_gate_floor_db: float = -15.0,                           # shallow floor (duck, not mute)
         dereverb: bool = False,                                          # real-time late-reverb suppression (pre-NR)
         dereverb_t60: float = DEFAULT_DEREVERB_T60,                      # assumed room RT60 (s)
         dereverb_beta: float = DEFAULT_DEREVERB_BETA,                    # late-reverb over-subtraction strength
@@ -1140,6 +1155,7 @@ class PolarisBeamformer(PreampHost, MicController):
         self.seat_null_max_count = seat_null_max_count
         self._switch_margin_deg = float(switch_margin_deg)   # tracker hysteresis; bounds talker-exclusion
         self._explicit_nulls: list = []      # caller-supplied seat/manual bearings (set_nulls); DOA reads
+        self._exclusion_nulls: list = []     # user-drawn exclusion-zone (door) bearings (set_exclusion_nulls)
         self._active_nulls: list = []        # bearings actually nulled this tick (telemetry)
         self.beam_bandlimit_hz = beam_bandlimit_hz
         # target-loudness AGC on the beam OUTPUT (control-pure: driven by output RMS, NOT distance/room).
@@ -1174,6 +1190,24 @@ class PolarisBeamformer(PreampHost, MicController):
         self._post_nr_amount = min(1.0, max(0.0, float(post_nr_amount)))
         self._post_nr_preserve_level = bool(post_nr_preserve_level)
         self._post_nr: Optional[Any] = None   # _PostNoiseSuppressor | StreamingCleaner | StreamingDeepFilter (duck-typed)
+        # parametric EQ (StreamingPeq): tone-shape the cleaned mono AFTER the noise reducer and BEFORE the
+        # AGC (so the AGC levels the EQ'd signal). Built in _setup_runtime; live-tweakable via set_peq_bands.
+        self.peq = bool(peq)
+        self._peq_bands = list(peq_bands) if peq_bands else None
+        self._peq: Optional[Any] = None
+        # transient (table-tap / knock) suppressor: a temporal de-thump on the mono, AFTER AEC and BEFORE
+        # dereverb (kill the impulse before the reverb/NR smear it). OFF by default; built in _setup_runtime.
+        # Its duck_active flag FREEZES the AGC so the AGC doesn't chase the dip (Invariant B).
+        self.transient_suppress = bool(transient_suppress)
+        self._transient_threshold_db = float(transient_threshold_db)
+        self._transient_depth_db = float(transient_depth_db)
+        self._transient: Optional[Any] = None
+        # 'voice only' output gate: duck non-speech (gaps / steady noise / rustle) at the END of the chain,
+        # downstream of the AGC (so the AGC can't chase the gate). OFF by default; built in _setup_runtime.
+        self.voice_gate = bool(voice_gate)
+        self._voice_gate_threshold = float(voice_gate_threshold)
+        self._voice_gate_floor_db = float(voice_gate_floor_db)
+        self._voice_gate: Optional[Any] = None
         # real-time dereverberation (StreamingDereverb): runs BEFORE the noise reducer; built in _setup_runtime.
         self.dereverb = bool(dereverb)
         self._dereverb_t60 = float(dereverb_t60)
@@ -1370,6 +1404,20 @@ class PolarisBeamformer(PreampHost, MicController):
         time-domain tiers have no null degrees of freedom). ``None``/``[]`` clears them."""
         self._explicit_nulls = [float(b) for b in (bearings or [])]
 
+    def set_exclusion_nulls(self, bearings: Optional[Sequence[float]] = None) -> None:
+        """Set the user-drawn EXCLUSION-zone (e.g. door) bearings (deg) to null. These rank above speculative
+        empty-seat nulls and below measured interferers in :func:`compose_nulls`. ``None``/``[]`` clears them.
+        Frequency-domain modes only (the time-domain tiers have no null degrees of freedom)."""
+        self._exclusion_nulls = [float(b) for b in (bearings or [])]
+
+    def set_peq_bands(self, bands: Optional[Sequence[dict]] = None) -> None:
+        """Set/replace the parametric-EQ bands live (``[{freqHz,gainDb,q,type}]``); ``None``/``[]`` disables
+        it. Applied on the next block — StreamingPeq rebinds atomically, so no audio-thread lock is held."""
+        self._peq_bands = list(bands) if bands else None
+        self.peq = bool(self._peq_bands)
+        if self._peq is not None:
+            self._peq.set_bands(self._peq_bands)
+
     @property
     def active_nulls(self) -> list:
         """The interferer bearings the beam is currently nulling (for display / telemetry)."""
@@ -1404,6 +1452,7 @@ class PolarisBeamformer(PreampHost, MicController):
             detected = [d.azimuth_deg for d in dets if _az_sep(d.azimuth_deg, look_az) >= talker_guard]
         return compose_nulls(
             detected, list(self._explicit_nulls), look_az, self.geometry.n_active - 1,
+            exclusion=list(self._exclusion_nulls),
             min_sep_deg=self.null_min_sep_deg, merge_sep_deg=self.null_merge_sep_deg,
             seat_null_max_count=self.seat_null_max_count,
         )
@@ -1601,6 +1650,26 @@ class PolarisBeamformer(PreampHost, MicController):
                     amount=self._post_nr_amount)
             # Wrap so the cleaned voice keeps its loudness (restore the ~5-7 dB the cleaner removes).
             self._post_nr = _LevelPreservingCleaner(inner) if self._post_nr_preserve_level else inner
+        # parametric EQ (StreamingPeq): always built (a true no-op when no bands), so set_peq_bands can engage
+        # it live; runs on the cleaned mono AFTER the noise reducer, BEFORE the AGC.
+        from .peq import StreamingPeq
+        self._peq = StreamingPeq(self.sample_rate, self._peq_bands if self.peq else None)
+        # transient suppressor (de-thump): built only when enabled (needs numpy/scipy).
+        if self.transient_suppress:
+            from .transient import StreamingTransientSuppressor
+            self._transient = StreamingTransientSuppressor(
+                self.sample_rate, threshold_db=self._transient_threshold_db,
+                depth_db=self._transient_depth_db)
+        else:
+            self._transient = None
+        # 'voice only' output gate: built only when enabled (needs numpy + the scorer).
+        if self.voice_gate:
+            from .voice_gate import VoiceOnlyGate
+            self._voice_gate = VoiceOnlyGate(
+                self.sample_rate, threshold=self._voice_gate_threshold,
+                floor_db=self._voice_gate_floor_db)
+        else:
+            self._voice_gate = None
         # real-time dereverb (StreamingDereverb): runs on the mono BEFORE the noise reducer; off unless enabled.
         if self.dereverb:
             from .streaming_cleaner import StreamingDereverb   # lazy: avoids a module-load import cycle
@@ -1641,16 +1710,22 @@ class PolarisBeamformer(PreampHost, MicController):
             # far-end-activity gate and stays bounded via its leaky, magnitude-clipped NLMS. (A residual /
             # coherence double-talk detector inside StreamingAec is the documented upgrade.)
             mono = self._aec.process(mono, ref, near_end_active=False)  # cancel far-end echo first
+        if self._transient is not None:
+            mono = self._transient.process(mono)      # de-thump table taps BEFORE dereverb/NR smear them
         if self._dereverb is not None:
             mono = self._dereverb.process(mono, self._noise_gate)  # suppress late reverb BEFORE the noise reducer
         if self._post_nr is not None:
             mono = self._post_nr.process(mono, self._noise_gate)   # spectral-gate NR before AGC (stable floor)
+        if self._peq is not None:
+            mono = self._peq.process(mono)            # parametric EQ (tone) on the cleaned mono, before AGC
         if raw_ab is not None:
             cap.feed(raw_ab, mono)                    # A/B proof: raw beam vs the cleaned (pre-AGC) mono
         if self._agc_gain is not None:
             mono = self._apply_agc(mono)              # target-loudness normalize (before the linear band-limit)
         if self._lp_kernel is not None:
             mono = self._band_limit(mono)
+        if self._voice_gate is not None:
+            mono = self._voice_gate.process(mono)     # 'voice only' — mute non-speech (LAST stage, Invariant A)
         rms = float(np.sqrt(np.mean(mono * mono))) if mono.size else 0.0
         self._level = min(1.0, rms)
         self._accumulate_covariance(block)
@@ -1788,6 +1863,12 @@ class PolarisBeamformer(PreampHost, MicController):
             self._dereverb.reset()         # drop the late-reverb PSD + delay-ring history
         if self._post_nr is not None:
             self._post_nr.reset()          # drop NR streaming + floor history; its lock serializes vs an in-flight process()
+        if self._peq is not None:
+            self._peq.reset()              # drop the biquad ring (fresh state on re-activation)
+        if self._transient is not None:
+            self._transient.reset()        # drop the de-thump envelope + lookahead tail
+        if self._voice_gate is not None:
+            self._voice_gate.reset()       # fresh scorer + gain (re-acquire speech on the next block)
         with self._beam_lock:
             self._beam.reset()             # drop the strategy's streaming history; rebuilt on next process
 
@@ -1938,8 +2019,12 @@ class PolarisBeamformer(PreampHost, MicController):
 
     def _apply_agc(self, mono: Any) -> Any:
         """Normalize the beam-output block toward ``agc_target_db`` via the shared TargetLoudnessAgc
-        (slewed, clamped, held through silence). No-op unless ``agc_target_db`` was set."""
-        return self._agc.process(mono) if self._agc is not None else mono
+        (slewed, clamped, held through silence). No-op unless ``agc_target_db`` was set. FREEZES the AGC
+        while the transient suppressor is ducking, so it doesn't chase the dip (Invariant B)."""
+        if self._agc is None:
+            return mono
+        freeze = self._transient is not None and bool(self._transient.duck_active)
+        return self._agc.process(mono, freeze=freeze)
 
     def _band_limit(self, mono: Any) -> Any:
         np = self._np

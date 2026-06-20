@@ -44,16 +44,20 @@ class TargetLoudnessAgc:
         """The slewing gain EMA (current value via ``.value``)."""
         return self._tracker
 
-    def process(self, mono: Any) -> Any:
-        """Apply the slewed, clamped, silence-held gain to one mono block; returns float32."""
+    def process(self, mono: Any, *, freeze: bool = False) -> Any:
+        """Apply the slewed, clamped, silence-held gain to one mono block; returns float32.
+
+        ``freeze`` HOLDS the gain for this block (no adaptation) — used while a transient suppressor is
+        ducking, so the AGC doesn't read the dip as a level drop and pull up, lifting the tap tail and
+        noise floor right after the duck."""
         import numpy as np
 
         rms = float(np.sqrt(np.mean(mono * mono))) if mono.size else 0.0
-        if rms > self._silence_rms:
-            desired = min(self.gain_max, max(self.gain_min, self._target_rms / rms))
-        else:
+        if freeze or rms <= self._silence_rms:
             held = self._tracker.value
-            desired = held if held is not None else 1.0   # hold through silence (don't pump the floor)
+            desired = held if held is not None else 1.0   # hold (don't pump the floor / chase a transient duck)
+        else:
+            desired = min(self.gain_max, max(self.gain_min, self._target_rms / rms))
         g = float(self._tracker.update(desired))
         return (mono * g).astype(np.float32)
 

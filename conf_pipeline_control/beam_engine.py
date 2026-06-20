@@ -242,6 +242,12 @@ class BeamEngine:
         self._steered.set_preamp_gain_db(gain_db)
         self._grid.set_preamp_gain_db(gain_db)
 
+    def set_peq_bands(self, bands: Any = None) -> None:
+        """Set the parametric-EQ bands live on the STEERED back-end (PEQ is a post-cleaning stage, so it
+        rides the steered path only — the grid back-end has no cleaner chain)."""
+        if hasattr(self._steered, "set_peq_bands"):
+            self._steered.set_peq_bands(bands)
+
     def set_preamp_auto(self, on: bool) -> None:
         """Toggle the auto headroom stager on BOTH back-ends (inert until the analog track)."""
         self._steered.set_preamp_auto(on)

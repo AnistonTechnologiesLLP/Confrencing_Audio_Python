@@ -73,10 +73,25 @@ def main() -> int:
     ap.add_argument("--preamp-gain-db", type=float, default=0.0,
                     help="manual mic-input level trim (dB) before the beamformer — software gain; "
                          "does NOT improve SNR (the output AGC cancels it when on). 0 = no change")
+    ap.add_argument("--peq", default=None,
+                    help='parametric EQ bands "freqHz:gainDb:q:type[,...]" (type=bell|lowShelf|highShelf|'
+                         'highpass|lowpass), applied after cleaning, before AGC. e.g. "1000:6:1:bell"')
+    ap.add_argument("--hum-notch", action="store_true",
+                    help="preset: narrow 50 Hz mains-hum notches (50/100/150/200 Hz, Q=10, -12 dB bells)")
     args = ap.parse_args()
 
     if not cc.controls_available():
         sys.exit('Live audio needs numpy + sounddevice. Install:\n    pip install -e ".[control]"')
+
+    peq_bands = None
+    if args.peq:
+        peq_bands = []
+        for _part in args.peq.split(","):
+            _f, _g, _q, _t = _part.split(":")
+            peq_bands.append({"freqHz": float(_f), "gainDb": float(_g), "q": float(_q), "type": _t})
+    if args.hum_notch:
+        peq_bands = (peq_bands or []) + [{"freqHz": _f, "gainDb": -12.0, "q": 10.0, "type": "bell"}
+                                         for _f in (50.0, 100.0, 150.0, 200.0)]
 
     geom = build_geometry(args.radius, args.dead)
     sector = cc.SectorConfig(
@@ -99,6 +114,8 @@ def main() -> int:
         output_device=args.output_device,
         record_path=args.record,
         preamp_gain_db=args.preamp_gain_db,
+        peq=bool(peq_bands),
+        peq_bands=peq_bands,
     )
 
     print(
