@@ -49,6 +49,44 @@ def test_between_seats_returns_none_past_the_gate():
     assert cp.nearest_seat(46.0, ORIGIN, 0.0, seats, max_separation_deg=60.0).seat_id == "E"
 
 
+# --------------------------------------------------------------------------- #
+# seats_owned_by_array — multi-array seat partition (by distance)
+# --------------------------------------------------------------------------- #
+def _config_two_arrays():
+    """Array A1 at origin, A2 far east at (10,0); a bench with seats near A1, near A2, and midway."""
+    c = cp.create_config("rt", "2026-01-01T00:00:00Z")
+    c = cp.add_device(c, cp.create_microphone_array("A1", "Array 1", position=Point2D(0.0, 0.0)))
+    c = cp.add_device(c, cp.create_microphone_array("A2", "Array 2", position=Point2D(10.0, 0.0)))
+    c.room = RoomLayout(
+        vertices=[Point2D(-2, -2), Point2D(12, -2), Point2D(12, 2), Point2D(-2, 2)], height=3.0, units="meters",
+        objects=[RoomObject(id="row", kind="bench", position=Point2D(5.0, 0.0),
+                            seats=[SeatAnchor(position=Point2D(1.0, 0.0)),    # row-seat1 near A1
+                                   SeatAnchor(position=Point2D(9.0, 0.0)),    # row-seat2 near A2
+                                   SeatAnchor(position=Point2D(5.0, 0.0))])], # row-seat3 equidistant -> A1 (tie)
+    )
+    return c
+
+
+def test_seats_owned_partitions_by_nearest_array():
+    c = _config_two_arrays()
+    a1 = cp.seats_owned_by_array(c, "A1")
+    a2 = cp.seats_owned_by_array(c, "A2")
+    assert a1 == ["row-seat1", "row-seat3"]            # nearer A1 + the equidistant tie (lowest id)
+    assert a2 == ["row-seat2"]
+    assert set(a1) | set(a2) == {"row-seat1", "row-seat2", "row-seat3"}   # a partition: disjoint + total
+    assert set(a1) & set(a2) == set()
+
+
+def test_seats_owned_empty_for_unknown_or_unposed_array_or_no_seats():
+    c = _config_two_arrays()
+    assert cp.seats_owned_by_array(c, "nope") == []                        # unknown array
+    c2 = cp.add_device(c, cp.create_microphone_array("A3", "Array 3"))     # no position
+    assert cp.seats_owned_by_array(c2, "A3") == []                         # unposed array owns nothing
+    bare = cp.add_device(cp.create_config("b", "2026-01-01T00:00:00Z"),
+                         cp.create_microphone_array("A1", "Array 1", position=Point2D(0.0, 0.0)))
+    assert cp.seats_owned_by_array(bare, "A1") == []                       # no room/seats
+
+
 def test_nearest_seat_no_seats_is_none():
     assert cp.nearest_seat(0.0, ORIGIN, 0.0, []) is None
 

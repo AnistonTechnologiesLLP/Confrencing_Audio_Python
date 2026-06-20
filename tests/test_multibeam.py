@@ -58,6 +58,16 @@ def test_snap_targets_skips_none_azimuth():
         [BeamTarget(90.0, "sofa-seat2", 8.0)]
 
 
+def test_snap_targets_allowed_seats_keeps_only_owned():
+    """Ownership: with allowed_seats, only detections snapping to an owned seat survive — a non-owned
+    seat AND a free-DOA detection are both dropped (so two kits don't double-capture one voice)."""
+    c = _config_with_seats()
+    out = snap_targets(c, "A", [(0.0, 10.0), (90.0, 8.0), (200.0, 5.0)], allowed_seats={"sofa-seat1"})
+    assert out == [BeamTarget(0.0, "sofa-seat1", 10.0)]    # seat2 (not owned) + 200deg (free DOA) dropped
+    # allowed_seats=None is the unrestricted default (regression guard)
+    assert len(snap_targets(c, "A", [(0.0, 10.0), (200.0, 5.0)])) == 2
+
+
 # --------------------------------------------------------------------------- BeamSlotTracker
 def _active(slots):
     return [(s.azimuth_deg, s.seat_id) for s in slots if s.active]

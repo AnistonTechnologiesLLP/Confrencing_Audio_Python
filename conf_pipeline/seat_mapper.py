@@ -61,6 +61,34 @@ def room_seats(config: SystemConfig) -> list[tuple[str, SeatAnchor]]:
     return out
 
 
+def seats_owned_by_array(
+    config: SystemConfig,
+    array_id: str,
+    *,
+    arrays: Optional[Iterable[MicrophoneArray]] = None,
+) -> list[str]:
+    """Room seats whose **nearest** microphone array (by Euclidean distance) is ``array_id``.
+
+    In a multi-array room each seat is "owned" by the array physically closest to it (= best SNR), so two
+    arrays don't both capture the same talker when their pickups are summed. Distance, **not** bearing.
+    ``arrays`` defaults to every placed (``position`` set) :class:`MicrophoneArray` in the config. Ties go
+    to the lowest array id (deterministic). Returns ``[]`` if ``array_id`` is unknown / has no position, or
+    there are no seats — in which case the caller cannot enforce ownership and must fall back to best-effort.
+    """
+    candidates = arrays if arrays is not None else (
+        d for d in config.devices if isinstance(d, MicrophoneArray))
+    placed = [(a.id, a.position) for a in candidates if a.position is not None]   # (id, Point2D), narrowed
+    if not any(aid == array_id for aid, _ in placed):
+        return []
+    owned: list[str] = []
+    for seat_id, anchor in room_seats(config):
+        sx, sy = anchor.position.x, anchor.position.y
+        nearest_id = min(placed, key=lambda p: (math.hypot(sx - p[1].x, sy - p[1].y), p[0]))[0]
+        if nearest_id == array_id:
+            owned.append(seat_id)
+    return owned
+
+
 def nearest_seat(
     azimuth_deg: float,
     array_position: Point2D,
