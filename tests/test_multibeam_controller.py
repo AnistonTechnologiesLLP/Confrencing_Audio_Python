@@ -123,6 +123,23 @@ def test_process_block_dispatches_emits_and_stores_tracks():
     assert len(ctl.latest_tracks()) == 2                    # per-beam monos stashed for the recorder
 
 
+def test_recorder_hook_is_fed_per_block_and_labelled_by_seat(tmp_path):
+    import conf_pipeline_control as cc
+    cov = _cov_from_sources(cc.sensibel_8(radius_m=0.04), [0.0], [1.0])
+    ctl = _controller(cov, _StubMixer())
+    rec = cc.MultiTrackRecorder(2, 44100.0)
+    rec.start()
+    ctl.set_recorder(rec)
+    ctl.plan(t=0.0)                                          # labels track 1 by the detected seat
+    ctl.process_block(np.zeros((512, 8), dtype=np.float32))
+    ctl.process_block(np.zeros((512, 8), dtype=np.float32))
+    rec.stop()
+    names = [p.rsplit("\\", 1)[-1].rsplit("/", 1)[-1] for p in rec.write(str(tmp_path), prefix="cap")]
+    assert len(names) == 3                                   # 2 beams + the mixed feed
+    assert any("sofa-seat1" in n for n in names)            # the active beam's track named by its seat
+    assert any(n == "cap_mixed.wav" for n in names)
+
+
 def test_status_reflects_the_planned_beams():
     import conf_pipeline_control as cc
     cov = _cov_from_sources(cc.sensibel_8(radius_m=0.04), [0.0], [1.0])

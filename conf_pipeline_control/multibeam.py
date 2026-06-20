@@ -394,6 +394,7 @@ class MultiBeamController:
         self._stop = threading.Event()
         self._plan_thread: Optional[threading.Thread] = None
         self._stream: Any = None
+        self._recorder: Any = None
 
     @property
     def n_beams(self) -> int:
@@ -402,6 +403,11 @@ class MultiBeamController:
     @property
     def streaming(self) -> bool:
         return self._streaming
+
+    def set_recorder(self, recorder: Any) -> None:
+        """Attach (or clear with ``None``) a `MultiTrackRecorder` the engine feeds per block — the
+        "Record tracks" hook. Atomic reference write; the audio thread reads it lock-free."""
+        self._recorder = recorder
 
     # ---- core orchestration (directly callable; tests drive these with stubs) ----
     def plan(self, t: Optional[float] = None) -> None:
@@ -417,6 +423,10 @@ class MultiBeamController:
         targets = snap_targets(self._config, self._array_id, dets, snap=self._snap, max_separation_deg=self._max_snap)
         slots = self._tracker.update(targets, now)
         self._mixer.set_slots(slots)
+        rec = self._recorder
+        if rec is not None:                                    # label each track by the seat/azimuth it holds
+            rec.set_labels([s.seat_id or (f"az{round(s.azimuth_deg)}" if s.azimuth_deg is not None else None)
+                            for s in slots])
         with self._lock:
             self._slots = slots
 
@@ -434,6 +444,9 @@ class MultiBeamController:
         with self._lock:
             self._monos = list(monos)
             self._level = lvl
+        rec = self._recorder
+        if rec is not None:
+            rec.feed(monos, mixed)                              # per-person tracks (cheap append; no I/O here)
         if self._output_cb is not None:
             try:
                 self._output_cb(mixed)                          # realtime: never throw into the callback
