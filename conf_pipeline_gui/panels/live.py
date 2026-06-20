@@ -544,11 +544,12 @@ class LivePanel(PanelBase):
         )
         self.live_beameng_nr_depth.setEnabled(False)         # enabled when the engine is ticked
         ef.addRow("Noise depth", self.live_beameng_nr_depth)
-        self.live_beameng_nr_engine = QComboBox()            # post_nr engine: AI cleaner (OM-LSA) vs the light gate
+        self.live_beameng_nr_engine = QComboBox()            # post_nr engine: None / AI cleaner / light gate
+        self.live_beameng_nr_engine.addItem("None (no cleaner)", None)
         self.live_beameng_nr_engine.addItem("AI voice cleaning (OM-LSA)", "omlsa")
         self.live_beameng_nr_engine.addItem("DeepFilterNet3 (AI, ~60 ms)", "dfn3")
         self.live_beameng_nr_engine.addItem("Light gate (fast)", "gate")
-        self.live_beameng_nr_engine.setCurrentIndex(0)       # default: the OCTOVOX-derived decision-directed cleaner
+        self.live_beameng_nr_engine.setCurrentIndex(self.live_beameng_nr_engine.findData("omlsa"))  # default: OM-LSA cleaner
         self.live_beameng_nr_engine.setToolTip(
             "Which noise reducer runs on the beam output. 'OCTOVOX cleaner' is the decision-directed OM-LSA "
             "denoiser ported from OCTOVOX (more natural, better on non-stationary noise); 'Light gate' is the "
@@ -1482,12 +1483,12 @@ class LivePanel(PanelBase):
             cfg["auto_null"] = True
         elif self.live_beameng_nullseats.isChecked():
             cfg["mode"] = cc.MODE_SUPERDIRECTIVE      # seat nulls need a frequency-domain steered beam
-        if self.live_beameng_postnr.isChecked():
+        if self.live_beameng_postnr.isChecked() and self.live_beameng_nr_engine.currentData() is not None:
             cfg["post_nr"] = True                     # noise reducer on the output (steady fans/AC)
             floor_db, oversub = self.live_beameng_nr_depth.currentData()   # Gentle / Medium / Aggressive
             cfg["post_nr_floor_db"], cfg["post_nr_oversub"] = floor_db, oversub
             cfg["post_nr_amount"] = _clean_amount(self.live_beameng_nr_depth)   # cleaning amount (full-bodied voice)
-            cfg["post_nr_engine"] = self.live_beameng_nr_engine.currentData()   # AI OM-LSA cleaner vs light gate
+            cfg["post_nr_engine"] = self.live_beameng_nr_engine.currentData()   # None disables; else OM-LSA / DFN3 / gate
         if self.live_beameng_dereverb.isChecked():
             cfg["dereverb"] = True                    # real-time late-reverb suppression before the cleaner
         if self.live_beameng_transient.isChecked():

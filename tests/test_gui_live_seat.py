@@ -405,6 +405,22 @@ def test_voice_gate_flows_to_steered_cfg(win):
     panel.live_beameng_voicegate.setChecked(False)
 
 
+def test_cleaner_none_option_disables_post_nr(win):
+    """The A/B Cleaner combo has a 'None' option (data None, OM-LSA still the default); selecting it disables
+    the post-NR cleaner even with 'Suppress steady noise' ticked."""
+    panel = win.panels["live"]
+    base = {"radius_m": 0.04}
+    assert None in [panel.live_beameng_nr_engine.itemData(i)
+                    for i in range(panel.live_beameng_nr_engine.count())]   # None is offered
+    assert panel.live_beameng_nr_engine.currentData() == "omlsa"            # default stays OM-LSA
+    panel.live_beameng_postnr.setChecked(True)
+    assert panel._beameng_steered_cfg(base).get("post_nr") is True          # a real cleaner → on
+    panel.live_beameng_nr_engine.setCurrentIndex(0)                         # 'None (no cleaner)'
+    assert "post_nr" not in panel._beameng_steered_cfg(base)               # None → cleaner off
+    panel.live_beameng_postnr.setChecked(False)
+    panel.live_beameng_nr_engine.setCurrentIndex(panel.live_beameng_nr_engine.findData("omlsa"))
+
+
 def test_beameng_seat_nulling_pushes_other_seats(win):
     """The A/B-engine 'Null the other seats' path: with a matched target seat, push the OTHER seats'
     bearings to the steered back-end via the engine; clear when disabled."""
