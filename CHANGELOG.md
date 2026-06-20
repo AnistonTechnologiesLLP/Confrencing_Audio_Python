@@ -9,6 +9,13 @@ the TS sibling is at matching v5 parity. The desktop app is presented as
 
 ## [Unreleased]
 
+### Removed
+- **LIVE panel: removed the "Capture everyone (all talkers)" listening mode + card and the
+  "Clean via OCTOVOX (near-live)" card** from the desktop app (GUI controls only — the backend
+  modules `multibeam` / `octovox_bridge` / `octovox_monitor` are untouched). The per-array **"Use"
+  checkboxes still combine 2+ ticked arrays into one room capture** (the combine now uses built-in
+  defaults instead of the removed card's beam-count / snap / record controls).
+
 ### Added
 - **Voice-focus DSP suite — parametric EQ, tap suppressor, "voice only" gate, and a door / out-of-area cut.**
   Four new opt-in real-time stages on the live beam (all OFF by default, lazy-numpy, realtime-safe; the live

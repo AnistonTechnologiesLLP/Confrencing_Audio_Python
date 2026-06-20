@@ -76,8 +76,7 @@ def test_twokit_mode_connect_tick_disconnect(win, monkeypatch):
     panel.refresh()
     panel.live_listening_mode.setCurrentIndex(panel.live_listening_mode.findData("twokit"))
     # the high-level mode clears the other backends and the arrays populate from the config
-    assert not (panel.live_beameng.isChecked() or panel.live_autosteer.isChecked()
-                or panel.live_octovox.isChecked())
+    assert not (panel.live_beameng.isChecked() or panel.live_autosteer.isChecked())
     assert panel.live_twokit_arr_a.findData("A1") >= 0 and panel.live_twokit_arr_b.findData("A2") >= 0
     panel.live_twokit_arr_a.setCurrentIndex(panel.live_twokit_arr_a.findData("A1"))
     panel.live_twokit_arr_b.setCurrentIndex(panel.live_twokit_arr_b.findData("A2"))

@@ -172,7 +172,6 @@ class LivePanel(PanelBase):
         self.live_listening_mode.addItem("Clean audio (hands-off)", "clean")
         self.live_listening_mode.addItem("Manual (advanced)", "manual")
         self.live_listening_mode.addItem("Two kits (combined room)", "twokit")
-        self.live_listening_mode.addItem("Capture everyone (all talkers)", "multibeam")
         self.live_listening_mode.setToolTip(
             "Pick how the room is heard; the panel selects the right engine + sensible defaults and hides the "
             "rest. 'Clean audio (hands-off)' follows talkers and turns on AI voice cleaning. "
@@ -627,48 +626,6 @@ class LivePanel(PanelBase):
         eng.body_lay.addLayout(ef)
         lay.addWidget(eng)
 
-        # --- OCTOVOX: near-live cleaned monitor ---
-        ov = Card("Clean via OCTOVOX (near-live)", collapsed=True)
-        ov.setToolTip(
-            "Send rolling chunks of the raw array to a running OCTOVOX server "
-            "(beamform + dereverb + DeepFilterNet3), steered by the zone azimuths, "
-            "and play the cleaned result back. Delayed by ~chunk + processing; "
-            "not real-time talkback."
-        )
-        ovf = QFormLayout()
-        ovf.setRowWrapPolicy(QFormLayout.WrapLongRows)
-        ovf.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
-        self.live_octovox = QCheckBox("Enable (use headphones)")
-        self.live_octovox.toggled.connect(
-            lambda on: None if self._refreshing else (on and self.live_beameng.setChecked(False)))
-        ovf.addRow("OCTOVOX", self.live_octovox)
-        self.live_octovox_url = QLineEdit(cc.OCTOVOX_DEFAULT_URL)
-        ovf.addRow("Server", self.live_octovox_url)
-        self.live_octovox_steer = QCheckBox("Steer to pickup zone (needs azimuth calibration)")
-        self.live_octovox_steer.setToolTip(
-            "OFF (default): OCTOVOX auto-finds the voice — reliable on a small/front-back-"
-            "ambiguous array. ON: force OCTOVOX to steer at the pickup-zone azimuth; only "
-            "use once the Azimuth offset is calibrated, or it can null the voice (noise only)."
-        )
-        ovf.addRow("Direction", self.live_octovox_steer)
-        self.live_az_offset = NoWheelDoubleSpinBox()
-        self.live_az_offset.setRange(-180.0, 180.0)
-        self.live_az_offset.setSingleStep(5.0)
-        self.live_az_offset.setValue(0.0)
-        self.live_az_offset.setSuffix("°")
-        ovf.addRow("Azimuth offset", self.live_az_offset)
-        self.live_chunk = NoWheelDoubleSpinBox()
-        self.live_chunk.setRange(1.0, 8.0)
-        self.live_chunk.setSingleStep(0.5)
-        self.live_chunk.setValue(3.0)
-        self.live_chunk.setSuffix(" s")
-        ovf.addRow("Chunk", self.live_chunk)
-        self.live_octovox_status = QLabel("")
-        self.live_octovox_status.setWordWrap(True)
-        ovf.addRow(self.live_octovox_status)
-        ov.body_lay.addLayout(ovf)
-        lay.addWidget(ov)
-
         # --- TWO KITS: dual-POLARIS combined-room automix (one output, follows the active talker) ---
         twokit = Card("Two kits — combined room coverage")
         intro = QLabel("Two POLARIS kits cover one room. The app outputs whichever kit currently has the "
@@ -710,39 +667,6 @@ class LivePanel(PanelBase):
         self.live_twokit_status.setWordWrap(True)
         twokit.body_lay.addWidget(self.live_twokit_status)
         lay.addWidget(twokit)
-
-        # --- CAPTURE EVERYONE: one array, a beam per talker, NOM-automix + per-person tracks ---
-        multibeam = Card("Capture everyone — all talkers at once")
-        mb_intro = QLabel("Form a beam per person (detected and snapped to room seats), mix them into one "
-                          "feed, and optionally record a separate track per person. Honest limit: this "
-                          "~40 mm array separates 2-3 well-spaced talkers; closer people merge into one beam.")
-        mb_intro.setWordWrap(True)
-        multibeam.body_lay.addWidget(mb_intro)
-        mbf = QFormLayout()
-        mbf.setRowWrapPolicy(QFormLayout.WrapLongRows)
-        mbf.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
-        self.live_mb_beams = NoWheelDoubleSpinBox()
-        self.live_mb_beams.setRange(1, 3)
-        self.live_mb_beams.setDecimals(0)
-        self.live_mb_beams.setValue(3)
-        self.live_mb_beams.setToolTip("Max simultaneous beams. 2-3 is the small array's realistic ceiling.")
-        mbf.addRow("Beams", self.live_mb_beams)
-        self.live_mb_snap = QCheckBox("Snap each beam to the nearest room seat")
-        self.live_mb_snap.setChecked(True)
-        self.live_mb_snap.setToolTip("Hybrid aim: lock a beam to a defined seat for a stable, jitter-free "
-                                     "pickup; fall back to free direction-finding where no seat is near.")
-        mbf.addRow("Aim", self.live_mb_snap)
-        self.live_mb_record = QPushButton("Record per-person tracks")
-        self.live_mb_record.setCheckable(True)
-        self.live_mb_record.setToolTip("While capturing, record each beam to its own WAV (named by seat) "
-                                       "plus the mixed feed; choose a folder when you stop.")
-        self.live_mb_record.clicked.connect(self._on_multibeam_record_toggled)
-        mbf.addRow("Tracks", self.live_mb_record)
-        multibeam.body_lay.addLayout(mbf)
-        self.live_mb_status = QLabel("Pick this mode, then Connect. Speak from different seats.")
-        self.live_mb_status.setWordWrap(True)
-        multibeam.body_lay.addWidget(self.live_mb_status)
-        lay.addWidget(multibeam)
 
         # --- TONE: parametric EQ on the cleaned output (after the cleaners, before the AGC) ---
         peq = Card("Tone — parametric EQ", collapsed=True)
@@ -804,8 +728,8 @@ class LivePanel(PanelBase):
         lay.addWidget(peq)
 
         # keep card refs so the Listening-mode selector can collapse the irrelevant ones
-        self._live_cards = {"hw": hw, "mic": mic, "beam": beam, "steer": steer, "eng": eng, "ov": ov,
-                            "twokit": twokit, "multibeam": multibeam, "peq": peq}
+        self._live_cards = {"hw": hw, "mic": mic, "beam": beam, "steer": steer, "eng": eng,
+                            "twokit": twokit, "peq": peq}
 
         lay.addStretch(1)
 
@@ -932,10 +856,9 @@ class LivePanel(PanelBase):
             i = self.live_beameng_mode.findData("steered")
             if i >= 0:
                 self.live_beameng_mode.setCurrentIndex(i)
-        elif mode in ("table", "twokit", "multibeam"):
+        elif mode in ("table", "twokit"):
             self.live_autosteer.setChecked(False)
             self.live_beameng.setChecked(False)
-            self.live_octovox.setChecked(False)
         # "Clean audio (hands-off)" = follow the room + AI voice cleaning on
         if mode == "clean":
             i = self.live_autosteer_clean.findData("omlsa")
@@ -948,7 +871,6 @@ class LivePanel(PanelBase):
             "seat": {"hw", "eng", "peq"},
             "table": {"hw", "beam", "peq"},
             "twokit": {"twokit"},
-            "multibeam": {"hw", "mic", "multibeam"},
         }.get(mode, {"hw", "beam"})
         if mode == "manual":
             show = set(self._live_cards)          # advanced: every card (stays correct as cards are added)
@@ -996,7 +918,6 @@ class LivePanel(PanelBase):
         self.live_beameng_adaptnull.setEnabled(on)
         if on:
             self.live_autosteer.setChecked(False)
-            self.live_octovox.setChecked(False)
 
     def _on_beameng_mode_changed(self):
         """Switch a running engine's strategy live (glitch-free crossfade); otherwise
@@ -1317,17 +1238,11 @@ class LivePanel(PanelBase):
         if len(active) >= 2:
             self._multiroom_connect()                  # ≥2 arrays ticked → combined room capture (overrides the mode)
             return
-        if self.live_listening_mode.currentData() == "multibeam":
-            self._multibeam_connect()
-            return
         if self.live_beameng.isChecked():
             self._beameng_connect()
             return
         if self.live_autosteer.isChecked():
             self._autosteer_connect()
-            return
-        if self.live_octovox.isChecked():
-            self._octovox_connect()
             return
         geom = self._live_geometry()
         rate = self.live_rate.currentData() or 48000
@@ -1947,22 +1862,15 @@ class LivePanel(PanelBase):
             self.live_arrays_status.setText("Each ticked array needs a DISTINCT input device — fix it and Connect.")
             return
         rate = float(self.live_rate.currentData() or 44100)
-        n_beams = int(self.live_mb_beams.value())
         specs = [cc.RoomKitSpec(device=dev, array_id=aid, radius_m=rad)
                  for (aid, dev, rad) in self._active_arrays()]
         try:
-            ctrl = cc.MultiRoomController(self.state.config, specs, sample_rate=rate, n_beams=n_beams,
-                                          snap=self.live_mb_snap.isChecked())
+            ctrl = cc.MultiRoomController(self.state.config, specs, sample_rate=rate, n_beams=3, snap=True)
             ctrl.set_gain_db(float(self.live_gain.value()))
             ctrl.set_mute(self.live_mute.isChecked())
-            if self.live_mb_record.isChecked():
-                self._multibeam_rec = "multiroom"             # sentinel: the room controller owns the recorders
             ctrl.start()
-            if self.live_mb_record.isChecked():
-                ctrl.record_tracks(True)
         except Exception as exc:                              # hardware open / distinct-device → report, stay off
             self.live_arrays_status.setText(f"Room capture connect failed: {exc}")
-            self._multibeam_rec = None
             return
         self._multiroom = ctrl
         self._session_array_id = specs[0].array_id
@@ -2003,21 +1911,12 @@ class LivePanel(PanelBase):
 
     def _live_disconnect(self):
         if self._multiroom is not None:
-            mr, armed = self._multiroom, (self._multibeam_rec == "multiroom")
             try:
-                mr.stop()
+                self._multiroom.stop()
             finally:
                 self._multiroom = None
-            self._multibeam_rec = None
             self.live_mute.setEnabled(True)
             self.live_gain.setEnabled(True)
-            if armed:
-                from PySide6.QtWidgets import QFileDialog
-                out = QFileDialog.getExistingDirectory(self, "Save per-person tracks to …")
-                if out:
-                    paths = mr.write_tracks(out, prefix="room")
-                    self.live_arrays_status.setText(f"Wrote {len(paths)} track(s) to {out}")
-            self.live_mb_record.setChecked(False)
         if self._multibeam is not None:
             try:
                 self._multibeam.stop()
