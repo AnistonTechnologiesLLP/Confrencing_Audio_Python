@@ -9,6 +9,20 @@ the TS sibling is at matching v5 parity. The desktop app is presented as
 
 ## [Unreleased]
 
+### Fixed
+- **AGC now works in the single-array live modes.** The target-loudness AGC was only ever wired into the
+  2-kit path; `LiveBeamController` (Follow / Lock-to-seat / Whole-table) had **no AGC stage at all**, and
+  the A/B engine / combined-room paths never set a target — so "Normalize loudness" did nothing outside
+  2-kit. Added a real `TargetLoudnessAgc` stage to `LiveBeamController` (after PEQ, AGC-frozen during a
+  tap duck) + a global **"Normalize loudness (AGC)"** Hardware-card checkbox (ON by default, −20 dBFS) that
+  feeds the zone / auto-steer / A-B / combined-room connects.
+- **"Echo" in the room is dereverb, not AEC.** The "Cancel echo" toggle only removes *far-end loudspeaker*
+  echo and needs the room speakers playing the far end + a loopback/Stereo-Mix reference (silent no-op
+  otherwise, ERLE stays 0). Room reverberation of the local talker is handled by **dereverb**, which had
+  no control in the "Whole table" zone mode — added a global **"Reduce room echo (dereverb)"** Hardware-card
+  checkbox that applies to every live mode (OR'd with the per-mode dereverb toggles), and clarified both
+  tooltips.
+
 ### Removed
 - **LIVE panel: removed the "Capture everyone (all talkers)" listening mode + card and the
   "Clean via OCTOVOX (near-live)" card** from the desktop app (GUI controls only — the backend

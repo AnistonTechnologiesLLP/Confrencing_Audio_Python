@@ -252,6 +252,22 @@ class LivePanel(PanelBase):
         ctl_row.addWidget(self.live_active_lbl)
         ctl_row.addStretch(1)
         hw.body_lay.addLayout(ctl_row)
+        self.live_agc = QCheckBox("Normalize loudness (AGC)")
+        self.live_agc.setChecked(True)                       # ON by default — the talker lands at a consistent level
+        self.live_agc.setToolTip(
+            "Automatic gain: normalize the captured talker toward a consistent loudness (target −20 dBFS; "
+            "slewed so it doesn't pump, held through pauses, clamped ±18 dB). Applies to EVERY live mode. On "
+            "by default; uncheck for raw un-normalized level. Fixed at Connect."
+        )
+        hw.body_lay.addWidget(self.live_agc)
+        self.live_dereverb = QCheckBox("Reduce room echo (dereverb)")
+        self.live_dereverb.setToolTip(
+            "Real-time dereverberation: suppress the room's late-reverb tail so the voice sounds closer and "
+            "drier. THIS is the tool for 'my voice echoes in the room' — NOT 'Cancel echo' (which only removes "
+            "far-end loudspeaker echo, and needs the room speakers playing the far end). Applies to every live "
+            "mode. Off by default (it can colour the voice if the room is dry). Fixed at Connect."
+        )
+        hw.body_lay.addWidget(self.live_dereverb)
 
         lay.addWidget(hw)
 
@@ -1300,6 +1316,8 @@ class LivePanel(PanelBase):
                     samplerate=float(rate),
                     monitor=self.live_monitor.isChecked(),
                     output_device=self.live_out_device.currentData(),
+                    agc_target_db=(-20.0 if self.live_agc.isChecked() else None),   # normalize loudness
+                    dereverb=self.live_dereverb.isChecked(),                        # reduce room echo
                 )
             else:
                 ctl = cc.SimulatedMicController(geom)
@@ -1405,7 +1423,8 @@ class LivePanel(PanelBase):
                 post_nr_engine=clean or "gate",
                 post_nr_floor_db=nr_floor_db, post_nr_oversub=nr_oversub,
                 post_nr_amount=_clean_amount(self.live_autosteer_depth),  # cleaning amount (keeps the voice full-bodied)
-                dereverb=self.live_autosteer_dereverb.isChecked(),      # real-time room-echo suppression
+                dereverb=self.live_autosteer_dereverb.isChecked() or self.live_dereverb.isChecked(),   # room-echo suppression
+                agc_target_db=(-20.0 if self.live_agc.isChecked() else None),   # normalize loudness
                 transient_suppress=self.live_autosteer_transient.isChecked(),   # de-thump table taps / knocks
                 voice_gate=self.live_autosteer_voicegate.isChecked(),           # mute non-speech (gaps & noise)
                 aec=self.live_autosteer_aec.isChecked(),                # cancel far-end loudspeaker echo
@@ -1449,7 +1468,7 @@ class LivePanel(PanelBase):
             cfg["post_nr_floor_db"], cfg["post_nr_oversub"] = floor_db, oversub
             cfg["post_nr_amount"] = _clean_amount(self.live_beameng_nr_depth)   # cleaning amount (full-bodied voice)
             cfg["post_nr_engine"] = self.live_beameng_nr_engine.currentData()   # None disables; else OM-LSA / DFN3 / gate
-        if self.live_beameng_dereverb.isChecked():
+        if self.live_beameng_dereverb.isChecked() or self.live_dereverb.isChecked():
             cfg["dereverb"] = True                    # real-time late-reverb suppression before the cleaner
         if self.live_beameng_transient.isChecked():
             cfg["transient_suppress"] = True          # de-thump impulsive table taps / knocks (before dereverb)
@@ -1457,6 +1476,8 @@ class LivePanel(PanelBase):
             cfg["voice_gate"] = True                  # mute non-speech at the end of the chain
         if self.live_beameng_aec.isChecked():
             cfg["aec"] = True                         # cancel far-end loudspeaker echo (loopback reference)
+        if self.live_agc.isChecked():
+            cfg["agc_target_db"] = -20.0              # normalize output loudness toward −20 dBFS
         return cfg
 
     def _beameng_connect(self):
@@ -1910,7 +1931,8 @@ class LivePanel(PanelBase):
         specs = [cc.RoomKitSpec(device=dev, array_id=aid, radius_m=rad)
                  for (aid, dev, rad) in self._active_arrays()]
         try:
-            ctrl = cc.MultiRoomController(self.state.config, specs, sample_rate=rate, n_beams=3, snap=True)
+            ctrl = cc.MultiRoomController(self.state.config, specs, sample_rate=rate, n_beams=3, snap=True,
+                                          agc_target_db=(-20.0 if self.live_agc.isChecked() else None))
             ctrl.set_gain_db(float(self.live_gain.value()))
             ctrl.set_mute(self.live_mute.isChecked())
             ctrl.start()
