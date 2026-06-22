@@ -115,6 +115,7 @@ class AutoSteerController:
         aec_ref_device: Optional[int] = None,
         preamp_gain_db: float = 0.0,            # mic-INPUT preamp gain (dB); 0 = no-op
         preamp_auto: bool = False,              # auto headroom stager (analog track)
+        agc_target_db: Optional[float] = None,  # target output RMS (dBFS); None = AGC off
         config: Any = None,                     # room config — enables the zone cut (needs array bearing + zones)
         array_id: Optional[str] = None,         # which array's zones to honour
         zone_cut: bool = False,                 # cut the door + anyone outside the pickup area
@@ -166,6 +167,7 @@ class AutoSteerController:
             aec_ref_device=aec_ref_device,
             preamp_gain_db=preamp_gain_db,
             preamp_auto=preamp_auto,
+            agc_target_db=agc_target_db,
         )
         self._thread: Optional[threading.Thread] = None
         self._stop = threading.Event()

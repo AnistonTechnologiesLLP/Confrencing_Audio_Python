@@ -9,12 +9,14 @@ import pytest
 np = pytest.importorskip("numpy")
 
 from conf_pipeline_control.polaris_beamformer import (  # noqa: E402
+    _POST_NR_CEILING_DB,
     _POST_NR_MAKEUP_MAX_GAIN_DB,
     _LevelPreservingCleaner,
     _PostNoiseSuppressor,
 )
 
 _GAIN_CAP = 10.0 ** (_POST_NR_MAKEUP_MAX_GAIN_DB / 20.0)
+_CEILING = 10.0 ** (_POST_NR_CEILING_DB / 20.0)
 
 
 class _Atten:
@@ -81,6 +83,52 @@ def test_reset_clears_state_and_resets_inner():
     _drive(w)
     w.reset()
     assert inner.resets == 1 and w._target == 1.0 and w._slew.value is None
+
+
+class _LatentNonUniform:
+    """Mimics DFN3's two makeup-overshoot triggers: a multi-block analysis LATENCY plus NON-UNIFORM
+    attenuation (near-unity on loud speech blocks, heavy on quiet ones). Against the boost-only makeup
+    this ratchets the gain up (current loud input vs older quiet output) — exactly what drove the
+    clipping in the field."""
+
+    def __init__(self, delay_blocks: int = 4):
+        self._q: list = []
+        self._delay = int(delay_blocks)
+
+    def process(self, block, noise_gate):
+        b = np.asarray(block, dtype=np.float32)
+        g = 0.95 if float(np.sqrt(np.mean(b * b))) > 0.1 else 0.2   # loud→light atten, quiet→heavy
+        self._q.append((b * g).astype(np.float32))
+        return self._q.pop(0) if len(self._q) > self._delay else np.zeros_like(b)
+
+    def reset(self):
+        self._q = []
+
+
+def test_makeup_is_peak_safe_no_clipping():
+    """The makeup must never push the cleaned voice past full scale — the RMS match ignores crest factor,
+    and against a high-latency non-uniform cleaner it overshot to peaks of 1.6-3.7 and hard-clipped. The
+    post-makeup limiter guarantees output stays under the ceiling with zero clipped samples."""
+    w = _LevelPreservingCleaner(_LatentNonUniform())
+    rng = np.random.default_rng(1)
+    out = []
+    for i in range(600):
+        if i % 3 == 0:                                          # loud, high-crest-factor speech block
+            b = (0.3 * rng.standard_normal(512)).astype(np.float32)
+            b[100], b[300] = 0.9, -0.85                         # sharp peaks (crest factor the makeup ignores)
+        else:                                                   # quiet block (drives the non-uniform ratchet)
+            b = (0.02 * rng.standard_normal(512)).astype(np.float32)
+        out.append(w.process(b, False))
+    y = np.concatenate(out)
+    assert float(np.max(np.abs(y))) <= _CEILING + 1e-3          # capped at the ceiling (no overshoot clip)
+    assert float(np.mean(np.abs(y) >= 0.999)) == 0.0            # zero hard-clipped samples
+
+
+def test_makeup_limiter_transparent_below_ceiling():
+    """When nothing would clip, the limiter is a no-op: output equals inner×makeup (gain stays unity)."""
+    w = _LevelPreservingCleaner(_Atten(0.5))
+    _drive(w, level=0.05)                                       # quiet → output peaks well under the ceiling
+    assert abs(w._lim - 1.0) < 1e-9                             # limiter never engaged
 
 
 def test_process_never_throws_into_the_audio_callback():

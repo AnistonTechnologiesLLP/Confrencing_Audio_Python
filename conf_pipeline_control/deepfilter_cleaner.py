@@ -26,38 +26,69 @@ DFN3_SR = 48000          # DeepFilterNet operates at 48 kHz
 DFN3_HOP = 480           # 10 ms @ 48 kHz — the model's frame/hop
 DFN3_STATE_LEN = 45304   # flattened streaming-state tensor length (from the exported model)
 DFN3_LOOKAHEAD = 1440    # model output lag vs input @48k (3 frames; measured by cross-correlation) — dry/wet align
-DEFAULT_ATTEN_LIM_DB = 100.0   # max attenuation the model may apply (100 ≈ unlimited / full cleaning)
+DEFAULT_ATTEN_LIM_DB = 32.0    # cap on the model's max suppression. Matches New_OCTOVOX's offline default:
+                               # UNCAPPED (~100) over-suppresses the noise floor into musical-noise territory
+                               # and treats a quiet/overlapping 2nd speaker as noise → removes them. 32 dB
+                               # denoises hard while staying natural. None/0 = uncapped (most aggressive).
 DEFAULT_DFN3_MIX = 1.0   # cleaning amount: 1.0 = full clean; <1 mixes the (lag-aligned) original back in (less muffled)
 
 _DEFAULT_MODEL = Path(__file__).resolve().parent / "models" / "deepfilternet3_streaming.onnx"
 
 
 class _StreamingResampler:
-    """Overlap-save streaming polyphase resampler (``up``/``down``) with kept history, so block-by-block
-    output concatenates without the per-block FIR transient. Reuses ``scipy.signal.resample_poly`` (the
-    same resampler the OCTOVOX bridge uses), with a history margin to absorb the filter's edge."""
+    """Phase-coherent streaming polyphase resampler (``up``/``down``).
+
+    The naive "``resample_poly(concat(hist, x))[hist_out:]``" overlap-save is WRONG for a rational
+    resampler and was the dominant DFN3-distortion source: re-running the *stateless* ``resample_poly``
+    on a window whose start is not a multiple of ``down`` RESETS the polyphase commutator phase every
+    block; the integer-floor ``hist_out`` trim DRIFTS a fraction of a sample per block (≈+90 samples/s);
+    and slicing to the END of ``y`` emits the FIR's unsettled right edge each block. Together these
+    dragged a 44.1↔48 kHz round-trip to ≈−10 dB THD+N (vs −80 dB for a correct resampler) — gross,
+    speech-band grit on every cleaned block.
+
+    This keeps the same ``resample_poly`` FIR (so the output equals the single-shot *interior*) but emits
+    only the SETTLED interior with exact cumulative integer accounting: it holds back ``_margin`` future
+    samples for right-edge settling, keeps ``_win_start`` an exact multiple of ``down`` so the polyphase
+    phase never resets, and tracks emitted output by a running count so nothing is floored away or
+    duplicated. Drift-free by construction; adds a fixed ~``_margin``-sample lookahead (~10 ms/stage,
+    absorbed by the cleaner's existing prime fill). Measured round-trip THD+N: −67…−80 dB across
+    500–3000 Hz, matching a single-shot resample."""
 
     def __init__(self, up: int, down: int, np: Any):
         from math import gcd
         g = gcd(up, down)
         self.up, self.down = up // g, down // g
         self._np = np
-        self._hist_len = 24 * max(self.up, self.down)        # > the resample_poly Kaiser FIR half-width
-        self._hist = np.zeros(0, dtype=np.float32)
+        self._margin = 4 * max(self.up, self.down) + 1   # future hold-back ≥ resample_poly's settled edge
+        self._win: Any = np.zeros(0, dtype=np.float32)   # sliding input window
+        self._win_start: int = 0   # global index of _win[0]; INVARIANT: always a multiple of self.down
+        self._out_done: int = 0    # cumulative output samples emitted (drift-free accounting)
 
     def process(self, x: Any) -> Any:
         np = self._np
         from scipy.signal import resample_poly
-        x = np.asarray(x, dtype=np.float32)
-        buf = np.concatenate([self._hist, x])
-        y = resample_poly(buf, self.up, self.down).astype(np.float32)
-        n_hist_out = (len(self._hist) * self.up) // self.down  # output samples belonging to the history
-        out = y[n_hist_out:]
-        self._hist = buf[-self._hist_len:].copy() if buf.shape[0] > self._hist_len else buf.copy()
+        x = np.asarray(x, dtype=np.float32).reshape(-1)
+        if x.size == 0:
+            return x
+        self._win = np.concatenate([self._win, x])
+        usable_end = self._win_start + self._win.shape[0] - self._margin
+        if usable_end <= self._win_start:                # not enough settled input yet
+            return np.zeros(0, dtype=np.float32)
+        target = max((usable_end * self.up - 1) // self.down, self._out_done)
+        y = resample_poly(self._win, self.up, self.down).astype(np.float32)
+        base = (self._win_start * self.up) // self.down  # exact: _win_start is a multiple of down
+        out = y[self._out_done - base:target - base].copy()
+        self._out_done = target
+        new_start = ((usable_end - self._margin) // self.down) * self.down   # keep _margin past-context, stay on a down-multiple
+        if new_start > self._win_start:
+            self._win = self._win[new_start - self._win_start:]
+            self._win_start = new_start
         return out
 
     def reset(self) -> None:
-        self._hist = self._np.zeros(0, dtype=self._np.float32)
+        self._win = self._np.zeros(0, dtype=self._np.float32)
+        self._win_start = 0
+        self._out_done = 0
 
 
 class StreamingDeepFilter:

@@ -43,6 +43,12 @@ from .polaris_beamformer import (
     DEFAULT_POST_NR_PRESERVE_LEVEL,
     DEFAULT_POST_NR_WARMUP_FRAMES,
 )
+from .agc import (
+    DEFAULT_AGC_MAX_GAIN_DB,
+    DEFAULT_AGC_SILENCE_DB,
+    DEFAULT_AGC_SLEW_ALPHA,
+    TargetLoudnessAgc,
+)
 from ._stage_metrics import StageActivity, StageMeter, ZERO_ACTIVITY, loudness_matched_raw
 from .steering import Direction
 
@@ -101,6 +107,10 @@ class LiveBeamController(PreampHost, MicController):
         aec_ref_device: Optional[int] = None,
         preamp_gain_db: float = 0.0,            # mic-INPUT preamp gain (dB); 0 = no-op
         preamp_auto: bool = False,              # auto headroom stager (analog track)
+        agc_target_db: Optional[float] = None,  # target output RMS (dBFS); None = AGC off
+        agc_max_gain_db: float = DEFAULT_AGC_MAX_GAIN_DB,
+        agc_slew_alpha: float = DEFAULT_AGC_SLEW_ALPHA,
+        agc_silence_db: float = DEFAULT_AGC_SILENCE_DB,
     ):
         super().__init__(geometry, n_channels=geometry.n_channels)
         self.device = device
@@ -147,6 +157,13 @@ class LiveBeamController(PreampHost, MicController):
         self._aec_n_taps = int(aec_n_taps)
         self._aec_mu = float(aec_mu)
         self._aec_ref_device = aec_ref_device
+        # target-loudness AGC on the mono output (the SAME TargetLoudnessAgc the steered engine + 2-kit use).
+        # OFF unless agc_target_db is set; built here (numpy-free), slew reset per session in _build_post_nr.
+        # Sits below the user's manual gain (applied in the base class), like the steered engine's AGC.
+        self.agc_target_db = agc_target_db
+        self._agc = (TargetLoudnessAgc(target_db=agc_target_db, max_gain_db=agc_max_gain_db,
+                                       slew_alpha=agc_slew_alpha, silence_db=agc_silence_db)
+                     if agc_target_db is not None else None)
         # Lazily bound in _open() (numpy / sounddevice objects) — typed Any so the
         # module stays importable + checkable without the [control] extra.
         self._cov: Any = None      # EMA of band covariance, (n_band, M, M) complex
@@ -317,9 +334,12 @@ class LiveBeamController(PreampHost, MicController):
             self._aec = StreamingAec(self.samplerate, n_taps=self._aec_n_taps, mu=self._aec_mu)
         else:
             self._aec = None
+        if self._agc is not None:
+            self._agc.reset()                         # fresh slew state per session (atomic tracker rebind)
         # Per-stage activity meter: built ONLY when a cleaning stage is engaged, so the all-off
-        # _process_block path adds zero work (byte-identical). No AGC on this path → agc always off.
-        any_stage = (self._aec is not None or self._dereverb is not None or self._post_nr is not None)
+        # _process_block path adds zero work (byte-identical).
+        any_stage = (self._aec is not None or self._dereverb is not None or self._post_nr is not None
+                     or self._agc is not None)
         self._stage_metrics = StageMeter(self.samplerate, block_hint=_HOP) if any_stage else None
         self._stage_activity = ZERO_ACTIVITY
 
@@ -562,6 +582,11 @@ class LiveBeamController(PreampHost, MicController):
                 denoise_out = float(np.sqrt(np.mean(out * out))) if out.size else 0.0
         if self._peq is not None:
             out = self._peq.process(out)              # parametric EQ (tone) on the cleaned mono
+        agc_gain_lin = None
+        if self._agc is not None and not self._bypass_cleaning:
+            freeze = self._transient is not None and bool(self._transient.duck_active)
+            out = self._agc.process(out, freeze=freeze)   # normalize loudness toward the target (AGC-freeze on a tap duck)
+            agc_gain_lin = float(self._agc.tracker.value or 1.0)
         if self._voice_gate is not None and not self._bypass_cleaning:
             out = self._voice_gate.process(out)       # 'voice only' — mute non-speech (last stage)
         if raw_ab is not None:
@@ -571,7 +596,7 @@ class LiveBeamController(PreampHost, MicController):
                 aec_on=self._aec is not None, aec_erle_db=self.aec_erle_db, aec_farend=aec_farend,
                 dereverb_on=self._dereverb is not None, dereverb_in_rms=derev_in, dereverb_out_rms=derev_out,
                 denoise_on=self._post_nr is not None, denoise_in_rms=denoise_in, denoise_out_rms=denoise_out,
-                agc_on=False, agc_gain_lin=None)      # no AGC on the zone/auto-steer path
+                agc_on=self._agc is not None, agc_gain_lin=agc_gain_lin)
         if self._bypass_cleaning:                     # monitor the RAW beam (no AGC here → gain 1.0)
             out = loudness_matched_raw(pre_cleaner, 1.0)
 

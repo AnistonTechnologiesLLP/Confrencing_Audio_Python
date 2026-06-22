@@ -131,9 +131,14 @@ DEFAULT_POST_NR_ENGINE = "gate"      # "gate" | "omlsa" | "wiener"
 # each cleaner's gain back toward unity (gentler cleaning → less muffling) as a user "cleaning amount" dial.
 DEFAULT_POST_NR_PRESERVE_LEVEL = True   # wrap the cleaner so the cleaned voice keeps its loudness (escape hatch: False)
 DEFAULT_POST_NR_AMOUNT = 1.0            # cleaning amount: 1.0 = full clean; <1 blends toward passthrough (Light/Medium)
-_POST_NR_MAKEUP_MAX_GAIN_DB = 15.0     # cap the makeup boost (the drop is ~5-7 dB; never run away on a near-silent cleaner)
+_POST_NR_MAKEUP_MAX_GAIN_DB = 8.0      # cap the makeup boost. The latency-aligned speech-level loss is <1 dB;
+                                       # the old 15 dB was runaway headroom that, against a high-latency cleaner
+                                       # (DFN3 ~49 ms: loud current input vs older quiet output) + the boost-only
+                                       # ratchet, drove a +6 dB overshoot that hard-clipped (peak →1.6-3.7).
 _POST_NR_MAKEUP_LEVEL_ALPHA = 0.05     # slow per-block EMA on the in/out speech levels (~0.3 s) feeding the makeup ratio
 _POST_NR_MAKEUP_SLEW_ALPHA = 0.08      # per-block EMA slew on the applied makeup gain (no pumping; held through pauses)
+_POST_NR_CEILING_DB = -1.0             # output ceiling for the post-makeup peak limiter (≈0.891) — no makeup/crest clip
+_POST_NR_LIMIT_RELEASE_ALPHA = 0.05    # instant-attack / slow-release (~0.3 s) of the brickwall gain (no pumping)
 
 # Real-time dereverberation (StreamingDereverb): a causal port of OCTOVOX's fast spectral late-reverb
 # suppressor (Lebart 2001 / Habets). Runs at the post-beam seam BEFORE the noise reducer. OFF by default.
@@ -963,6 +968,13 @@ class _LevelPreservingCleaner:
         self._lout = ExponentialTracker(float(level_alpha))   # slow EMA of the cleaned-OUTPUT speech RMS
         self._slew = ExponentialTracker(float(slew_alpha))    # slewed applied gain (held through pauses)
         self._target = 1.0
+        # Post-makeup peak limiter (instant attack / slow release): RMS-matching makeup ignores crest factor
+        # and the cleaner's latency, so it can push peaks past full scale → hard clip. This guarantees the
+        # cleaned voice never exceeds the ceiling. Set in __init__ (NOT lazily) so __getattr__ delegation to
+        # the inner cleaner never intercepts these names.
+        self._ceiling = 10.0 ** (_POST_NR_CEILING_DB / 20.0)
+        self._lim_release = float(_POST_NR_LIMIT_RELEASE_ALPHA)
+        self._lim = 1.0                                       # running brickwall gain (1.0 = no limiting)
         self.error: Optional[str] = None
 
     def process(self, block: Any, noise_gate: bool) -> Any:
@@ -984,7 +996,17 @@ class _LevelPreservingCleaner:
                 if lout > 1e-9:                              # boost-only: a cleaner only ever attenuates
                     self._target = min(self._gain_max, max(1.0, lin / lout))
             g = float(self._slew.update(self._target))       # slew toward the held target every block
-            return (c * g).astype(np.float32)
+            y = c * g
+            # Peak limiter: never let the makeup (or the cleaner's own crest factor) clip at the converter.
+            # Instant attack (snap the gain down on the offending block) + slow release back toward unity so
+            # there is no pumping; operates on the same block it scales, so it adds zero latency.
+            pk = float(np.max(np.abs(y))) if y.size else 0.0
+            need = self._ceiling / pk if pk > self._ceiling else 1.0
+            if need < self._lim:
+                self._lim = need                             # instant attack
+            else:
+                self._lim += self._lim_release * (min(1.0, need) - self._lim)   # slow release toward unity
+            return (y * self._lim).astype(np.float32)
         except Exception as exc:                             # never throw into the audio callback
             self.error = f"level-preserve error: {exc}"
             return cleaned
@@ -995,6 +1017,7 @@ class _LevelPreservingCleaner:
         self._lout.reset()
         self._slew.reset()
         self._target = 1.0
+        self._lim = 1.0          # drop any held duck-down so a reconnect starts clean
 
     def __getattr__(self, name: str) -> Any:
         # Delegate unknown attributes to the wrapped cleaner so duck-typed callers see through the

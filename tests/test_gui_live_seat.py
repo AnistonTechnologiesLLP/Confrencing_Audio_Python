@@ -379,6 +379,22 @@ def test_transient_suppress_flows_to_steered_cfg(win):
     panel.live_beameng_transient.setChecked(False)
 
 
+def test_global_agc_and_dereverb_flow_to_steered_cfg(win):
+    """The Hardware-card global 'Normalize loudness (AGC)' (on by default) + 'Reduce room echo (dereverb)'
+    toggles flow into the A/B steered cfg — the fix for AGC-not-working + room-echo in the single-array modes."""
+    panel = win.panels["live"]
+    base = {"radius_m": 0.04}
+    assert panel.live_agc.isChecked()                         # AGC ON by default
+    assert not panel.live_dereverb.isChecked()                # dereverb off by default
+    assert panel._beameng_steered_cfg(base).get("agc_target_db") == -20.0
+    panel.live_agc.setChecked(False)
+    assert "agc_target_db" not in panel._beameng_steered_cfg(base)
+    panel.live_agc.setChecked(True)
+    panel.live_dereverb.setChecked(True)
+    assert panel._beameng_steered_cfg(base).get("dereverb") is True
+    panel.live_dereverb.setChecked(False)
+
+
 def test_voice_gate_flows_to_steered_cfg(win):
     """The A/B-card 'Mute non-speech' checkbox adds voice_gate to the steered back-end cfg."""
     panel = win.panels["live"]
