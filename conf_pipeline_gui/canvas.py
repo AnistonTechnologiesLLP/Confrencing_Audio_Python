@@ -1049,6 +1049,24 @@ class Canvas(QWidget):
             p.drawLine(c, tip)
             self._arrowhead(p, c, tip, scol)
             self._label(p, tip.x() + 5, tip.y() - 6, f"⊚ {float(steer):.0f}° lock", OVERLAY["steer"])
+        # Feature D — active nulls: the directions the beam is CUTTING (the door / out-of-pickup talkers,
+        # or detected interferers). Dashed spoke + a barred-circle "no pickup here" marker in the exclusion
+        # colour — visually distinct from the green/red DOA rays and the solid cyan steer arrow. Array-
+        # relative, lifted into room coordinates by `bearing`, at a shorter radius than the steer arrow so
+        # a coincident look + null don't overlap.
+        ncol = _qc(OVERLAY["zone_exclusion"], 225)
+        for az in ov.get("nulls") or []:
+            dx, dy = self._bearing_dir(float(az) + bearing)
+            ntip = self.w2s(Point2D(pos.x + dx * 2.7, pos.y + dy * 2.7), v)
+            pen = QPen(ncol, 1.8)
+            pen.setDashPattern([3, 3])
+            p.setPen(pen)
+            p.drawLine(c, ntip)
+            p.setBrush(Qt.NoBrush)
+            p.setPen(QPen(ncol, 1.8))
+            p.drawEllipse(ntip, 5, 5)                                     # barred circle = "no pickup"
+            p.drawLine(QPointF(ntip.x() - 3.4, ntip.y() + 3.4), QPointF(ntip.x() + 3.4, ntip.y() - 3.4))
+            self._label(p, ntip.x() + 7, ntip.y() + 4, f"⦸ {float(az):.0f}° null", OVERLAY["zone_exclusion"])
         # room-aware: ring + label the seat the dominant talker maps to, at the seat's true world
         # position. With the rays now in room coordinates too, ray and ring point the same way.
         seat = ov.get("seat")

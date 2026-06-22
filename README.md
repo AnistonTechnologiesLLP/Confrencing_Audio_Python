@@ -17,6 +17,72 @@ JSON schema** (camelCase keys; currently `version` 5 — older v1–v4 files loa
 and migrate losslessly), at matching v5 parity with the TS sibling. The PySide6
 desktop app is presented as **Aniston Room Designer**.
 
+## Capabilities at a glance — the live array (IntelliMix-class voice processing)
+
+The optional `[control]` extra and the desktop app's **LIVE** mode turn a sensiBel POLARIS
+8-capsule USB array into a host-side voice-processing front end — the same *family* of capabilities a
+ceiling-array DSP (e.g. Shure IntelliMix on an MXA920) gives a room: automatic mixing, acoustic echo
+cancellation, noise reduction, automatic gain, and a virtual acoustic boundary — but on one 8-mic ring,
+with an **inspectable, measured** chain you can A/B in the customer's own room. Everything below is
+shipped; the parenthetical is the LIVE-panel control.
+
+| Capability (in the customer's terms) | What it does | LIVE control | Honest limit |
+|---|---|---|---|
+| **Automatic speaker selection** (the automixer) | picks the active talker and equal-power cross-fades to them across zones / two kits, so only the person speaking is open | Listening mode → *Follow the room* / *Two kits (combined room)* | switched selection, **not** 8 simultaneous lobes — one beam per array |
+| **Echo cancellation (AEC)** | cancels the far-end loudspeaker echo (the Zoom/Teams downlink) from the beam, with a live ERLE read-out | *Echo cancel* | one post-beam AEC (per-kit *before* the selector on two kits — the faithful translation of IntelliMix's "per-channel" AEC) |
+| **Noise reduction / voice cleaning** | removes steady fans/AC + broadband hiss; gate / **OM-LSA (AI)** / **DeepFilterNet3** engines, Gentle→Aggressive depth, level-preserving | *Cleaner* + *Suppress steady noise (fans/AC)* | the **A/B proof tool measures it in the room** (≈20 dB on steady noise in our testing — run it for the real number) |
+| **Automatic gain / loudness** | normalizes the talker toward a target loudness (slewed, silence-held, clamped ±18 dB) | *Normalize output loudness (AGC)* | driven by output loudness, not per-talker distance |
+| **Virtual Acoustic Boundary** (cut the door / outside) | nulls *directional* sound from outside the drawn pickup area + exclusion zones; the active nulls are drawn on the room map | *Cut the door & anyone outside the pickup area* | cuts directional outsiders; a same-bearing or in-place stander isn't separable (physics) |
+| **Auto-follow** (Automatic Coverage) | SRP-PHAT detects the live talker and re-steers the beam to them each tick | Listening mode → *Follow the room (auto-steer)* | follows/selects the active talker (one beam), not 8 auto-placed lobes |
+| **Live talker → seat read-out** | maps the live direction to the nearest room seat on the map | shown automatically in *Follow* / *Lock to a seat* | azimuth + seat, **not** XYZ camera-tracking coordinates |
+
+Worked detail: [Live array-microphone control](#live-array-microphone-control-1110) ·
+[Auto-steer](#auto-steer--follow-talkers-by-direction-1130) ·
+[Real-time array beamforming](#real-time-array-beamforming-1170).
+
+**IntelliMix ↔ this pipeline** — the "they have IntelliMix; what do *you* have?" answer. The trap is
+to copy their **per-lobe** architecture; the faithful translation onto one 8-mic ring is **per-kit /
+per-zone**:
+
+| IntelliMix / MXA920 | Here | Status |
+|---|---|---|
+| Automatic mixing (8-lobe automix) | active-speaker selection + equal-power cross-fade (per zone / per kit) | ✓ — switched, not 8 lobes |
+| Acoustic echo cancellation | `StreamingAec` (post-beam; per-kit *before* the selector on two kits) | ✓ |
+| Noise reduction / Enhanced Noise Filtering | gate + min-statistics + **OM-LSA** + **DeepFilterNet3** | ✓ — and **measured / A/B-provable** |
+| Automatic gain control | `TargetLoudnessAgc` | ✓ |
+| Virtual Acoustic Boundary | exclusion-zone / out-of-pickup nulling (LCMV) + live map markers | ✓ |
+| Automatic Coverage (auto-detect, no aiming) | auto-steer (SRP-PHAT → re-steer) | ✓ — one beam, not 8 |
+| Steerable Coverage (manual lobes) | design pickup zones | ✓ — zones |
+| Talker localization (XYZ for camera tracking) | azimuth + nearest room seat | partial — **no XYZ** (triangulation = roadmap) |
+| Autofocus (re-aim as people move) | continuous DOA re-steer | ✓ |
+
+### Why ours is different: the chain is inspectable, not a black box
+
+A ceiling-array DSP is a sealed box — you take its NR/AEC numbers on faith. Ours **proves** them, live, in
+the room — this is the differentiator, not the parity:
+
+- **A/B proof tool** — records ~8 s of the beam *both ways at once* (raw vs cleaned), reports how much
+  quieter the background got (dB) plus the AEC ERLE, and exports both clips. A number you can hand a
+  customer, not a claim. (*Capture A/B proof* in LIVE.)
+- **Per-stage activity meters** — Echo / Dereverb / Denoise / Auto gain each show what *they* did this
+  moment, and stay honest: a stage that's on with nothing to do reads near-zero (not faked busy), Echo
+  shows *idle* with no far-end, and Auto gain is bipolar (boost vs cut).
+- **Master RAW bypass** — one click A/Bs the *whole* chain live at **matched loudness**, so the difference
+  you hear is the cleaning, not a level jump. (*Monitor RAW (bypass cleaning)*.)
+
+### What it can't do (and why) — scope, not apology
+
+These are consequences of 8 mics on a ~40 mm ring, not software TODOs. The product wins on cost, the
+inspectable/measured chain above, and the Design→Deploy→LIVE workflow — stated in the same breath:
+
+- **No simultaneous multi-zone capture.** It follows/selects the active speaker (switched); a ceiling
+  array runs many lobes at once. Two kits = coverage *by switching*, not two simultaneous streams.
+- **No XYZ talker coordinates.** It reports azimuth + the nearest seat, not a 3-D position — not a
+  drop-in camera-tracking XYZ source. (Triangulating two kits is the roadmap to part of this.)
+- **No in-place-stander cut, no close-talker split.** Standing in place changes elevation, which a planar
+  ring can't see; two people ~0.6–1 m apart fall inside one beam (~1.8–2.6 m wide at 2 m). Azimuth only;
+  ~5.6 kHz spatial-aliasing ceiling; talkers within ~40–50° merge into one detection.
+
 ## Layout
 
 ```

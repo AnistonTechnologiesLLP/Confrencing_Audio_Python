@@ -13,6 +13,7 @@ np = pytest.importorskip("numpy")
 
 import conf_pipeline_control as cc
 from conf_pipeline_control import doa
+from conf_pipeline_control._stage_metrics import ZERO_ACTIVITY
 from conf_pipeline_control.audio import InputDevice
 import conf_pipeline_control.beam_engine as be
 from conf_pipeline_control.beam_engine import BeamEngine, Location
@@ -24,6 +25,16 @@ from conf_pipeline_control.polaris_beamformer import (
 from conf_pipeline_control.virtual_mic_grid import VirtualMicGrid
 
 C = 343.0
+
+
+def test_beam_engine_forwards_stage_activity_and_bypass():
+    eng = BeamEngine(device=None, mode="steered", steered_cfg={"post_nr": True})
+    assert eng.stage_activity is ZERO_ACTIVITY            # delegates to the steered back-end (pre-block)
+    # Bypass rides the steered cleaner chain only (the grid back-end has no cleaner — like set_peq_bands).
+    eng.set_bypass(True)
+    assert eng._steered._bypass_cleaning is True
+    eng.set_bypass(False)
+    assert eng._steered._bypass_cleaning is False
 
 
 def _unit(az_deg, off_nadir_deg=90.0):

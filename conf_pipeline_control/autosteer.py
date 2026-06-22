@@ -174,6 +174,7 @@ class AutoSteerController:
         self._last_looks: list = []           # held look azimuths
         self._last_sig: Optional[tuple[tuple, tuple]] = None  # quantized (looks, nulls) signature
         self._hold = 0
+        self._active_nulls: list = []         # null bearings actually applied this tick (telemetry → map markers)
         self.error = ""
 
     def set_peq_bands(self, bands: Optional[Sequence[dict]] = None) -> None:
@@ -211,9 +212,28 @@ class AutoSteerController:
         return self.ctrl.read_level()
 
     @property
+    def active_nulls(self) -> list:
+        """The null bearings (array-relative deg) the auto-steer zone-cut is **actually** applying this
+        tick — the door + anyone outside the pickup area. Empty when not zone-cutting or while merely
+        holding. Drives the live room-map null markers (Feature D)."""
+        with self._lock:
+            return list(self._active_nulls)
+
+    @property
     def aec_erle_db(self) -> float:
         """Live AEC echo-return-loss-enhancement (dB); 0 when AEC is off or no echo seen."""
         return self.ctrl.aec_erle_db
+
+    @property
+    def stage_activity(self) -> Any:
+        """Lock-free snapshot of what each cleaning stage did on the last block (for the live per-stage
+        meter strip), forwarded from the wrapped controller."""
+        return self.ctrl.stage_activity
+
+    def set_bypass(self, on: bool) -> None:
+        """Monitor the RAW (pre-cleaning) beam — a one-click A/B of the whole cleaning chain. Forwarded
+        to the wrapped controller; the chain still runs (meters keep updating)."""
+        self.ctrl.set_bypass(on)
 
     def start_ab_capture(self, seconds: float = 8.0):
         """Arm an A/B proof capture on the wrapped controller (raw beam vs cleaned)."""
@@ -309,3 +329,5 @@ class AutoSteerController:
                 self.ctrl.set_mute(False)
         elif self.gate_when_empty:
             self.ctrl.set_mute(True)           # nobody in the area → silence
+        with self._lock:                       # telemetry: the nulls actually applied (door + out-of-zone)
+            self._active_nulls = list(out_az) if looks else []

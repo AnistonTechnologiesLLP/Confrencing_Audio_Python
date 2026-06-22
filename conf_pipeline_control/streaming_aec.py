@@ -85,6 +85,7 @@ class StreamingAec:
         self._err_pow = 0.0
         self._n_obs = 0
         self._erle_db = 0.0                              # cached dB, recomputed under the lock in process()
+        self._farend_active = False                      # did the last block carry far-end signal (echo to cancel)?
 
     def reset(self) -> None:
         with self._lock:
@@ -95,6 +96,13 @@ class StreamingAec:
         """Echo-return-loss (dB), EMA over far-end-active frames; a single atomic read of the value cached
         by :meth:`process` under the lock (no cross-thread tear). 0 until any echo is seen."""
         return self._erle_db
+
+    @property
+    def farend_active(self) -> bool:
+        """Whether the last processed block carried far-end signal (i.e. there was echo to cancel).
+        Lets a meter distinguish 'AEC idle, no far-end' from 'AEC working' so ERLE isn't read as a
+        misleading 0 dB. A single atomic bool read of the value cached under the lock in :meth:`process`."""
+        return self._farend_active
 
     def process(self, mic_block: Any, ref_block: Any, near_end_active: bool = False) -> Any:
         """Cancel far-end echo from ``mic_block`` using ``ref_block`` (same length, time-aligned).
@@ -118,6 +126,7 @@ class StreamingAec:
             F, H = self._F, self._H
             self._inq_m = np.concatenate([self._inq_m, x])
             self._inq_r = np.concatenate([self._inq_r, r])
+            farend_seen = False
             while self._inq_m.shape[0] >= H:
                 hop_m, self._inq_m = self._inq_m[:H], self._inq_m[H:]
                 hop_r, self._inq_r = self._inq_r[:H], self._inq_r[H:]
@@ -133,6 +142,7 @@ class StreamingAec:
                 e = Mt - yhat
                 rpow = float(np.mean(Rt.real * Rt.real + Rt.imag * Rt.imag))
                 echo_present = rpow > self._ref_floor
+                farend_seen = farend_seen or echo_present
                 if echo_present and not near_end_active:               # adapt on FAR-END-ONLY frames
                     denom = np.sum(np.abs(self._rfifo) ** 2, axis=0) + 1e-12       # tap-window power (nb,)
                     step = self._mu * e / denom                                    # (nb,)
@@ -151,6 +161,7 @@ class StreamingAec:
                 self._ola[-H:] = 0.0
                 self._ola += y                                         # overlap-add (Hann COLA)
                 self._outq = np.concatenate([self._outq, self._ola[:H].copy()])
+            self._farend_active = farend_seen                          # per-block far-end presence (telemetry)
             if self._outq.shape[0] >= n:
                 out = self._outq[:n]
                 self._outq = self._outq[n:]

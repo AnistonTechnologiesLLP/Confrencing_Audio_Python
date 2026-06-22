@@ -43,6 +43,7 @@ from .polaris_beamformer import (
     DEFAULT_POST_NR_PRESERVE_LEVEL,
     DEFAULT_POST_NR_WARMUP_FRAMES,
 )
+from ._stage_metrics import StageActivity, StageMeter, ZERO_ACTIVITY, loudness_matched_raw
 from .steering import Direction
 
 _FRAME = 1024          # FFT length
@@ -173,6 +174,12 @@ class LiveBeamController(PreampHost, MicController):
         self._aec: Any = None      # live echo canceller (StreamingAec), runs before dereverb, or None
         self._ref_capture: Any = None  # far-end reference source (ReferenceCapture) for the AEC, or None
         self._ab_capture: Any = None   # armed A/B proof capture (raw-vs-cleaned), or None
+        # Per-stage activity meter + raw/processed bypass — the SAME shared helper the steered engine
+        # uses (no AGC / band-limit on this path). _stage_metrics is built in _build_post_nr only when
+        # a cleaner is on (all-off path stays byte-identical). _bypass_cleaning is a GIL-atomic monitor flag.
+        self._stage_metrics: Optional[StageMeter] = None
+        self._stage_activity: StageActivity = ZERO_ACTIVITY
+        self._bypass_cleaning = False
 
     # ---- weight computation (per FFT bin, broadband) ----
     def _compute_weights(self):
@@ -310,6 +317,11 @@ class LiveBeamController(PreampHost, MicController):
             self._aec = StreamingAec(self.samplerate, n_taps=self._aec_n_taps, mu=self._aec_mu)
         else:
             self._aec = None
+        # Per-stage activity meter: built ONLY when a cleaning stage is engaged, so the all-off
+        # _process_block path adds zero work (byte-identical). No AGC on this path → agc always off.
+        any_stage = (self._aec is not None or self._dereverb is not None or self._post_nr is not None)
+        self._stage_metrics = StageMeter(self.samplerate, block_hint=_HOP) if any_stage else None
+        self._stage_activity = ZERO_ACTIVITY
 
     def set_peq_bands(self, bands: Optional[Sequence[dict]] = None) -> None:
         """Set/replace the parametric-EQ bands live (``[{freqHz,gainDb,q,type}]``); ``None``/``[]`` disables.
@@ -338,6 +350,19 @@ class LiveBeamController(PreampHost, MicController):
     def aec_erle_db(self) -> float:
         """Live AEC echo-return-loss-enhancement (dB); 0 when AEC is off or no echo seen."""
         return float(self._aec.erle_db) if self._aec is not None else 0.0
+
+    @property
+    def stage_activity(self) -> StageActivity:
+        """Lock-free snapshot of what each cleaning stage did on the last block (drives the live
+        per-stage meter strip). :data:`ZERO_ACTIVITY` when no cleaning stage is engaged. (No AGC on
+        the zone/auto-steer path, so ``agc_on`` is always False here.)"""
+        return self._stage_activity
+
+    def set_bypass(self, on: bool) -> None:
+        """Monitor the RAW (pre-cleaning) beam instead of the processed output — a one-click A/B of the
+        whole cleaning chain. The chain still runs (the meters keep updating); only the emitted buffer
+        changes. GIL-atomic; safe to toggle from the control thread."""
+        self._bypass_cleaning = bool(on)
 
     # ---- A/B proof capture + latency read-out ----
     def start_ab_capture(self, seconds: float = 8.0) -> Any:
@@ -505,26 +530,50 @@ class LiveBeamController(PreampHost, MicController):
 
         cap = self._ab_capture                        # A/B proof: snapshot the RAW beam before any cleaner
         raw_ab = out if (cap is not None and not cap.done) else None
+        pre_cleaner = out                             # raw (pre-cleaning) beam — kept for the bypass monitor
+        sm = self._stage_metrics                      # local: per-stage metric work narrows + stays zero-cost
+        metering = sm is not None                      # True only when ≥1 cleaning stage is on
 
         # post-beam enhancement on the mono, before the meter and gain — so the meter, recording and monitor
         # all reflect the cleaned voice. Order: AEC → dereverb → denoise. noise_gate=False: no VAD on this
         # path, so the AEC relies on its own far-end-activity gate and the min-statistics NR floor.
+        aec_farend = False
         if self._aec is not None:
             rc = self._ref_capture                    # read once: teardown may null it on the control thread
             ref = rc.recent(out.shape[0]) if rc is not None else None
             out = self._aec.process(out, ref, near_end_active=False)
+            if metering:
+                aec_farend = bool(self._aec.farend_active)
         if self._transient is not None:
             out = self._transient.process(out)        # de-thump table taps before dereverb/NR
+        derev_in = derev_out = 0.0
         if self._dereverb is not None:
+            if metering:
+                derev_in = float(np.sqrt(np.mean(out * out))) if out.size else 0.0
             out = self._dereverb.process(out, False)
+            if metering:
+                derev_out = float(np.sqrt(np.mean(out * out))) if out.size else 0.0
+        denoise_in = denoise_out = 0.0
         if self._post_nr is not None:
+            if metering:
+                denoise_in = float(np.sqrt(np.mean(out * out))) if out.size else 0.0
             out = self._post_nr.process(out, False)
+            if metering:
+                denoise_out = float(np.sqrt(np.mean(out * out))) if out.size else 0.0
         if self._peq is not None:
             out = self._peq.process(out)              # parametric EQ (tone) on the cleaned mono
-        if self._voice_gate is not None:
+        if self._voice_gate is not None and not self._bypass_cleaning:
             out = self._voice_gate.process(out)       # 'voice only' — mute non-speech (last stage)
         if raw_ab is not None:
             cap.feed(raw_ab, out)                     # A/B proof: raw beam vs the cleaned (pre-gain) mono
+        if sm is not None:                            # publish the per-stage snapshot (atomic rebind, no lock)
+            self._stage_activity = sm.update(
+                aec_on=self._aec is not None, aec_erle_db=self.aec_erle_db, aec_farend=aec_farend,
+                dereverb_on=self._dereverb is not None, dereverb_in_rms=derev_in, dereverb_out_rms=derev_out,
+                denoise_on=self._post_nr is not None, denoise_in_rms=denoise_in, denoise_out_rms=denoise_out,
+                agc_on=False, agc_gain_lin=None)      # no AGC on the zone/auto-steer path
+        if self._bypass_cleaning:                     # monitor the RAW beam (no AGC here → gain 1.0)
+            out = loudness_matched_raw(pre_cleaner, 1.0)
 
         # metered level is PRE-gain (the base class re-applies gain + mute in
         # read_level, consistently with every backend).

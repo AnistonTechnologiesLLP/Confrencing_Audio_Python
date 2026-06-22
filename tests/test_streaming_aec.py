@@ -45,6 +45,25 @@ def test_aec_passthrough_without_reference():
     assert aec.erle_db == 0.0
 
 
+def test_aec_farend_active_flag_tracks_reference_presence():
+    """The meter needs to tell 'AEC idle, no echo' from 'AEC working' — farend_active reports
+    whether the last block actually carried far-end signal (the gate ERLE is computed on)."""
+    rng = np.random.default_rng(3)
+    mic = (0.1 * rng.standard_normal(8192)).astype(float)
+
+    silent = StreamingAec(44100.0, frame=512)
+    _run_blocks(silent, mic, np.zeros_like(mic))            # reference present but silent
+    assert silent.farend_active is False
+
+    active = StreamingAec(44100.0, frame=512)
+    ref = (0.3 * rng.standard_normal(8192)).astype(float)   # real far-end signal
+    _run_blocks(active, mic, ref)
+    assert active.farend_active is True
+
+    fresh = StreamingAec(44100.0, frame=512)
+    assert fresh.farend_active is False                     # nothing processed yet
+
+
 def test_aec_converges_and_cancels_synthetic_echo():
     rng = np.random.default_rng(1)
     ref = (0.3 * rng.standard_normal(88200)).astype(float)      # ~2 s of far-end (white)

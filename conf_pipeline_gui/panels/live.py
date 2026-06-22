@@ -49,11 +49,13 @@ from .common import (
     NoWheelDoubleSpinBox,
     NoWheelSpinBox,
     PanelBase,
+    StageStrip,
     set_danger,
     _ABWorker,
     _CalibWorker,
     _ProbeWorker,
 )
+from conf_pipeline_control._stage_metrics import ZERO_ACTIVITY
 
 
 def _dominant_seat(config, array_id, detections):
@@ -323,11 +325,15 @@ class LivePanel(PanelBase):
         self.live_limits_info.setProperty("hintChip", "true")
         self.live_limits_info.setCursor(Qt.WhatsThisCursor)
         self.live_limits_info.setToolTip(
-            "<b>POLARIS array — physical limits</b><br>"
+            "<b>POLARIS array — physical limits</b> (scope, not bugs)<br>"
             "• <b>Azimuth only</b> — a planar 8-mic ring; it steers left/right but cannot resolve elevation.<br>"
             "• <b>~5.6 kHz</b> spatial-aliasing ceiling (≈40 mm aperture); the beam grates above it.<br>"
             "• <b>Two talkers within ~40–50°</b> merge into one lobe — they can't be separated.<br>"
-            "• <b>Front/back ambiguous</b> — one planar ring, so mirrored directions look alike to the DOA."
+            "• <b>Front/back ambiguous</b> — one planar ring, so mirrored directions look alike to the DOA.<br>"
+            "• <b>One active speaker at a time</b> — it selects/follows the talker (switched); it does not "
+            "open multiple zones simultaneously like an 8-lobe ceiling array.<br>"
+            "• <b>Azimuth + seat, not XYZ</b> — it reports a direction and the nearest room seat, not 3-D "
+            "coordinates; it isn't a drop-in camera-tracking XYZ source."
         )
         bf.addRow("Limits", self.live_limits_info)
         beam.body_lay.addLayout(bf)
@@ -791,6 +797,23 @@ class LivePanel(PanelBase):
         self.live_abproof_btn.clicked.connect(self._capture_ab_proof)
         v.addWidget(self.live_abproof_btn)
 
+        # Transparency surfacing — the differentiator a black-box "AI mic" can't show: each cleaning
+        # stage visibly acting (honest idle when there's nothing to do), plus a one-click RAW↔processed
+        # A/B of the whole chain at matched loudness.
+        v.addWidget(QLabel("Cleaning stages (live)"))
+        self.live_stage_strip = StageStrip()
+        v.addWidget(self.live_stage_strip)
+        self.live_bypass_btn = QPushButton("Monitor RAW (bypass cleaning)")
+        self.live_bypass_btn.setCheckable(True)
+        self.live_bypass_btn.setToolTip(
+            "A/B the whole cleaning chain live: play the RAW beam at matched loudness vs the fully "
+            "processed output. The difference you hear is the cleaning, not a level change. Needs a live "
+            "beam (A/B engine, auto-steer, or zone)."
+        )
+        self.live_bypass_btn.setEnabled(False)
+        self.live_bypass_btn.clicked.connect(self._live_toggle_bypass)
+        v.addWidget(self.live_bypass_btn)
+
         self.live_status = QLabel("Disconnected.")
         self.live_status.setWordWrap(True)
         v.addWidget(self.live_status)
@@ -839,6 +862,28 @@ class LivePanel(PanelBase):
         if self._autosteer is not None:
             return self._autosteer.ctrl
         return self._live_ctl
+
+    def _live_toggle_bypass(self, checked: bool) -> None:
+        """Toggle the master RAW↔processed monitor on the active session (A/B engine / auto-steer / zone)."""
+        ctl = self._active_ctl()
+        if ctl is not None and hasattr(ctl, "set_bypass"):
+            ctl.set_bypass(bool(checked))
+        set_danger(self.live_bypass_btn, bool(checked))   # destructive-looking while you're hearing the raw beam
+        self.live_bypass_btn.setText("Monitoring RAW (cleaning off)" if checked
+                                     else "Monitor RAW (bypass cleaning)")
+
+    def _tick_stage_meters(self) -> None:
+        """Refresh the per-stage activity strip from the active session's snapshot (greyed when the
+        session has no cleaner chain — e.g. two-kit/multibeam) and gate the RAW-bypass button."""
+        ctl = self._active_ctl()
+        act = getattr(ctl, "stage_activity", None) if ctl is not None else None
+        self.live_stage_strip.set_activity(act if act is not None else ZERO_ACTIVITY)
+        can_bypass = ctl is not None and hasattr(ctl, "set_bypass")
+        self.live_bypass_btn.setEnabled(can_bypass)
+        if not can_bypass and self.live_bypass_btn.isChecked():
+            self.live_bypass_btn.setChecked(False)        # session ended/changed → drop the stale RAW state
+            set_danger(self.live_bypass_btn, False)
+            self.live_bypass_btn.setText("Monitor RAW (bypass cleaning)")
 
     def _on_listening_mode_changed(self) -> None:
         """Drive the live mode + sensible defaults from the single high-level selector, and collapse the
@@ -2118,6 +2163,16 @@ class LivePanel(PanelBase):
                     "level": s.level,
                     "active": s.index == active_k,
                 })
+        # Feature D — the null bearings actually applied this tick (door + out-of-pickup talkers, or
+        # detected interferers). Array-relative; the canvas lifts them by `bearing`. Drawn as barred-
+        # circle markers so an operator can SEE what's being cut. Empty for modes that don't null.
+        nulls = []
+        null_src = self._autosteer or self._beam_engine
+        if null_src is not None:
+            try:
+                nulls = [float(a) for a in null_src.active_nulls]
+            except Exception:
+                nulls = []
         self.state.set_live_overlay({
             # pinned at connect — the combo may show another room's arrays
             "array_id": self._session_array_id,
@@ -2127,6 +2182,7 @@ class LivePanel(PanelBase):
             "bearing": bearing,
             "level": self.live_meter.level(),
             "steer_az": steer_az,
+            "nulls": nulls,
             "kits": kits,
             "connected": True,
         })
@@ -2395,6 +2451,7 @@ class LivePanel(PanelBase):
         a sliver on a linear scale."""
         self._poll_ab_proof()                # finalize + export an A/B proof once its capture completes
         self.live_abproof_btn.setEnabled(self._ab_cap is None and self._ab_target() is not None)
+        self._tick_stage_meters()            # per-stage activity strip + RAW-bypass button gating
         self._refresh_guide()                # keep the first-run checklist in step with live state (cheap; no-op when hidden)
         self._live_seat = None               # only the DOA paths below re-resolve a seat
         if self._twokit is not None:

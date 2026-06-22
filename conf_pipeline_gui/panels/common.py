@@ -8,7 +8,7 @@ are coalesced onto the next event-loop tick.
 from __future__ import annotations
 
 from PySide6.QtCore import QObject, QPointF, QRectF, QRunnable, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QPainter, QPen
+from PySide6.QtGui import QColor, QFont, QPainter, QPen
 from PySide6.QtWidgets import (
     QDoubleSpinBox,
     QFrame,
@@ -134,6 +134,98 @@ class LevelMeter(QWidget):
             p.setPen(Qt.NoPen)
             p.setBrush(QColor(pal["err"]))
             p.drawRoundedRect(QRectF(r.right() - 7, r.y(), 7, r.height()), 2, 2)
+        p.end()
+
+
+class StageStrip(QWidget):
+    """A compact live read-out of what each cleaning stage is doing *right now* — Echo (AEC), Dereverb,
+    Denoise, Auto gain — as four small labelled bars. This is the per-stage half of the transparency
+    story: an integrator can SEE each stage acting, the thing a black-box "AI mic" can't show.
+
+    Honest by construction: a stage that is ON but has nothing to do shows a lit-but-near-empty bar,
+    NOT greyed — greyed means the stage is OFF. Echo shows 'idle' when there's no far-end signal to
+    cancel (so its ERLE isn't read as a misleading 0 dB). Auto gain is bipolar (boost up / cut down),
+    because it's a normalizer, not a suppressor. Fed a :class:`StageActivity` each tick via
+    :meth:`set_activity`; pure painting otherwise."""
+
+    _CELLS = (("aec", "Echo"), ("dereverb", "Dereverb"), ("denoise", "Denoise"), ("agc", "Auto gain"))
+    _SCALE_DB = 24.0      # a full bar = this many dB of ERLE / attenuation / |gain|
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._cells = {k: {"label": lbl, "on": False, "idle": False, "db": 0.0, "bipolar": False}
+                       for k, lbl in self._CELLS}
+        self.setMinimumHeight(36)
+        self.setMinimumWidth(220)
+        self.setToolTip(
+            "Live cleaning-stage activity. A lit but near-empty bar = the stage is on with little to do "
+            "right now (honest idle); a greyed bar = the stage is off. 'Echo' shows 'idle' when there's "
+            "no far-end to cancel; 'Auto gain' is bipolar (boost up / cut down)."
+        )
+
+    def set_activity(self, a) -> None:
+        """Update the four cells from a :class:`StageActivity` snapshot (pass ZERO_ACTIVITY to grey all)."""
+        c = self._cells
+        c["aec"].update(on=bool(a.aec_on), idle=bool(a.aec_on and not a.aec_farend_active),
+                        db=float(a.aec_erle_db))
+        c["dereverb"].update(on=bool(a.dereverb_on), db=float(a.dereverb_db))
+        c["denoise"].update(on=bool(a.denoise_on), db=float(a.denoise_db))
+        c["agc"].update(on=bool(a.agc_on), db=float(a.agc_gain_db), bipolar=True)
+        self.update()
+
+    def cell(self, key: str) -> dict:
+        """The live state of one cell (``on``/``idle``/``db``/``bipolar``) — for tests + introspection."""
+        return self._cells[key]
+
+    def _value_text(self, cell: dict) -> str:
+        if not cell["on"]:
+            return "off"
+        if cell["idle"]:
+            return "idle"
+        db = cell["db"]
+        if cell["bipolar"]:
+            return f"{db:+.0f} dB"
+        return f"{db:.0f} dB"
+
+    def paintEvent(self, e):  # pragma: no cover - pure painting
+        st = getattr(self.window(), "state", None)
+        pal = _palette(getattr(st, "theme", "dark") if st is not None else "dark")
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing, True)
+        f = QFont(self.font())
+        f.setPointSizeF(max(7.0, f.pointSizeF() - 1.0))
+        p.setFont(f)
+        n = len(self._CELLS)
+        w = self.width() / n
+        cap_h = 13.0
+        for i, (key, _lbl) in enumerate(self._CELLS):
+            cell = self._cells[key]
+            x0 = i * w + 3
+            cw = w - 6
+            on = cell["on"]
+            cap_col = pal["text"] if on else pal["faint"]
+            p.setPen(QPen(QColor(cap_col), 1))
+            p.drawText(QRectF(x0, 0, cw, cap_h), int(Qt.AlignLeft | Qt.AlignVCenter), cell["label"])
+            bar = QRectF(x0, cap_h + 1, cw, self.height() - cap_h - 3)
+            p.setPen(Qt.NoPen)
+            p.setBrush(QColor(pal["surface"]))
+            p.drawRoundedRect(bar, 3, 3)
+            frac = min(1.0, abs(cell["db"]) / self._SCALE_DB)
+            if on and not cell["idle"] and frac > 0.001:
+                p.setBrush(QColor(pal["accent"] if cell["bipolar"] else pal["ok"]))
+                if cell["bipolar"]:                               # centred: boost grows right, cut grows left
+                    mid = bar.x() + bar.width() / 2.0
+                    half = bar.width() / 2.0 * frac
+                    fr = QRectF(mid, bar.y(), half, bar.height()) if cell["db"] >= 0 \
+                        else QRectF(mid - half, bar.y(), half, bar.height())
+                    p.drawRoundedRect(fr, 2, 2)
+                    p.setPen(QPen(QColor(pal["border_strong"]), 1))  # centre tick
+                    p.drawLine(QPointF(mid, bar.y() + 1), QPointF(mid, bar.bottom() - 1))
+                    p.setPen(Qt.NoPen)
+                else:
+                    p.drawRoundedRect(QRectF(bar.x(), bar.y(), bar.width() * frac, bar.height()), 2, 2)
+            p.setPen(QPen(QColor(pal["text_dim"] if on else pal["faint"]), 1))   # value / idle / off text
+            p.drawText(bar, int(Qt.AlignCenter), self._value_text(cell))
         p.end()
 
 
