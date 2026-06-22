@@ -2159,6 +2159,16 @@ class LivePanel(PanelBase):
                     "level": s.level,
                     "active": s.index == active_k,
                 })
+        # Feature D — the null bearings actually applied this tick (door + out-of-pickup talkers, or
+        # detected interferers). Array-relative; the canvas lifts them by `bearing`. Drawn as barred-
+        # circle markers so an operator can SEE what's being cut. Empty for modes that don't null.
+        nulls = []
+        null_src = self._autosteer or self._beam_engine
+        if null_src is not None:
+            try:
+                nulls = [float(a) for a in null_src.active_nulls]
+            except Exception:
+                nulls = []
         self.state.set_live_overlay({
             # pinned at connect — the combo may show another room's arrays
             "array_id": self._session_array_id,
@@ -2168,6 +2178,7 @@ class LivePanel(PanelBase):
             "bearing": bearing,
             "level": self.live_meter.level(),
             "steer_az": steer_az,
+            "nulls": nulls,
             "kits": kits,
             "connected": True,
         })
