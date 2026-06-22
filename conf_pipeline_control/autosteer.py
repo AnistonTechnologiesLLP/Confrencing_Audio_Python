@@ -215,6 +215,17 @@ class AutoSteerController:
         """Live AEC echo-return-loss-enhancement (dB); 0 when AEC is off or no echo seen."""
         return self.ctrl.aec_erle_db
 
+    @property
+    def stage_activity(self) -> Any:
+        """Lock-free snapshot of what each cleaning stage did on the last block (for the live per-stage
+        meter strip), forwarded from the wrapped controller."""
+        return self.ctrl.stage_activity
+
+    def set_bypass(self, on: bool) -> None:
+        """Monitor the RAW (pre-cleaning) beam — a one-click A/B of the whole cleaning chain. Forwarded
+        to the wrapped controller; the chain still runs (meters keep updating)."""
+        self.ctrl.set_bypass(on)
+
     def start_ab_capture(self, seconds: float = 8.0):
         """Arm an A/B proof capture on the wrapped controller (raw beam vs cleaned)."""
         return self.ctrl.start_ab_capture(seconds)
