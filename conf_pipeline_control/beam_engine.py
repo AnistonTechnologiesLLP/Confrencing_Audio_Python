@@ -261,6 +261,18 @@ class BeamEngine:
         return self._steered.active_nulls
 
     @property
+    def stage_activity(self) -> Any:
+        """Lock-free snapshot of what each cleaning stage did on the last block (steered back-end), for
+        the live per-stage meter strip. The cleaner chain rides the steered path only (the grid has none)."""
+        return self._steered.stage_activity
+
+    def set_bypass(self, on: bool) -> None:
+        """Monitor the RAW (pre-cleaning) beam at matched loudness — a one-click A/B of the whole
+        cleaning chain. Rides the STEERED back-end only (the grid back-end has no cleaner, like
+        set_peq_bands)."""
+        self._steered.set_bypass(on)
+
+    @property
     def aec_erle_db(self) -> float:
         """Live AEC echo-return-loss-enhancement (dB) from the steered back-end; 0 when AEC is off."""
         return self._steered.aec_erle_db

@@ -62,6 +62,7 @@ from .geometry import SOUND_SPEED_MPS, ArrayGeometry, sensibel_8, with_active_ch
 from .tracking import ExponentialTracker, Tracker
 from .agc import TargetLoudnessAgc
 from .preamp import PreampHost
+from ._stage_metrics import StageActivity, StageMeter, ZERO_ACTIVITY, loudness_matched_raw
 from . import doa
 
 # --- POLARIS hardware constants (physical facts — do not "tune") ---
@@ -1224,6 +1225,13 @@ class PolarisBeamformer(PreampHost, MicController):
         self._aec: Any = None
         self._ref_capture: Any = None
         self._ab_capture: Any = None              # armed A/B proof capture (raw-vs-cleaned), or None
+        # Per-stage live activity meter + raw/processed bypass. _stage_metrics is built in _setup_runtime
+        # only when ≥1 cleaning stage is on, so the all-off path computes nothing (byte-identical). The
+        # snapshot is rebound atomically per block (GIL-tear-free read on the GUI timer). _bypass_cleaning
+        # is a GIL-atomic monitoring choice (emit the gain-matched raw beam), untouched by reset_transient.
+        self._stage_metrics: Optional[StageMeter] = None
+        self._stage_activity: StageActivity = ZERO_ACTIVITY
+        self._bypass_cleaning = False
         self.output_device = output_device
         self.monitor = monitor
         # device supervision (opt-in): wait for the array to appear, auto-reconnect if it drops
@@ -1685,6 +1693,12 @@ class PolarisBeamformer(PreampHost, MicController):
             self._aec = StreamingAec(self.sample_rate, n_taps=self._aec_n_taps, mu=self._aec_mu)
         else:
             self._aec = None
+        # Per-stage activity meter: built ONLY when at least one cleaning stage is engaged, so the
+        # all-off process_block path adds zero work and stays byte-identical to the pre-meter output.
+        any_stage = (self._aec is not None or self._dereverb is not None
+                     or self._post_nr is not None or self._agc is not None)
+        self._stage_metrics = StageMeter(self.sample_rate, block_hint=self.blocksize) if any_stage else None
+        self._stage_activity = ZERO_ACTIVITY
 
     # ---- external-feed seam (BeamEngine drives the DSP from a shared stream) ----
     def process_block(self, block: Any) -> Any:
@@ -1699,8 +1713,12 @@ class PolarisBeamformer(PreampHost, MicController):
         np = self._np
         with self._beam_lock:
             mono = self._beam.process(block)
+        pre_cleaner = mono                            # raw (pre-cleaning) beam — kept for the bypass monitor
         cap = self._ab_capture                        # A/B proof: snapshot the RAW beam before any cleaner
         raw_ab = mono if (cap is not None and not cap.done) else None
+        sm = self._stage_metrics                      # local: lets the per-stage metric work narrow + stay zero-cost
+        metering = sm is not None                      # True only when ≥1 cleaning stage is on (else zero-cost)
+        aec_farend = False
         if self._aec is not None:
             rc = self._ref_capture                    # read once: teardown may null it on the control thread
             ref = rc.recent(mono.shape[0]) if rc is not None else None
@@ -1710,21 +1728,42 @@ class PolarisBeamformer(PreampHost, MicController):
             # far-end-activity gate and stays bounded via its leaky, magnitude-clipped NLMS. (A residual /
             # coherence double-talk detector inside StreamingAec is the documented upgrade.)
             mono = self._aec.process(mono, ref, near_end_active=False)  # cancel far-end echo first
+            if metering:
+                aec_farend = bool(self._aec.farend_active)
         if self._transient is not None:
             mono = self._transient.process(mono)      # de-thump table taps BEFORE dereverb/NR smear them
+        derev_in = derev_out = 0.0
         if self._dereverb is not None:
+            if metering:
+                derev_in = float(np.sqrt(np.mean(mono * mono))) if mono.size else 0.0
             mono = self._dereverb.process(mono, self._noise_gate)  # suppress late reverb BEFORE the noise reducer
+            if metering:
+                derev_out = float(np.sqrt(np.mean(mono * mono))) if mono.size else 0.0
+        denoise_in = denoise_out = 0.0
         if self._post_nr is not None:
+            if metering:
+                denoise_in = float(np.sqrt(np.mean(mono * mono))) if mono.size else 0.0
             mono = self._post_nr.process(mono, self._noise_gate)   # spectral-gate NR before AGC (stable floor)
+            if metering:
+                denoise_out = float(np.sqrt(np.mean(mono * mono))) if mono.size else 0.0
         if self._peq is not None:
             mono = self._peq.process(mono)            # parametric EQ (tone) on the cleaned mono, before AGC
         if raw_ab is not None:
             cap.feed(raw_ab, mono)                    # A/B proof: raw beam vs the cleaned (pre-AGC) mono
         if self._agc_gain is not None:
             mono = self._apply_agc(mono)              # target-loudness normalize (before the linear band-limit)
+        agc_gain_lin = self._agc.tracker.value if self._agc is not None else None
+        if sm is not None:                            # publish the per-stage snapshot (atomic rebind, no lock)
+            self._stage_activity = sm.update(
+                aec_on=self._aec is not None, aec_erle_db=self.aec_erle_db, aec_farend=aec_farend,
+                dereverb_on=self._dereverb is not None, dereverb_in_rms=derev_in, dereverb_out_rms=derev_out,
+                denoise_on=self._post_nr is not None, denoise_in_rms=denoise_in, denoise_out_rms=denoise_out,
+                agc_on=self._agc is not None, agc_gain_lin=agc_gain_lin)
+        if self._bypass_cleaning:                     # monitor the RAW beam at matched loudness (the chain still ran)
+            mono = loudness_matched_raw(pre_cleaner, agc_gain_lin if agc_gain_lin is not None else 1.0)
         if self._lp_kernel is not None:
-            mono = self._band_limit(mono)
-        if self._voice_gate is not None:
+            mono = self._band_limit(mono)             # runs ONCE on the chosen branch (single FIR-tail state)
+        if self._voice_gate is not None and not self._bypass_cleaning:
             mono = self._voice_gate.process(mono)     # 'voice only' — mute non-speech (LAST stage, Invariant A)
         rms = float(np.sqrt(np.mean(mono * mono))) if mono.size else 0.0
         self._level = min(1.0, rms)
@@ -1781,6 +1820,18 @@ class PolarisBeamformer(PreampHost, MicController):
     def aec_erle_db(self) -> float:
         """Live AEC echo-return-loss-enhancement (dB); 0 when AEC is off or no echo seen."""
         return float(self._aec.erle_db) if self._aec is not None else 0.0
+
+    @property
+    def stage_activity(self) -> StageActivity:
+        """Lock-free snapshot of what each cleaning stage did on the last block (drives the live
+        per-stage meter strip). :data:`ZERO_ACTIVITY` when no cleaning stage is engaged."""
+        return self._stage_activity
+
+    def set_bypass(self, on: bool) -> None:
+        """Monitor the RAW (pre-cleaning) beam at matched loudness instead of the processed output — a
+        one-click A/B of the whole cleaning chain. The chain still runs (the per-stage meters keep
+        updating); only the emitted buffer changes. GIL-atomic; safe to toggle from the control thread."""
+        self._bypass_cleaning = bool(on)
 
     @property
     def aec_ref_source(self) -> str:
@@ -1869,6 +1920,9 @@ class PolarisBeamformer(PreampHost, MicController):
             self._transient.reset()        # drop the de-thump envelope + lookahead tail
         if self._voice_gate is not None:
             self._voice_gate.reset()       # fresh scorer + gain (re-acquire speech on the next block)
+        if self._stage_metrics is not None:
+            self._stage_metrics.reset()    # drop the noise-bed history so meters don't replay a stale reduction
+        self._stage_activity = ZERO_ACTIVITY   # _bypass_cleaning is a monitoring choice, NOT transient state — keep it
         with self._beam_lock:
             self._beam.reset()             # drop the strategy's streaming history; rebuilt on next process
 
