@@ -22,7 +22,7 @@ The venv interpreter is `./.venv/Scripts/python.exe` (Windows). Note: this is `.
 # Install (editable, with dev tools)
 ./.venv/Scripts/python.exe -m pip install -e ".[dev]"
 
-# Full test suite (656 tests, ~5 minutes — run ONCE; prefer backgrounding it)
+# Full test suite (~830 tests, ~5 minutes — run ONCE; prefer backgrounding it)
 QT_QPA_PLATFORM=offscreen ./.venv/Scripts/python.exe -m pytest -q
 
 # Single test file / single test (the fast inner loop)
@@ -37,7 +37,12 @@ QT_QPA_PLATFORM=offscreen ./.venv/Scripts/python.exe -m pytest -q
 ```
 
 - The GUI/offscreen smoke tests need `QT_QPA_PLATFORM=offscreen` prefixed (the Qt GUI itself is not
-  type-checked — it's verified via these headless smoke tests instead).
+  type-checked — it's verified via these headless smoke tests instead). **On this Windows box, building
+  the full `MainWindow` headless HANGS** — the GUI tests that use the `win`/MainWindow fixture run in CI
+  (offscreen Linux), not here. A bare `QApplication([])` + constructing a single panel (e.g.
+  `LivePanel(state)`) DOES work, so live-panel logic is verified locally with a small construct-and-poke
+  probe + `pytest --collect-only` + mypy, and full GUI behaviour in CI. A suite stall around the Qt tests
+  is this, not a regression.
 - The Bash tool resets cwd between calls — always prefix `cd /c/Work/conferencing-audio-pipeline-py &&`.
 - CI (`.github/workflows/ci.yml`) runs pytest across Python 3.10–3.13 and mypy on 3.12. Pinned dev
   deps live in `requirements-dev.txt`; loose ranges in `pyproject.toml`.
@@ -69,6 +74,30 @@ Three packages, split by dependency and responsibility:
 
 The README is the authoritative feature catalog (per-version sections, worked code examples). Read it
 before adding a feature so you match the established surface and prose.
+
+### The live DSP chain (the big picture for `conf_pipeline_control`)
+
+The live layer runs a fixed per-block stage chain on the beamformed mono. **Two parallel
+implementations exist and a new stage must be added to BOTH:**
+- `PolarisBeamformer.process_block` (`polaris_beamformer.py`) — driven by the A/B engine
+  (`beam_engine.py`) and the multi-array controllers (`multibeam.py` / `multikit.py` / `multiroom.py`).
+- `LiveBeamController.process` (`live.py`) — the zone ("Whole table") + auto-steer (`autosteer.py`) paths.
+
+**Stage order is load-bearing** (left = early):
+`preamp → beam → speech-HP → AEC → transient-suppress → dereverb → post-NR → PEQ → AGC → band-limit → voice-gate`.
+e.g. the speech high-pass + transient duck sit BEFORE the AGC so rumble/taps don't make it pump (and a
+transient's `duck_active` FREEZES the AGC, `agc.py`); the voice gate is LAST so the AGC can't chase it;
+PEQ is after cleaning so the AGC levels the tone.
+
+**Every optional stage follows one opt-in recipe** — copy it (`post_nr` / `dereverb` / `aec` /
+`transient` / `voice_gate` / `peq` / `speech_band` all do): a cfg key **default-OFF** with a real
+off/None/0 escape hatch and a **bit-exact pass-through when off** (return the *same* array object — this
+is what keeps the suite byte-identical); built lazily in `_setup_runtime` / `_build_post_nr`; applied in
+the chain; dropped in `reset_transient`; fanned out through `BeamEngine._clean_cfg` (the steered cfg) +
+`AutoSteerController` + a GUI checkbox on the live panel. The reusable streaming-stage classes
+(`peq.py` `StreamingPeq`, `transient.py`, `voice_gate.py`, `streaming_cleaner.py`,
+`deepfilter_cleaner.py`, `streaming_aec.py`) share a `process(block[, noise_gate]) -> block` /
+`reset()` contract; shared state they mutate is rebound atomically, never reset in place (see below).
 
 ## Hard invariants (don't break these)
 
