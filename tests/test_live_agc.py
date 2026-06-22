@@ -56,3 +56,54 @@ def test_livebeam_dereverb_param_builds_the_stage():
     ctrl = LiveBeamController(sensibel_8(), dereverb=True)
     ctrl._build_post_nr()                               # device-free build
     assert ctrl._dereverb is not None                  # the room-echo (dereverb) stage engages
+
+
+# --- Section 3: freeze the AGC while muted + de-click the gate so un-mute doesn't pop ---
+def test_agc_frozen_while_muted():
+    """While the gate is muted the AGC must be frozen so it can't wind its gain up on the quiet noise
+    floor (which then pops/static on un-mute)."""
+    ctrl = LiveBeamController(sensibel_8(), agc_target_db=-20.0)
+    ctrl._muted = True
+    assert ctrl._agc_freeze() is True
+    ctrl._muted = False
+    assert ctrl._agc_freeze() is False                  # not muted, no transient → AGC runs normally
+
+
+def test_agc_frozen_during_transient_duck():
+    ctrl = LiveBeamController(sensibel_8(), agc_target_db=-20.0)
+    ctrl._muted = False
+    ctrl._transient = type("_T", (), {"duck_active": True})()
+    assert ctrl._agc_freeze() is True                   # existing tap-duck freeze still holds
+
+
+def test_gate_gain_steady_is_scalar_and_unchanged():
+    """No transition → return today's scalar gain (byte-identical to out * g)."""
+    ctrl = LiveBeamController(sensibel_8())
+    ctrl.set_gain_db(0.0)                                # gain = 1.0
+    g1 = ctrl._gate_gain(512)                            # first call seeds, returns scalar
+    g2 = ctrl._gate_gain(512)                            # steady → scalar
+    assert np.ndim(g1) == 0 and np.ndim(g2) == 0
+    assert float(g1) == 1.0 and float(g2) == 1.0
+
+
+def test_gate_gain_ramps_closed_on_mute_no_step():
+    ctrl = LiveBeamController(sensibel_8())
+    ctrl.set_gain_db(0.0)
+    ctrl._muted = False
+    ctrl._gate_gain(512)                                 # seed at 1.0 (unmuted)
+    ctrl._muted = True
+    gg = ctrl._gate_gain(512)                            # transition 1.0 → 0.0
+    assert getattr(gg, "shape", None) == (512,)
+    assert abs(float(gg[0]) - 1.0) < 1e-3 and abs(float(gg[-1])) < 1e-3
+    assert float(np.max(np.abs(np.diff(gg)))) < 0.01     # ramped, not a hard step
+
+
+def test_gate_gain_ramps_open_on_unmute_no_step():
+    ctrl = LiveBeamController(sensibel_8())
+    ctrl.set_gain_db(0.0)
+    ctrl._muted = True
+    ctrl._gate_gain(512)                                 # seed at 0.0 (muted)
+    ctrl._muted = False
+    gg = ctrl._gate_gain(512)                            # transition 0.0 → 1.0
+    assert abs(float(gg[0])) < 1e-3 and abs(float(gg[-1]) - 1.0) < 1e-3
+    assert float(np.max(np.abs(np.diff(gg)))) < 0.01     # de-clicked open

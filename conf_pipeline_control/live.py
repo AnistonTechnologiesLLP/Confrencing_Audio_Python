@@ -179,6 +179,7 @@ class LiveBeamController(PreampHost, MicController):
         self._out_channels = 0     # monitor output channels (0 = not monitoring)
         self._wav: Optional[wave.Wave_write] = None
         self._level = 0.0          # written by audio thread, read by GUI
+        self._last_gate_gain: Any = None  # de-click: last applied output gain; ramps across mute/gain transitions
         self._weights: Any = None  # numpy (n_bins, M) complex, or None → passthrough sum
         self._win: Any = None      # Hann window (numpy)
         self._inbuf: Any = None    # numpy (FRAME, M) sliding input
@@ -515,6 +516,24 @@ class LiveBeamController(PreampHost, MicController):
         if self._np is not None:
             self._compute_weights()
 
+    def _agc_freeze(self) -> bool:
+        """Freeze the AGC when there is no real speech to level: while MUTED (the gate is closed) so the
+        gain can't wind up toward its ceiling on the quiet noise floor and pop/static on un-mute, or while
+        a transient tap is being ducked. Otherwise the AGC tracks normally."""
+        return bool(self._muted) or (self._transient is not None and bool(self._transient.duck_active))
+
+    def _gate_gain(self, n: int):
+        """Per-block output gain: 0 when muted, else 10**(gain_db/20). On a mute/gain TRANSITION it ramps
+        across the block (a few ms de-click) so the gate doesn't click; with no change it returns the
+        plain scalar — byte-identical to the previous ``out * g`` path."""
+        target = 0.0 if self._muted else 10.0 ** (self._gain_db / 20.0)
+        prev = self._last_gate_gain
+        self._last_gate_gain = target
+        if prev is None or target == prev or n <= 1:
+            return target
+        import numpy as np                          # only on a transition (rare) — never per-steady-block
+        return np.linspace(prev, target, n, dtype=np.float32)
+
     # ---- audio thread ----
     def _process_block(self, indata):  # pragma: no cover (needs hardware)
         """Beamform one HOP-sized block → post-gain mono output (HOP,). Also
@@ -584,8 +603,7 @@ class LiveBeamController(PreampHost, MicController):
             out = self._peq.process(out)              # parametric EQ (tone) on the cleaned mono
         agc_gain_lin = None
         if self._agc is not None and not self._bypass_cleaning:
-            freeze = self._transient is not None and bool(self._transient.duck_active)
-            out = self._agc.process(out, freeze=freeze)   # normalize loudness toward the target (AGC-freeze on a tap duck)
+            out = self._agc.process(out, freeze=self._agc_freeze())   # normalize loudness (frozen while muted / on a tap duck)
             agc_gain_lin = float(self._agc.tracker.value or 1.0)
         if self._voice_gate is not None and not self._bypass_cleaning:
             out = self._voice_gate.process(out)       # 'voice only' — mute non-speech (last stage)
@@ -605,9 +623,8 @@ class LiveBeamController(PreampHost, MicController):
         rms = float(np.sqrt(np.mean(out * out))) if out.size else 0.0
         self._level = min(1.0, rms)
 
-        # post-gain / post-mute signal for recording + monitoring
-        g = 0.0 if self._muted else 10.0 ** (self._gain_db / 20.0)
-        out_g = np.clip(out * g, -1.0, 1.0)
+        # post-gain / post-mute signal for recording + monitoring (de-clicked across mute/gain steps)
+        out_g = np.clip(out * self._gate_gain(out.size), -1.0, 1.0)
 
         if self._wav is not None and not self._muted:
             self._wav.writeframes((out_g * 32767.0).astype("<i2").tobytes())
