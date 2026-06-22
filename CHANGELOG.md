@@ -10,6 +10,25 @@ the TS sibling is at matching v5 parity. The desktop app is presented as
 ## [Unreleased]
 
 ### Fixed
+- **Real-time DeepFilterNet3 (`post_nr_engine="dfn3"`) no longer distorts the voice.** Offline DFN3 (the
+  New_OCTOVOX reference) sounds perfect; the live path was distorted by four separate, measured defects,
+  now all fixed:
+  - **The 44.1↔48 kHz streaming resampler was broken** (DFN3 is a 48 kHz model; the array runs at 44.1).
+    The naive overlap-save reset the polyphase phase every block, drifted ~+90 samples/s from an
+    integer-floor trim, and emitted the FIR's unsettled edge — dragging a round-trip to ≈−10 dB THD+N (vs
+    −80 dB correct) and smearing the voice with broadband grit across the speech-formant band. Rewrote
+    `_StreamingResampler` as a phase-coherent, settled-interior streamer with exact cumulative accounting:
+    measured round-trip is now −67…−80 dB (matches a single-shot resample), drift-free.
+  - **The loudness-restore makeup hard-clipped.** Every denoiser drops the talker, so `_LevelPreservingCleaner`
+    boosts it back — but the RMS match ignored crest factor and the cleaner's ~49 ms latency, ratcheting a
+    +6 dB overshoot that pushed peaks to **1.6–3.7× full scale**. Added an instant-attack/slow-release peak
+    limiter (−1 dBFS) after the makeup and tightened the makeup cap 15→8 dB (the true level loss is <1 dB).
+  - **The AGC re-clipped after the makeup.** `TargetLoudnessAgc` applied its RMS gain (up to +18 dB) with no
+    output clamp, so boosting peaky cleaned voice pushed peaks to 3–5× full scale. Added the same peak
+    limiter to the AGC output — it now guards the converter in every mode (single-array and 2-kit).
+  - **DFN3 ran uncapped (musical noise).** `DEFAULT_ATTEN_LIM_DB` was 100 (≈unlimited), over-suppressing the
+    noise floor ~20 dB harder than the offline reference and treating a quiet/overlapping second speaker as
+    noise. Lowered to **32 dB** to match New_OCTOVOX's natural-voice default.
 - **AGC now works in the single-array live modes.** The target-loudness AGC was only ever wired into the
   2-kit path; `LiveBeamController` (Follow / Lock-to-seat / Whole-table) had **no AGC stage at all**, and
   the A/B engine / combined-room paths never set a target — so "Normalize loudness" did nothing outside

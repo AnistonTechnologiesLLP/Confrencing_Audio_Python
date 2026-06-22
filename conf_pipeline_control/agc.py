@@ -20,6 +20,10 @@ from .tracking import ExponentialTracker
 DEFAULT_AGC_MAX_GAIN_DB = 18.0    # clamp |applied gain| to ±this (no run-away boost of the noise floor)
 DEFAULT_AGC_SLEW_ALPHA = 0.15     # per-block EMA on the gain — slow enough not to pump speech (~0.2 s @ 32 ms)
 DEFAULT_AGC_SILENCE_DB = -55.0    # below this OUTPUT rms, HOLD the gain (don't ramp up near-silence)
+DEFAULT_AGC_CEILING_DB = -1.0     # output peak ceiling for the post-gain limiter (≈0.891). The RMS gain
+                                  # ignores crest factor, so a loud boost on peaky (e.g. cleaned-voice)
+                                  # content drives peaks past full scale → hard clip at the converter.
+DEFAULT_AGC_LIMIT_RELEASE_ALPHA = 0.05   # instant-attack / slow-release (~0.3 s) of the brickwall gain (no pumping)
 
 
 class TargetLoudnessAgc:
@@ -38,6 +42,12 @@ class TargetLoudnessAgc:
         self._silence_rms = 10.0 ** (float(silence_db) / 20.0)
         self._alpha = float(slew_alpha)
         self._tracker = ExponentialTracker(self._alpha)
+        # Output peak limiter (instant attack / slow release) — guards the converter against the RMS gain
+        # clipping peaky content. Independent of the loudness gain (reported via .tracker), so the stage
+        # meter still shows the AGC gain. Plain instance attrs (set here, not lazily).
+        self._ceiling = 10.0 ** (DEFAULT_AGC_CEILING_DB / 20.0)
+        self._lim_release = float(DEFAULT_AGC_LIMIT_RELEASE_ALPHA)
+        self._lim = 1.0                   # running brickwall gain (1.0 = no limiting)
 
     @property
     def tracker(self) -> ExponentialTracker:
@@ -59,8 +69,18 @@ class TargetLoudnessAgc:
         else:
             desired = min(self.gain_max, max(self.gain_min, self._target_rms / rms))
         g = float(self._tracker.update(desired))
-        return (mono * g).astype(np.float32)
+        y = mono * g
+        # Peak limiter: never let the loudness gain clip at the converter. Instant attack (snap down on the
+        # offending block) + slow release toward unity → no pumping; same-block, so zero added latency.
+        pk = float(np.max(np.abs(y))) if y.size else 0.0
+        need = self._ceiling / pk if pk > self._ceiling else 1.0
+        if need < self._lim:
+            self._lim = need                              # instant attack
+        else:
+            self._lim += self._lim_release * (min(1.0, need) - self._lim)   # slow release toward unity
+        return (y * self._lim).astype(np.float32)
 
     def reset(self) -> None:
         """Drop the slew state (atomic rebind of the tracker; an audio thread reads it lock-free)."""
         self._tracker = ExponentialTracker(self._alpha)
+        self._lim = 1.0          # drop any held limiter duck so a reconnect starts clean

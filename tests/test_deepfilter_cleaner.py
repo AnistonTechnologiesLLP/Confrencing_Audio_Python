@@ -47,7 +47,48 @@ def test_streaming_resampler_reset_clears_history():
     r = _StreamingResampler(48000, 44100, np)
     r.process(_sine(500.0, 2048, 44100))
     r.reset()
-    assert r._hist.shape[0] == 0
+    assert r._win.shape[0] == 0 and r._win_start == 0 and r._out_done == 0   # all streaming state cleared
+
+
+def _roundtrip_thdn(f0, sr=44100, dur=4.0, blk=512):
+    """44.1->48->44.1 round-trip THD+N (dB) of a pure tone, the resampler-distortion metric."""
+    from scipy.signal.windows import blackmanharris
+    n = int(sr * dur)
+    x = (0.4 * np.sin(2 * np.pi * f0 * np.arange(n) / sr)).astype(np.float32)
+    to48, back = _StreamingResampler(48000, sr, np), _StreamingResampler(sr, 48000, np)
+    y = np.concatenate([back.process(to48.process(x[i:i + blk])) for i in range(0, n - blk + 1, blk)])
+    seg = y[6000:len(y) - 6000].astype(np.float64)
+    P = np.abs(np.fft.rfft(seg * blackmanharris(len(seg)))) ** 2
+    k = int(np.argmin(np.abs(np.fft.rfftfreq(len(seg), 1 / sr) - f0)))
+    fund = P[k - 8:k + 9].sum(); P[k - 8:k + 9] = 0.0; P[:8] = 0.0
+    return 10 * np.log10(P.sum() / (fund + 1e-30))
+
+
+def test_streaming_resampler_roundtrip_is_low_distortion():
+    """The phase-coherent streamer must match a single-shot resample (≈−67..−80 dB across the speech band).
+    The OLD overlap-save (phase-reset + integer-floor drift + emitted FIR tail) measured ≈−10 dB here —
+    the dominant DFN3 voice-distortion source. Guard at −60 dB (huge margin over −10; below the −67.7 dB
+    single-shot floor at 2 kHz)."""
+    pytest.importorskip("scipy")
+    for f0 in (500.0, 1000.0, 2000.0, 3000.0):
+        thdn = _roundtrip_thdn(f0)
+        assert thdn < -60.0, f"round-trip THD+N {thdn:.1f} dB @ {f0:.0f} Hz (resampler-distortion regression)"
+
+
+def test_streaming_resampler_is_drift_free():
+    """Output length must track the ideal rate within a CONSTANT startup deficit, independent of duration —
+    the old integer-floor trim drifted ~+90 samples/s (a slowly worsening time-base error / pitch creep)."""
+    pytest.importorskip("scipy")
+    sr, blk = 44100, 512
+    deficits = []
+    for dur in (1.0, 2.0, 4.0):
+        n = int(sr * dur)
+        x = _sine(1000.0, n, sr)
+        to48, back = _StreamingResampler(48000, sr, np), _StreamingResampler(sr, 48000, np)
+        y = np.concatenate([back.process(to48.process(x[i:i + blk])) for i in range(0, n - blk + 1, blk)])
+        whole = (n // blk) * blk
+        deficits.append(whole - len(y))                       # 1:1 round-trip → deficit is pure startup latency
+    assert max(deficits) - min(deficits) < blk, f"length deficit drifts with duration: {deficits}"
 
 
 # --------------------------------------------------------------------------- #
