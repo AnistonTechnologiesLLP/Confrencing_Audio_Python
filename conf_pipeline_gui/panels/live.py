@@ -50,6 +50,7 @@ from .common import (
     NoWheelSpinBox,
     PanelBase,
     StageStrip,
+    clear_layout,
     set_danger,
     _ABWorker,
     _CalibWorker,
@@ -94,6 +95,17 @@ class _ArrayRow:
     def __init__(self, widget, array_id, use, device, missing):
         self.widget, self.array_id, self.use = widget, array_id, use
         self.device, self.missing = device, missing
+
+
+class _SectorRow:
+    """One coverage-sector row in the Auto-steer card: a centre + width spin and a Remove button.
+    A talker inside ANY sector is followed; the gaps between sectors are cut. ``line`` is the row's
+    own QHBoxLayout (held so removal can detach + delete it cleanly)."""
+
+    __slots__ = ("center", "width", "remove_btn", "line")
+
+    def __init__(self, center, width, remove_btn, line):
+        self.center, self.width, self.remove_btn, self.line = center, width, remove_btn, line
 
 
 class LivePanel(PanelBase):
@@ -374,13 +386,14 @@ class LivePanel(PanelBase):
         beam.body_lay.addWidget(self.live_design_view)
         lay.addWidget(beam)
 
-        # --- AUTO-STEER: detect talkers by direction and follow a sector ---
-        steer = Card("Auto-steer — follow talkers in a sector", collapsed=True)
+        # --- AUTO-STEER: detect talkers by direction and follow one or more sectors ---
+        steer = Card("Auto-steer — follow talkers in sectors", collapsed=True)
         steer.setToolTip(
             "Detect who is talking by direction (DOA) in real time and steer a beam at "
-            "each talker inside the coverage sector, nulling the ones outside. Best for "
-            "a desk array: it adapts as people talk in turn or move. Azimuth only — a "
-            "small array resolves bearing, not distance, so the area is an angular arc."
+            "each talker inside a coverage sector, nulling the ones outside. Add more than "
+            "one sector to cover several seating areas — talkers in the gaps between sectors "
+            "are cut. Best for a desk array: it adapts as people talk in turn or move. Azimuth "
+            "only — a small array resolves bearing, not distance, so the area is an angular arc."
         )
         asf = QFormLayout()
         asf.setRowWrapPolicy(QFormLayout.WrapLongRows)
@@ -389,21 +402,20 @@ class LivePanel(PanelBase):
         self.live_autosteer.setToolTip("On Connect, follow detected talkers instead of using a fixed zone design.")
         self.live_autosteer.toggled.connect(lambda *_a: None if self._refreshing else self._on_autosteer_toggled())
         asf.addRow("Auto-steer", self.live_autosteer)
-        self.live_sector_center = NoWheelDoubleSpinBox()
-        self.live_sector_center.setRange(0.0, 359.0)
-        self.live_sector_center.setSingleStep(5.0)
-        self.live_sector_center.setDecimals(0)
-        self.live_sector_center.setValue(0.0)
-        self.live_sector_center.setSuffix("°")
-        asf.addRow("Sector centre", self.live_sector_center)
-        self.live_sector_width = NoWheelDoubleSpinBox()
-        self.live_sector_width.setRange(10.0, 360.0)
-        self.live_sector_width.setSingleStep(10.0)
-        self.live_sector_width.setDecimals(0)
-        self.live_sector_width.setValue(120.0)
-        self.live_sector_width.setSuffix("° wide")
-        self.live_sector_width.setToolTip("Full arc width (e.g. 120° = centre ±60°).")
-        asf.addRow("Sector width", self.live_sector_width)
+        # Coverage sectors: a dynamic add/remove list. Each row is centre + full-width; talkers inside
+        # ANY sector are followed and the gaps between sectors are cut. One row is seeded below (Step 9).
+        self._sector_rows: list = []
+        self._sector_box = QVBoxLayout()
+        self._sector_box.setSpacing(4)
+        self._sector_box.setContentsMargins(0, 0, 0, 0)
+        asf.addRow("Sectors", self._sector_box)
+        self.live_add_sector = QPushButton("+ Add sector")
+        self.live_add_sector.setToolTip(
+            "Add another coverage arc. Talkers inside ANY sector are followed; the gaps between sectors "
+            "are cut. Share one Front offset / Calibrate across every sector."
+        )
+        self.live_add_sector.clicked.connect(lambda *_a: None if self._refreshing else self._add_sector_row())
+        asf.addRow("", self.live_add_sector)
         self.live_front_offset = NoWheelDoubleSpinBox()
         self.live_front_offset.setRange(-180.0, 180.0)
         self.live_front_offset.setSingleStep(5.0)
@@ -498,14 +510,18 @@ class LivePanel(PanelBase):
         asf.addRow(self.live_autosteer_view)
         steer.body_lay.addLayout(asf)
         lay.addWidget(steer)
+        # The GLOBAL auto-steer controls (per-sector centre/width/Remove live in self._sector_rows and
+        # are folded in via _iter_autosteer_widgets). Front offset + Calibrate are one shared control.
         self._autosteer_widgets = (
-            self.live_sector_center, self.live_sector_width, self.live_front_offset,
-            self.live_max_talkers, self.live_autosteer_gate, self.live_calib_btn,
+            self.live_front_offset, self.live_max_talkers, self.live_autosteer_gate,
+            self.live_calib_btn, self.live_add_sector,
         )
-        for _w in self._autosteer_widgets:
+        self._add_sector_row(center=0.0, width=120.0)   # seed one sector == the old single-sector default
+        for _w in self._iter_autosteer_widgets():
             _w.setEnabled(False)                 # enabled when auto-steer is ticked
-        # adjust the sector live while connected (no reconnect needed)
-        for _sp in (self.live_sector_center, self.live_sector_width, self.live_front_offset, self.live_max_talkers):
+        self._sync_sector_remove_enabled()       # single row → Remove disabled
+        # adjust the global params live while connected (no reconnect needed)
+        for _sp in (self.live_front_offset, self.live_max_talkers):
             _sp.valueChanged.connect(lambda *_a: None if self._refreshing else self._on_autosteer_param_changed())
         self.live_autosteer_gate.toggled.connect(lambda *_a: None if self._refreshing else self._on_autosteer_param_changed())
 
@@ -950,11 +966,82 @@ class LivePanel(PanelBase):
         self.live_autosteer_zonecut.setEnabled(on)
         self.live_autosteer_aec.setEnabled(on)
 
+    def _iter_autosteer_widgets(self):
+        """The global auto-steer controls AND every per-sector row's widgets — the full set enabled
+        only while auto-steer is ticked."""
+        yield from self._autosteer_widgets
+        for r in self._sector_rows:
+            yield r.center
+            yield r.width
+            yield r.remove_btn
+
+    def _sync_sector_remove_enabled(self) -> None:
+        """A sector's Remove button is usable only when auto-steer is on AND more than one sector
+        exists (there is always at least one coverage sector)."""
+        allow = self.live_autosteer.isChecked() and len(self._sector_rows) > 1
+        for r in self._sector_rows:
+            r.remove_btn.setEnabled(allow)
+
+    def _add_sector_row(self, center: float = 0.0, width: float = 120.0) -> "_SectorRow":
+        """Append a coverage-sector row (centre + full-width spins + Remove). Mirrors the original
+        single-sector spin config. Adding a sector is a live change while connected."""
+        line = QHBoxLayout()
+        line.setContentsMargins(0, 0, 0, 0)
+        line.setSpacing(4)
+        c = NoWheelDoubleSpinBox()
+        c.setRange(0.0, 359.0)
+        c.setSingleStep(5.0)
+        c.setDecimals(0)
+        c.setValue(float(center))
+        c.setSuffix("°")
+        c.setToolTip("Bearing of this arc's centre (after Front offset).")
+        wsp = NoWheelDoubleSpinBox()
+        wsp.setRange(10.0, 360.0)
+        wsp.setSingleStep(10.0)
+        wsp.setDecimals(0)
+        wsp.setValue(float(width))
+        wsp.setSuffix("° wide")
+        wsp.setToolTip("Full arc width (e.g. 120° = centre ±60°).")
+        rm = QPushButton("Remove")
+        rm.setToolTip("Remove this sector (at least one sector is always kept).")
+        line.addWidget(c, 1)
+        line.addWidget(wsp, 1)
+        line.addWidget(rm, 0)
+        row = _SectorRow(center=c, width=wsp, remove_btn=rm, line=line)
+        # capture the row via a default arg (r=row), NOT a closure over the loop/late variable
+        c.valueChanged.connect(lambda *_a: None if self._refreshing else self._on_autosteer_param_changed())
+        wsp.valueChanged.connect(lambda *_a: None if self._refreshing else self._on_autosteer_param_changed())
+        rm.clicked.connect(lambda *_a, r=row: None if self._refreshing else self._remove_sector_row(r))
+        self._sector_box.addLayout(line)
+        self._sector_rows.append(row)
+        on = self.live_autosteer.isChecked()
+        for w in (c, wsp, rm):
+            w.setEnabled(on)
+        self._sync_sector_remove_enabled()
+        if not self._refreshing:
+            self._on_autosteer_param_changed()   # push the new sector live (no-op if not connected)
+        return row
+
+    def _remove_sector_row(self, row: "_SectorRow") -> None:
+        """Drop a sector row (keeping at least one). Detaches + deletes its widgets via the event loop."""
+        if len(self._sector_rows) <= 1:
+            return                               # always keep at least one coverage sector
+        if row not in self._sector_rows:
+            return                               # defensive: a fast double-click already removed it
+        self._sector_rows.remove(row)
+        self._sector_box.removeItem(row.line)    # detach the nested row layout from the box
+        clear_layout(row.line)                   # setParent(None)+deleteLater each widget
+        row.line.deleteLater()                   # delete the now-empty QHBoxLayout
+        self._sync_sector_remove_enabled()
+        if not self._refreshing:
+            self._on_autosteer_param_changed()   # >=1 row remains → sectors[0] valid
+
     def _on_autosteer_toggled(self):
         """Enable the sector controls only when auto-steer is selected."""
         on = self.live_autosteer.isChecked()
-        for w in self._autosteer_widgets:
+        for w in self._iter_autosteer_widgets():
             w.setEnabled(on)
+        self._sync_sector_remove_enabled()   # re-apply the >=2-rows rule on top of the blanket enable
         if on:                               # session modes are mutually exclusive
             self.live_beameng.setChecked(False)
         self._sync_autosteer_nr_enabled()    # auto-steer has its own OCTOVOX-cleaning controls
@@ -997,20 +1084,26 @@ class LivePanel(PanelBase):
         except Exception as exc:
             self.live_status.setText(f"A/B switch failed: {exc}")
 
-    def _autosteer_sector(self):
-        return cc.SectorConfig(
-            center_deg=float(self.live_sector_center.value()),
-            half_width_deg=float(self.live_sector_width.value()) / 2.0,
-            front_offset_deg=float(self.live_front_offset.value()),
-        )
+    def _autosteer_sectors(self) -> list:
+        """Build the coverage-sector list from the rows. Every sector shares the ONE global Front
+        offset; the GUI stores full arc width, the controller wants half (÷2)."""
+        off = float(self.live_front_offset.value())
+        return [
+            cc.SectorConfig(
+                center_deg=float(r.center.value()),
+                half_width_deg=float(r.width.value()) / 2.0,
+                front_offset_deg=off,
+            )
+            for r in self._sector_rows
+        ]
 
     def _on_autosteer_param_changed(self):
-        """Push sector / max-talkers / gate changes to a running session live —
+        """Push sectors / max-talkers / gate changes to a running session live —
         the controller reads these each control tick, so no reconnect is needed."""
         a = self._autosteer
         if a is None:
             return
-        a.sector = self._autosteer_sector()
+        a.sectors = self._autosteer_sectors()
         a.max_talkers = int(self.live_max_talkers.value())
         a.gate_when_empty = self.live_autosteer_gate.isChecked()
         self.live_mute.setEnabled(not a.gate_when_empty)
@@ -1404,12 +1497,13 @@ class LivePanel(PanelBase):
             return
         geom = self._live_geometry()
         rate = self.live_rate.currentData() or 44100
-        sector = self._autosteer_sector()
+        sectors = self._autosteer_sectors()                                 # one or more coverage arcs
         clean = self.live_autosteer_clean.currentData()                     # None | "omlsa" | "gate"
         nr_floor_db, nr_oversub = self.live_autosteer_depth.currentData()   # Gentle / Medium / Aggressive
         try:
             ctrl = cc.AutoSteerController(
-                geom, sector,
+                geom, sectors[0],                                           # positional = primary (back-compat)
+                sectors=sectors,                                            # follow talkers in ANY sector
                 device=self._live_device(),
                 samplerate=float(rate),
                 max_talkers=int(self.live_max_talkers.value()),
@@ -1446,8 +1540,13 @@ class LivePanel(PanelBase):
         self.live_mute.setEnabled(not self.live_autosteer_gate.isChecked())
         mon = ", monitoring" if self.live_monitor.isChecked() else ""
         nr = {"omlsa": " · OCTOVOX cleaner", "gate": " · noise-gate"}.get(clean, "")
+        if len(sectors) == 1:
+            s = sectors[0]
+            sect_s = f"sector {s.center_deg:.0f}° ±{s.half_width_deg:.0f}°"
+        else:
+            sect_s = f"{len(sectors)} sectors"
         self.live_status.setText(
-            f"Auto-steer live · sector {sector.center_deg:.0f}° ±{sector.half_width_deg:.0f}°{nr} "
+            f"Auto-steer live · {sect_s}{nr} "
             f"· up to {int(self.live_max_talkers.value())} talker(s){mon} (headphones)."
         )
         self._notify_session_changed()
@@ -2132,16 +2231,18 @@ class LivePanel(PanelBase):
             w._live_session_changed(self._live_busy())
 
     def _publish_overlay(self):
-        """Feed the canvas LIVE operations view (sector wedge, DOA rays, halo)."""
+        """Feed the canvas LIVE operations view (sector wedges, DOA rays, halo)."""
         if not self._live_busy():
             if self.state.live_overlay is not None:
                 self.state.set_live_overlay(None)
             return
         sector = None
+        sectors = None
         detections = []
         if self._autosteer is not None:
-            s = self._autosteer.sector
-            sector = (s.center_deg, s.half_width_deg, s.front_offset_deg)
+            secs = getattr(self._autosteer, "sectors", None) or [self._autosteer.sector]
+            sectors = [(s.center_deg, s.half_width_deg, s.front_offset_deg) for s in secs]
+            sector = sectors[0] if sectors else None     # back-compat single-wedge fallback
             try:
                 detections = [(d.azimuth_deg, d.salience_db, d.in_sector) for d in self._autosteer.detections()]
             except Exception:
@@ -2199,6 +2300,7 @@ class LivePanel(PanelBase):
             # pinned at connect — the combo may show another room's arrays
             "array_id": self._session_array_id,
             "sector": sector,
+            "sectors": sectors,
             "detections": detections,
             "seat": seat,
             "bearing": bearing,

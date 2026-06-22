@@ -100,8 +100,10 @@ from .doa import (  # noqa: F401
     DoaResult,
     detect,
     detect_offline,
+    in_any_sector,
     in_sector,
     sector_gate,
+    sector_gate_multi,
 )
 from .tracking import AlphaBetaTracker, ExponentialTracker, Tracker, ValueSmoother  # noqa: F401
 from .autosteer import AutoSteerController, SectorConfig  # noqa: F401
@@ -144,7 +146,8 @@ __all__ = [
     "design_zone_beams", "design_from_bearings", "design_multi_bearings",
     "bearing_direction", "BeamDesign", "ZoneBeam", "BandMetrics",
     "frequency_curves", "BeamFrequencyCurve",
-    "detect", "detect_offline", "sector_gate", "in_sector", "Detection", "DoaResult",
+    "detect", "detect_offline", "sector_gate", "sector_gate_multi", "in_sector", "in_any_sector",
+    "Detection", "DoaResult",
     "DEFAULT_F_LO_HZ", "DEFAULT_F_HI_HZ",
     "AutoSteerController", "SectorConfig",
     "Tracker", "ValueSmoother", "ExponentialTracker", "AlphaBetaTracker",

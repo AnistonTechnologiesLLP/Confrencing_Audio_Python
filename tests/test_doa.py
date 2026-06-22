@@ -116,6 +116,40 @@ def test_sector_gate_flags_detections():
     assert dets[1].in_sector is False
 
 
+# --- multiple sectors: a talker is "in coverage" if inside ANY sector ---
+def test_in_any_sector_two_sectors():
+    specs = [(0.0, 20.0, 0.0), (180.0, 20.0, 0.0)]   # (center, half_width, front_offset)
+    assert doa.in_any_sector(10.0, specs)            # inside sector A
+    assert doa.in_any_sector(190.0, specs)           # inside sector B
+    assert not doa.in_any_sector(90.0, specs)        # in the gap between them
+
+
+def test_in_any_sector_wraps_around_zero():
+    specs = [(0.0, 20.0, 0.0)]
+    assert doa.in_any_sector(350.0, specs)
+    assert doa.in_any_sector(10.0, specs)
+    assert not doa.in_any_sector(40.0, specs)
+
+
+def test_in_any_sector_empty_specs_is_false():
+    assert doa.in_any_sector(123.0, []) is False
+
+
+def test_in_any_sector_front_offset():
+    specs = [(0.0, 15.0, 90.0)]                       # front offset rotates the reference
+    assert doa.in_any_sector(90.0, specs)
+    assert not doa.in_any_sector(0.0, specs)
+
+
+def test_sector_gate_multi_flags_gap_talker():
+    specs = [(0.0, 20.0, 0.0), (180.0, 20.0, 0.0)]
+    dets = [doa.Detection(10.0, 9.0), doa.Detection(90.0, 8.0), doa.Detection(190.0, 7.0)]
+    doa.sector_gate_multi(dets, specs)
+    assert dets[0].in_sector is True                 # in sector A
+    assert dets[1].in_sector is False                # in the gap
+    assert dets[2].in_sector is True                 # in sector B
+
+
 # --- multi-look design (drives the live extractor) ---
 def test_design_multi_bearings_one_beam_per_look():
     d = cc.design_multi_bearings(GEOM, [(0.0, 90.0), (120.0, 90.0)], [(200.0, 90.0)], freq_hz=2000.0)
@@ -183,3 +217,76 @@ def test_autosteer_mutes_when_sector_empty():
     a._tick()
     assert a.ctrl.muted is True
     assert a.ctrl.applied is None
+
+
+# --- multiple sectors on the controller ---
+def _two_sectors():
+    # sector A around 0° (±20°) and sector B around 180° (±20°); the rest is a "gap"
+    return [cc.SectorConfig(center_deg=0.0, half_width_deg=20.0),
+            cc.SectorConfig(center_deg=180.0, half_width_deg=20.0)]
+
+
+def test_autosteer_two_sectors_follow_both_talkers():
+    # one talker in sector A (10°), one in sector B (190°): with two sectors BOTH are followed
+    # (single-sector auto-steer would null the 190° talker).
+    R = _cov_from_sources(GEOM, [10.0, 190.0])
+    a = _autosteer(GEOM, cc.SectorConfig(center_deg=0.0, half_width_deg=20.0), sectors=_two_sectors())
+    a.ctrl = _StubCtrl(R, FREQS)
+    a._tick()
+    assert a.ctrl.applied is not None
+    looks = [b.look.azimuth_deg for b in a.ctrl.applied.beams]
+    assert any(doa._circular_sep(x, 10.0) <= 8.0 for x in looks)    # sector A talker followed
+    assert any(doa._circular_sep(x, 190.0) <= 8.0 for x in looks)   # sector B talker followed
+    assert a.ctrl.applied.null_dirs == ()                          # neither talker is nulled
+    assert a.ctrl.muted is False
+
+
+def test_autosteer_multi_sector_nulls_gap_talker():
+    # one talker in sector A (10°), one in the gap between the sectors (100°): the gap talker is cut.
+    R = _cov_from_sources(GEOM, [10.0, 100.0])
+    a = _autosteer(GEOM, cc.SectorConfig(center_deg=0.0, half_width_deg=20.0), sectors=_two_sectors())
+    a.ctrl = _StubCtrl(R, FREQS)
+    a._tick()
+    looks = [b.look.azimuth_deg for b in a.ctrl.applied.beams]
+    assert any(doa._circular_sep(x, 10.0) <= 8.0 for x in looks)    # in-sector talker followed
+    assert all(doa._circular_sep(x, 100.0) > 8.0 for x in looks)    # gap talker NOT followed
+    nulls = [d.azimuth_deg for d in a.ctrl.applied.null_dirs]
+    assert any(doa._circular_sep(x, 100.0) <= 8.0 for x in nulls)   # gap talker nulled
+    assert a.ctrl.muted is False
+
+
+def test_autosteer_multi_sector_mutes_when_all_empty():
+    R = np.broadcast_to(np.eye(GEOM.n_channels, dtype=complex), (len(FREQS), 8, 8)).copy()
+    a = _autosteer(
+        GEOM, cc.SectorConfig(center_deg=0.0, half_width_deg=20.0),
+        sectors=[cc.SectorConfig(center_deg=0.0, half_width_deg=20.0),
+                 cc.SectorConfig(center_deg=180.0, half_width_deg=20.0)],
+    )
+    a.ctrl = _StubCtrl(R, FREQS)
+    a._tick()
+    assert a.ctrl.muted is True
+    assert a.ctrl.applied is None
+
+
+def test_autosteer_sector_property_backcompat():
+    s0 = cc.SectorConfig(center_deg=0.0, half_width_deg=45.0)
+    a = _autosteer(GEOM, s0)                       # positional single-sector construction
+    assert a.sectors == [s0]
+    assert a.sector == s0
+
+    s1 = cc.SectorConfig(center_deg=90.0, half_width_deg=30.0)
+    a.sector = s1                                  # legacy single-sector setter
+    assert a.sectors == [s1]
+    assert a.sector == s1
+
+    s2 = cc.SectorConfig(center_deg=270.0, half_width_deg=10.0)
+    a.sectors = [s1, s2]                           # multi-sector setter
+    assert a.sector == s1                          # back-compat getter = first sector
+
+
+def test_autosteer_sectors_kwarg_overrides_positional():
+    s_pos = cc.SectorConfig(center_deg=0.0, half_width_deg=45.0)
+    s_a = cc.SectorConfig(center_deg=10.0, half_width_deg=15.0)
+    s_b = cc.SectorConfig(center_deg=200.0, half_width_deg=15.0)
+    a = _autosteer(GEOM, s_pos, sectors=[s_a, s_b])
+    assert a.sectors == [s_a, s_b]

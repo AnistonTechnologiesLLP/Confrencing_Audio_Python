@@ -1008,12 +1008,15 @@ class Canvas(QWidget):
         # DOA rays mutually consistent (both rotated alike) AND makes them agree with the seat ring /
         # seat dots, which live in true room coordinates.
         bearing = float(ov.get("bearing") or 0.0)
-        # steering sector (auto-steer): centre ± half-width, in the sector-gate convention of
-        # conf_pipeline_control.doa, lifted into room coordinates by the array bearing.
-        sector = ov.get("sector")
-        front = sector[2] if sector else 0.0
-        if sector:
-            center_deg, half_deg, _off = sector
+        # steering sectors (auto-steer): one or more arcs, each centre ± half-width in the sector-gate
+        # convention of conf_pipeline_control.doa, lifted into room coordinates by the array bearing.
+        # Talkers inside ANY arc are followed; the gaps between arcs are cut. ``sectors`` is the list;
+        # ``sector`` is the legacy single-arc fallback (front offset is shared, so take it from either).
+        sectors = ov.get("sectors")
+        if not sectors and ov.get("sector"):
+            sectors = [ov["sector"]]
+        front = sectors[0][2] if sectors else 0.0
+        for center_deg, half_deg, _off in sectors or []:
             radius_m = 2.5
             path = QPainterPath(c)
             steps = 24
