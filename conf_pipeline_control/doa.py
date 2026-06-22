@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Iterable, Optional, Tuple
 
 from .geometry import SOUND_SPEED_MPS, ArrayGeometry
 
@@ -193,6 +193,26 @@ def sector_gate(detections: list, center_deg: float, half_width_deg: float, *, f
         d.in_sector = in_sector(
             d.azimuth_deg, center_deg, half_width_deg, front_offset_deg=front_offset_deg
         )
+    return detections
+
+
+def in_any_sector(azimuth_deg: float, specs: Iterable[Tuple[float, float, float]]) -> bool:
+    """True if ``azimuth_deg`` is inside ANY sector (wrap-aware).
+
+    ``specs`` is an iterable of ``(center_deg, half_width_deg, front_offset_deg)``
+    tuples — primitives, not ``SectorConfig``, to avoid a circular import
+    (``autosteer`` imports ``doa``). Empty ``specs`` → no coverage → ``False``."""
+    return any(
+        in_sector(azimuth_deg, c, hw, front_offset_deg=off) for (c, hw, off) in specs
+    )
+
+
+def sector_gate_multi(detections: list, specs: Iterable[Tuple[float, float, float]]) -> list:
+    """Mark each detection's ``in_sector`` flag against a LIST of sectors (in any
+    sector → in). Mutates and returns the list. Empty ``specs`` → all out."""
+    specs = list(specs)                       # allow a one-shot iterable; reused per detection
+    for d in detections:
+        d.in_sector = in_any_sector(d.azimuth_deg, specs)
     return detections
 
 

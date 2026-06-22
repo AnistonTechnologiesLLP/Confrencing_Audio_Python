@@ -92,6 +92,7 @@ class AutoSteerController:
         hold_seconds: float = 0.6,
         reselect_deg: float = 8.0,
         gate_when_empty: bool = True,
+        sectors: Optional[Sequence[SectorConfig]] = None,   # multiple coverage arcs; overrides ``sector`` when given
         monitor: bool = False,
         output_device: Optional[int] = None,
         record_path: Optional[str] = None,
@@ -121,7 +122,11 @@ class AutoSteerController:
         zone_cut: bool = False,                 # cut the door + anyone outside the pickup area
     ):
         self.geometry = geometry
-        self.sector = sector
+        # Canonical coverage state is a LIST of sectors. A talker is "in coverage" if it falls
+        # inside ANY of them; the gaps between sectors are nulled / muted. ``sector`` (single) is
+        # kept for back-compat via the properties below. Rebind this list atomically to change
+        # coverage live — never mutate it in place (it's read lock-free by the control tick).
+        self._sectors: list = list(sectors) if sectors else [sector]
         self._config = config
         self._array_id = array_id
         self.zone_cut = bool(zone_cut)
@@ -204,6 +209,26 @@ class AutoSteerController:
     def __exit__(self, *exc):
         self.stop()
 
+    # ---- coverage sectors (live-settable) ----
+    @property
+    def sectors(self) -> list:
+        """The coverage arcs. A talker inside ANY of them is followed; the gaps are cut. Assign a
+        NEW list to change coverage at runtime (read once per control tick) — never mutate in place."""
+        return self._sectors
+
+    @sectors.setter
+    def sectors(self, value: Optional[Sequence[SectorConfig]]) -> None:
+        self._sectors = list(value) if value else []
+
+    @property
+    def sector(self) -> SectorConfig:
+        """Back-compat: the first coverage sector (or a neutral default if none are set)."""
+        return self._sectors[0] if self._sectors else SectorConfig()
+
+    @sector.setter
+    def sector(self, value: SectorConfig) -> None:
+        self._sectors = [value]
+
     # ---- readout ----
     def detections(self) -> list:
         """Copy of the latest gated detections (``Detection`` list, in/out flagged)."""
@@ -281,12 +306,9 @@ class AutoSteerController:
             min_salience_db=self.min_salience_db,
             vad_floor_db=self.vad_floor_db,
         )
-        doa.sector_gate(
-            res.detections,
-            self.sector.center_deg,
-            self.sector.half_width_deg,
-            front_offset_deg=self.sector.front_offset_deg,
-        )
+        secs = self._sectors                       # read the rebindable list ONCE (consistent snapshot)
+        specs = [(s.center_deg, s.half_width_deg, s.front_offset_deg) for s in secs]
+        doa.sector_gate_multi(res.detections, specs)
         with self._lock:
             self._detections = res.detections
 
