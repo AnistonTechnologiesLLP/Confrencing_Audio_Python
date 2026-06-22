@@ -325,11 +325,15 @@ class LivePanel(PanelBase):
         self.live_limits_info.setProperty("hintChip", "true")
         self.live_limits_info.setCursor(Qt.WhatsThisCursor)
         self.live_limits_info.setToolTip(
-            "<b>POLARIS array — physical limits</b><br>"
+            "<b>POLARIS array — physical limits</b> (scope, not bugs)<br>"
             "• <b>Azimuth only</b> — a planar 8-mic ring; it steers left/right but cannot resolve elevation.<br>"
             "• <b>~5.6 kHz</b> spatial-aliasing ceiling (≈40 mm aperture); the beam grates above it.<br>"
             "• <b>Two talkers within ~40–50°</b> merge into one lobe — they can't be separated.<br>"
-            "• <b>Front/back ambiguous</b> — one planar ring, so mirrored directions look alike to the DOA."
+            "• <b>Front/back ambiguous</b> — one planar ring, so mirrored directions look alike to the DOA.<br>"
+            "• <b>One active speaker at a time</b> — it selects/follows the talker (switched); it does not "
+            "open multiple zones simultaneously like an 8-lobe ceiling array.<br>"
+            "• <b>Azimuth + seat, not XYZ</b> — it reports a direction and the nearest room seat, not 3-D "
+            "coordinates; it isn't a drop-in camera-tracking XYZ source."
         )
         bf.addRow("Limits", self.live_limits_info)
         beam.body_lay.addLayout(bf)
