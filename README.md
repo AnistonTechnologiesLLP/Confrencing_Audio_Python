@@ -55,6 +55,7 @@ per-zone**:
 | Steerable Coverage (manual lobes) | design pickup zones | ✓ — zones |
 | Talker localization (XYZ for camera tracking) | azimuth + nearest room seat | partial — **no XYZ** (triangulation = roadmap) |
 | Autofocus (re-aim as people move) | continuous DOA re-steer | ✓ |
+| Data-estimated steering (real-room covariance) | `rtf_mvdr` — GEVD max-SNR over measured target/noise covariance; SRP-PHAT still gates frames + cross-checks; falls back to plane-wave MVDR; opt-in, A-B-engine path | ✓ — `PolarisBeamformer` / A-B engine (v1) |
 
 ### Why ours is different: the chain is inspectable, not a black box
 
@@ -607,8 +608,12 @@ above:
 
 - **Steered** — `cc.PolarisBeamformer` runs **SRP-PHAT** direction-finding and steers a
   beam at the dominant talker (active-speaker isolation), with talker-hold smoothing and
-  opt-in wait-for-device / auto-reconnect. Four selectable strategies — `delaysum`,
-  sub-sample `fracdelay`, frequency-domain `superdirective`, and data-adaptive `mvdr`
+  opt-in wait-for-device / auto-reconnect. Five selectable strategies — `delaysum`,
+  sub-sample `fracdelay`, frequency-domain `superdirective`, data-adaptive `mvdr`,
+  and **`rtf_mvdr`** (GEVD / max-SNR over a measured target-vs-noise covariance —
+  captures real reverb and per-capsule mismatch; falls back to plane-wave MVDR during
+  warmup or when the SRP-PHAT cross-check fails; opt-in, `PolarisBeamformer` / A-B-engine
+  path only)
   (each behind a `plan_look`/`commit_look` contract so the heavy per-bin solve stays off
   the audio callback). The frequency-domain modes place **exact LCMV nulls**:
   `auto_null=True` follows the talker **and nulls the other detected interferers**, and
