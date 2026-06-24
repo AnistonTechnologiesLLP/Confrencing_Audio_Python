@@ -1157,6 +1157,9 @@ class PolarisBeamformer(PreampHost, MicController):
         # NR floor learns from cold-start audio until the DOA thread confirms a noise-only frame.
         self._noise_gate = False
         self._noise_cov_alpha = 0.05
+        self._target_cov: Any = None         # (n_band, M, M) EMA, gated on confident-talker frames (RTF-MVDR)
+        self._target_frames = 0
+        self._target_cov_alpha = 0.05
 
         self.device = device
         self.sample_rate = float(sample_rate)
@@ -1334,6 +1337,24 @@ class PolarisBeamformer(PreampHost, MicController):
             if self._noise_cov is None:                  # re-check: a concurrent reset may have cleared it
                 return None
             return self._noise_cov.copy(), self._cov_band
+
+    def _accumulate_rtf_covariance(self, inst: Any, *, target_present: bool,
+                                   noise_only: bool = False) -> None:
+        """Three-way gated EMA update (audio thread, holds the cov lock at the call site).
+
+        ``inst`` is the per-band instantaneous cross-spectrum ``(n_band, M, M)``. A confident-talker
+        frame trains ``_target_cov``; a ``noise_only`` frame trains ``_noise_cov`` (today's path);
+        an ambiguous frame trains neither, so neither covariance is contaminated."""
+        if target_present and self._target_cov is not None:
+            a = self._target_cov_alpha
+            self._target_cov *= (1.0 - a)
+            self._target_cov += a * inst
+            self._target_frames += 1
+        elif noise_only and self._noise_cov is not None:
+            an = self._noise_cov_alpha
+            self._noise_cov *= (1.0 - an)
+            self._noise_cov += an * inst
+            self._noise_frames += 1
 
     # ---- public API ----
     def start(self) -> None:
@@ -1632,8 +1653,11 @@ class PolarisBeamformer(PreampHost, MicController):
         self._cov_freqs = freqs_full[self._cov_band]
         with self._cov_lock:
             self._cov = np.zeros((len(self._cov_band), self.n_channels, self.n_channels), dtype=complex)
-            if self.mode == MODE_MVDR:                          # gated noise covariance for the MVDR solve
+            if self.mode in (MODE_MVDR, MODE_RTF_MVDR):        # gated noise covariance for the MVDR solve
                 self._noise_cov = np.zeros_like(self._cov)
+            if self.mode == MODE_RTF_MVDR:                     # gated target covariance for the RTF estimate
+                self._target_cov = np.zeros_like(self._cov)
+                self._target_frames = 0
         self._noise_frames = 0
         if self.beam_bandlimit_hz:
             # Anti-alias the beam output: a Hann-windowed-sinc low-pass at the band-limit
@@ -1819,6 +1843,7 @@ class PolarisBeamformer(PreampHost, MicController):
         with self._cov_lock:
             self._cov = None
             self._noise_cov = None
+            self._target_cov = None
         self._stftbuf = None
         self._level = 0.0
         self._streaming = False
@@ -1921,7 +1946,10 @@ class PolarisBeamformer(PreampHost, MicController):
                 self._cov[...] = 0.0
             if self._noise_cov is not None:
                 self._noise_cov[...] = 0.0
+            if self._target_cov is not None:
+                self._target_cov[...] = 0.0
         self._noise_frames = 0
+        self._target_frames = 0
         self._noise_gate = False              # re-acquire on the next DOA tick (don't train on the switch transient)
         if self._stftbuf is not None and self._np is not None:
             self._stftbuf = self._np.zeros((0, self.n_channels), dtype=float)
@@ -2072,6 +2100,7 @@ class PolarisBeamformer(PreampHost, MicController):
         with self._cov_lock:
             self._cov = None              # don't let stale covariance drive DOA after a drop
             self._noise_cov = None
+            self._target_cov = None
 
     def _raw_level(self) -> float:
         return self._level
@@ -2125,7 +2154,11 @@ class PolarisBeamformer(PreampHost, MicController):
                 if self._cov is not None:                            # release_external/drop may have nulled either
                     self._cov *= (1.0 - a)
                     self._cov += a * inst
-                if gate and self._noise_cov is not None:
+                if self.mode == MODE_RTF_MVDR:
+                    self._accumulate_rtf_covariance(
+                        inst, target_present=not gate, noise_only=gate,
+                    )
+                elif gate and self._noise_cov is not None:
                     an = self._noise_cov_alpha
                     self._noise_cov *= (1.0 - an)
                     self._noise_cov += an * inst

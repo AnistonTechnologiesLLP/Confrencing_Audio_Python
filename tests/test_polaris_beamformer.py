@@ -1225,3 +1225,20 @@ def test_rtf_mvdr_mode_is_accepted():
     assert MODE_RTF_MVDR in _BEAM_MODES
     bf = PolarisBeamformer(device=None, mode=MODE_RTF_MVDR)   # constructs without raising
     assert bf.mode == MODE_RTF_MVDR
+
+
+def test_target_and_noise_covariances_are_gated_separately():
+    import numpy as np
+    from conf_pipeline_control.polaris_beamformer import PolarisBeamformer, MODE_RTF_MVDR
+    bf = PolarisBeamformer(device=None, mode=MODE_RTF_MVDR)
+    bf._setup_runtime()                                  # device-free allocation
+    assert bf._target_cov is not None and bf._noise_cov is not None
+    assert bf._target_frames == 0
+    nb = bf._target_cov.shape[0]; M = bf._target_cov.shape[1]
+    inst = np.tile(np.eye(M, dtype=complex), (nb, 1, 1))
+    bf._accumulate_rtf_covariance(inst, target_present=True)    # talker frame
+    assert bf._target_frames == 1
+    bf._accumulate_rtf_covariance(inst, target_present=False, noise_only=True)   # noise frame
+    assert bf._noise_frames >= 1 and bf._target_frames == 1
+    bf._accumulate_rtf_covariance(inst, target_present=False, noise_only=False)  # ambiguous → neither
+    assert bf._target_frames == 1
