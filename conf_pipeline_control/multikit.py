@@ -33,6 +33,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional, Sequence
 
+from .fence import KitPose, KitReading
 from .agc import (
     DEFAULT_AGC_MAX_GAIN_DB,
     DEFAULT_AGC_SILENCE_DB,
@@ -288,6 +289,7 @@ class MultiKitController:
         self._kit_mute = [False] * n
         self._kit_gain_db = [0.0] * n
         self._engines: list[Any] = [None] * n
+        self._fence_poses: list = [None] * n
         self._active = 0
         self._fading = False
         self._fade_step = 0
@@ -329,6 +331,54 @@ class MultiKitController:
             out.append(KitStatus(index=k, active=(k == active), doa_deg=doa,
                                  level=levels[k], score=scores[k], dead=dead[k], error=errs[k]))
         return out
+
+    # ---- fence accessors (control-thread, read-only in Task 2) ----
+
+    def set_fence_poses(self, poses: Sequence[Optional[KitPose]]) -> None:
+        """Store per-kit room poses for the audio fence.
+
+        Called from the control thread (GUI connect / test setup) before the
+        fence decider is ticked.  Holds the controller lock only long enough to
+        replace the list — no engine calls inside the lock.
+
+        Args:
+            poses: one :class:`KitPose` (or ``None``) per kit, in kit-index order.
+        """
+        with self._lock:
+            self._fence_poses = list(poses)
+
+    def kit_reading(self, k: int) -> Optional[KitReading]:
+        """Return a :class:`KitReading` snapshot for kit *k*, or ``None`` if that
+        kit's engine has not started.
+
+        The controller lock is held only to snapshot ``_engines[k]`` and
+        ``_levels[k]``; ``eng.reading()`` is called **outside** the controller
+        lock so the short engine-internal ``_state_lock`` is never acquired while
+        the controller lock is held (avoids lock ordering issues).
+
+        Args:
+            k: kit index (0-based).
+
+        Returns:
+            A :class:`KitReading`, or ``None`` when the engine slot is ``None``.
+        """
+        with self._lock:
+            eng = self._engines[k]
+            level = self._levels[k]
+        if eng is None:
+            return None
+        try:
+            dr = eng.reading()
+        except Exception:
+            return KitReading(azimuth_deg=None, salience_db=0.0, level=level, active=False)
+        if dr is None:
+            return KitReading(azimuth_deg=None, salience_db=0.0, level=level, active=False)
+        return KitReading(
+            azimuth_deg=dr.azimuth_deg,
+            salience_db=dr.salience_db,
+            level=level,
+            active=(dr.active or dr.held),
+        )
 
     # ---- mute / gain (master, or per-kit) ----
     def set_mute(self, muted: bool, *, kit: Optional[int] = None) -> None:

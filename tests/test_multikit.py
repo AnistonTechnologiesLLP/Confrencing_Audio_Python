@@ -24,6 +24,9 @@ from conf_pipeline_control.multikit import (
     _default_engine_factory,
     crossfade_gains,
 )
+from conf_pipeline_control.fence import KitPose, KitReading
+from conf_pipeline_control.polaris_beamformer import DoaReading
+from conf_pipeline.model import Point2D
 
 np = pytest.importorskip("numpy")
 
@@ -173,12 +176,20 @@ class _Clock:
 
 class _StubEngine:
     """Stands in for a PolarisBeamformer: the controller registers a tap as our
-    output_callback; the test drives blocks through it with ``emit``."""
+    output_callback; the test drives blocks through it with ``emit``.
+
+    Also exposes a settable ``_doa_reading`` so Task-2 tests can verify
+    ``kit_reading()`` maps DoaReading → KitReading correctly.
+    """
 
     def __init__(self) -> None:
         self._tap = None
         self.started = False
         self.current_doa_deg = None
+        # Settable for Task-2 kit_reading tests
+        self._doa_reading: DoaReading = DoaReading(
+            azimuth_deg=None, salience_db=0.0, held=False, active=False
+        )
 
     def start(self) -> None:
         self.started = True
@@ -189,6 +200,10 @@ class _StubEngine:
     def emit(self, block) -> None:
         if self._tap is not None:
             self._tap(block)
+
+    def reading(self) -> DoaReading:
+        """Return the current (settable) DoaReading snapshot."""
+        return self._doa_reading
 
 
 def _stub_factory(collect):
@@ -341,3 +356,159 @@ def test_controller_one_kit_fails_to_start_others_run():
     st = c.status()
     assert st[0].dead and st[0].error
     assert not st[1].dead
+
+
+# --------------------------------------------------------------------------- #
+# Task-2: set_fence_poses + kit_reading (read-only accessors, no _produce change)
+# --------------------------------------------------------------------------- #
+
+def test_set_fence_poses_stores_under_lock():
+    """set_fence_poses persists poses retrievable from _fence_poses."""
+    c, stubs = _ctrl()
+    c.start()
+    pose0 = KitPose(position=Point2D(0.0, 0.0), bearing_deg=0.0)
+    pose1 = KitPose(position=Point2D(1.5, 0.0), bearing_deg=90.0)
+    c.set_fence_poses([pose0, pose1])
+    with c._lock:
+        stored = list(c._fence_poses)
+    assert stored[0] == pose0
+    assert stored[1] == pose1
+
+
+def test_set_fence_poses_accepts_none_entries():
+    """None entries are valid (partial configuration)."""
+    c, _ = _ctrl()
+    c.start()
+    c.set_fence_poses([None, None])
+    with c._lock:
+        stored = list(c._fence_poses)
+    assert stored == [None, None]
+
+
+def test_set_fence_poses_initialised_to_none_in_ctor():
+    """_fence_poses slot exists and is all-None before any set_fence_poses call."""
+    c, _ = _ctrl()
+    with c._lock:
+        stored = list(c._fence_poses)
+    assert stored == [None, None]
+
+
+def test_kit_reading_maps_doa_reading_and_level():
+    """kit_reading returns a KitReading with azimuth/salience from DoaReading
+    and the controller's own level snapshot."""
+    c, stubs = _ctrl()
+    c.start()
+    bs = c.blocksize
+    # Emit a block so _levels[0] is non-zero
+    stubs[0].emit(_blk(0.3, bs))
+    # Set a recognisable DoaReading on stub engine 0
+    stubs[0]._doa_reading = DoaReading(
+        azimuth_deg=45.0, salience_db=-8.5, held=False, active=True
+    )
+    kr = c.kit_reading(0)
+    assert kr is not None
+    assert isinstance(kr, KitReading)
+    assert kr.azimuth_deg == pytest.approx(45.0)
+    assert kr.salience_db == pytest.approx(-8.5)
+    assert kr.level > 0.0           # populated from _levels[0]
+    assert kr.active is True        # DoaReading.active=True
+
+
+def test_kit_reading_active_folds_held():
+    """active in KitReading is True when DoaReading.held is True even if active=False."""
+    c, stubs = _ctrl()
+    c.start()
+    stubs[0]._doa_reading = DoaReading(
+        azimuth_deg=10.0, salience_db=-5.0, held=True, active=False
+    )
+    kr = c.kit_reading(0)
+    assert kr is not None
+    assert kr.active is True        # held=True → active in KitReading
+
+
+def test_kit_reading_active_false_when_both_flags_false():
+    """active is False when DoaReading.held=False and active=False."""
+    c, stubs = _ctrl()
+    c.start()
+    stubs[0]._doa_reading = DoaReading(
+        azimuth_deg=None, salience_db=0.0, held=False, active=False
+    )
+    kr = c.kit_reading(0)
+    assert kr is not None
+    assert kr.active is False
+
+
+def test_kit_reading_none_engine_returns_none():
+    """kit_reading returns None when the engine slot is None (kit never started)."""
+    c, _ = _ctrl()
+    # Do NOT call c.start() — engines remain None
+    assert c.kit_reading(0) is None
+    assert c.kit_reading(1) is None
+
+
+def test_kit_reading_none_azimuth_still_returns_kit_reading():
+    """When DoaReading.azimuth_deg is None, kit_reading still returns a KitReading
+    with azimuth_deg=None and active=False (not a Python None)."""
+    c, stubs = _ctrl()
+    c.start()
+    stubs[1]._doa_reading = DoaReading(
+        azimuth_deg=None, salience_db=0.0, held=False, active=False
+    )
+    kr = c.kit_reading(1)
+    assert kr is not None
+    assert kr.azimuth_deg is None
+    assert kr.salience_db == pytest.approx(0.0)
+    assert kr.active is False
+
+
+def test_kit_reading_does_not_hold_controller_lock_while_calling_engine():
+    """Verify the lock is released before calling eng.reading() — detect a
+    potential deadlock by interleaving: if the controller lock were held across
+    eng.reading() a concurrent _on_kit_output (which acquires the same lock)
+    would deadlock.  We simulate this by checking the method returns at all
+    while _on_kit_output runs concurrently (smoke-level, not timing-sensitive)."""
+    import threading
+
+    c, stubs = _ctrl()
+    c.start()
+    bs = c.blocksize
+    results: list = []
+
+    def reader():
+        for _ in range(50):
+            kr = c.kit_reading(0)
+            results.append(kr)
+
+    def emitter():
+        for _ in range(50):
+            stubs[0].emit(_blk(0.1, bs))
+
+    t1 = threading.Thread(target=reader)
+    t2 = threading.Thread(target=emitter)
+    t1.start(); t2.start()
+    t1.join(timeout=5.0); t2.join(timeout=5.0)
+    assert not t1.is_alive() and not t2.is_alive(), "threads did not finish (possible deadlock)"
+    # All non-None results are KitReading instances
+    assert all(isinstance(r, KitReading) for r in results if r is not None)
+
+
+def test_produce_output_unchanged_after_set_fence_poses():
+    """set_fence_poses is purely additive — _produce output is byte-identical to
+    pre-fence baseline (opt-in / bit-exact-off guarantee, Task-2 scope)."""
+    c_base, stubs_base = _ctrl()
+    c_new, stubs_new = _ctrl()
+    c_base.start(); c_new.start()
+    bs = c_base.blocksize
+
+    # Identical stores + scores
+    blk = _blk(0.4, bs)
+    stubs_base[0].emit(blk); stubs_new[0].emit(blk)
+
+    c_new.set_fence_poses([
+        KitPose(position=Point2D(0.0, 0.0), bearing_deg=0.0),
+        KitPose(position=Point2D(1.5, 0.0), bearing_deg=90.0),
+    ])
+
+    out_base = c_base._produce(0.0)
+    out_new = c_new._produce(0.0)
+    assert np.array_equal(out_base, out_new), "set_fence_poses must not alter _produce output"
