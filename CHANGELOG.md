@@ -50,6 +50,34 @@ the TS sibling is at matching v5 parity. The desktop app is presented as
   defaults instead of the removed card's beam-count / snap / record controls).
 
 ### Added
+- **Table fence for the two-kit combined-room mode** (`conf_pipeline_control.fence`; opt-in, off by
+  default) — when two POLARIS kits are running in "Two kits (combined room)" mode, the fence fuses
+  the two independent bearings into an approximate 2D source position (`FenceDecider`: ray-cross /
+  least-squares, `conf_pipeline_control/fence.py`) and keeps sources whose estimated position falls
+  inside an operator-drawn table polygon while **vetoing** those that appear to originate outside it.
+  The veto acts as an **output gate + selection veto** in `MultiKitController` — mode-agnostic (each
+  kit can stay in its own delay-sum or other beam mode; **no null-steering** added in v1). The fence
+  polygon is drawn live with a new freehand polygon tool and is **transient / live-only — never
+  persisted and no schema change**.  Connection is refused with a clear error if fewer than exactly
+  2 posed kits (array `bearingDeg` + position) are connected; an unposed array fails fast at Connect
+  rather than silently.
+
+  **Honest framing (important):**
+  - **Loose-coupling fusion, not clock-synced triangulation.** The two arrays run on independent USB
+    clocks with no inter-device timing; the position estimate is from asynchronous bearings, not a
+    phase-coherent triangulation. Sharper sync triangulation is a deferred future upgrade.
+  - **Soft fence, not a hard wall.** The ~40 mm aperture gives coarse bearings (~40–50° resolution);
+    the fence uses a margin band + hysteresis to avoid flicker at the boundary — it keeps the
+    conference table vs rejects a far-room source, not a surgical edge.
+  - **Range disambiguation, not front/back resolution.** The POLARIS is a circular array (no
+    front/back ambiguity). The fence's value is disambiguating a near table-talker from a far
+    room-source on the same bearing, not resolving front vs back.
+  - **Spacing and angle caveat (deployment-critical).** The two kits must be spaced apart **and
+    not directly facing each other along the talker line** — if both arrays face the same table
+    from exactly opposite sides, their bearing-rays become anti-parallel (degenerate triangulation)
+    even when well-spaced; position estimates are unreliable in this geometry. Corner-place or
+    angle the kits so the two rays cross at a non-degenerate angle. Near-parallel rays fall back to a
+    level cross-check. Degenerate geometry degrades gracefully rather than silently misbehaving.
 - **Voice-focus DSP suite — parametric EQ, tap suppressor, "voice only" gate, and a door / out-of-area cut.**
   Four new opt-in real-time stages on the live beam (all OFF by default, lazy-numpy, realtime-safe; the live
   chain is now `preamp → beam → AEC → transient → dereverb → noise-reduce → PEQ → AGC → band-limit → voice-gate`):

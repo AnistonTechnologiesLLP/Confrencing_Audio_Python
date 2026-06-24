@@ -694,6 +694,32 @@ and never summed twice; the kits combine **volume-domain** (`nom_automix`) becau
 clocks can't be sample-aligned (no joint beamforming across kits — same wall as the 2-kit automix). Clean
 ownership needs snap-to-seats on + arrays posed + seats defined; otherwise it's best-effort and flags it.
 
+**Table fence (two-kit)** — an opt-in spatial gate for the *Two kits (combined room)* listening mode.
+Each kit reports its own DOA bearing; the fence module (`conf_pipeline_control.fence`, `FenceDecider`)
+fuses the two bearings into an approximate 2D source position (ray-cross / least-squares) and passes
+only sources whose estimated position falls inside an operator-drawn table polygon, vetoing the rest via
+an **output gate + selection veto** in `MultiKitController`. The polygon is drawn live with a freehand
+polygon tool; it is **transient / live-only and is never persisted** (no schema change, combined-output
+is byte-identical when the fence is off).
+
+Honest limits to set expectations:
+- **Loose-coupling fusion.** The two arrays run on independent USB clocks; the position estimate is from
+  asynchronous bearings, not a phase-coherent triangulation. Sharper sync triangulation is a future
+  upgrade.
+- **Soft fence.** The ~40 mm aperture gives coarse bearings (~40–50° resolution); a margin band +
+  hysteresis prevents boundary flicker — this keeps the conference table vs rejects a far-room source,
+  not a surgical edge.
+- **Range disambiguation.** The POLARIS is a circular array (no front/back ambiguity). The fence's
+  value is telling apart a near table-talker from a far room-source on the same bearing, not resolving
+  front vs back.
+- **No null-steering** is added by the fence in v1 — it gates selection; the kits can stay in their own
+  delay-sum or other beam mode.
+- **Deployment caveat.** Kits must be spaced apart **and not directly facing each other along the talker
+  line**. Directly-opposite-facing kits make the two bearing-rays anti-parallel (degenerate
+  triangulation) even when well-spaced; corner-place or angle the kits so the rays cross at a useful
+  angle. Near-parallel rays fall back to a level cross-check. Connection is refused with a visible
+  reason if fewer than exactly 2 posed kits (each with `bearingDeg` + position set) are connected.
+
 **Caveat:** the ~cm aperture means coarse-zone selection, not MXA920/Nureva-scale pinpoint — these
 isolate a zone, A/B two strategies, or (with **Capture everyone**) separate 2-3 well-spaced talkers,
 but two people seated close together at one table still merge into a single beam.
