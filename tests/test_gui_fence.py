@@ -956,3 +956,115 @@ class TestFenceDisconnectBehavior:
         assert st.live_fence_polygon == tri, \
             "live_fence_polygon must be kept on disconnect (not cleared)"
         p.deleteLater()
+
+
+# --------------------------------------------------------------------------
+# Test class: controller-throw leaves no half-open session
+# --------------------------------------------------------------------------
+
+class TestControllerThrowNoHalfOpen:
+    """When MultiKitController.start() (or an internal call inside the try block) raises,
+    _twokit_connect must leave _twokit as None (no half-open session) AND surface the
+    reason in the status label."""
+
+    def _make_throwing_mk(self, exc):
+        """Return a _FakeMKWithFence subclass whose start() raises *exc*."""
+        class _ThrowingMK(_FakeMKWithFence):
+            def start(self):
+                raise exc
+        return _ThrowingMK
+
+    def test_controller_start_raises_fenceconfigerror_no_half_open(self, qapp, monkeypatch):
+        """start() raises FenceConfigError → _twokit is None and status carries the message."""
+        import conf_pipeline_gui.panels.live as live_mod
+        from conf_pipeline_gui.panels.live import LivePanel
+        from conf_pipeline_gui.state import AppState
+
+        boom = cc.FenceConfigError("boom")
+        ThrowingMK = self._make_throwing_mk(boom)
+
+        monkeypatch.setattr(live_mod.cc, "controls_available", lambda: True)
+        monkeypatch.setattr(live_mod.cc, "MultiKitController", ThrowingMK)
+
+        st = AppState()
+        st.set_config(_config_two_arrays_positioned_and_bearing())
+        p = LivePanel(st)
+        p.live_listening_mode.setCurrentIndex(p.live_listening_mode.findData("twokit"))
+        _arm_panel_twokit_devices(p)
+        st.set_live_fence_polygon(_triangle_fence())
+        p.live_twokit_fence.setChecked(True)
+
+        p._twokit_connect()
+
+        # (a) no half-open session
+        assert p._twokit is None, (
+            "_twokit must be None after a FenceConfigError in start() — no half-open session"
+        )
+        # (b) error surfaced in the status label
+        msg = p.live_twokit_status.text()
+        assert msg, "status label must be non-empty after a controller throw"
+        assert "boom" in msg, (
+            f"status must contain the exception message 'boom'; got: {msg!r}"
+        )
+        p.deleteLater()
+
+    def test_controller_start_raises_generic_exception_no_half_open(self, qapp, monkeypatch):
+        """start() raises a generic RuntimeError → _twokit is None and status is non-empty."""
+        import conf_pipeline_gui.panels.live as live_mod
+        from conf_pipeline_gui.panels.live import LivePanel
+        from conf_pipeline_gui.state import AppState
+
+        boom = RuntimeError("hardware open failed")
+        ThrowingMK = self._make_throwing_mk(boom)
+
+        monkeypatch.setattr(live_mod.cc, "controls_available", lambda: True)
+        monkeypatch.setattr(live_mod.cc, "MultiKitController", ThrowingMK)
+
+        st = AppState()
+        st.set_config(_config_two_arrays_positioned_and_bearing())
+        p = LivePanel(st)
+        p.live_listening_mode.setCurrentIndex(p.live_listening_mode.findData("twokit"))
+        _arm_panel_twokit_devices(p)
+        st.set_live_fence_polygon(_triangle_fence())
+        p.live_twokit_fence.setChecked(True)
+
+        p._twokit_connect()
+
+        assert p._twokit is None, (
+            "_twokit must be None after a RuntimeError in start() — no half-open session"
+        )
+        msg = p.live_twokit_status.text()
+        assert msg, "status label must carry the error reason"
+        assert "hardware open failed" in msg, (
+            f"status must contain the exception text; got: {msg!r}"
+        )
+        p.deleteLater()
+
+    def test_fence_off_controller_throw_still_no_half_open(self, qapp, monkeypatch):
+        """Fence unchecked but start() still raises → _twokit stays None (off-path coverage)."""
+        import conf_pipeline_gui.panels.live as live_mod
+        from conf_pipeline_gui.panels.live import LivePanel
+        from conf_pipeline_gui.state import AppState
+
+        boom = RuntimeError("device busy")
+        ThrowingMK = self._make_throwing_mk(boom)
+
+        monkeypatch.setattr(live_mod.cc, "controls_available", lambda: True)
+        monkeypatch.setattr(live_mod.cc, "MultiKitController", ThrowingMK)
+
+        st = AppState()
+        st.set_config(_config_two_arrays_positioned_and_bearing())
+        p = LivePanel(st)
+        p.live_listening_mode.setCurrentIndex(p.live_listening_mode.findData("twokit"))
+        _arm_panel_twokit_devices(p)
+        # fence is NOT checked
+        assert not p.live_twokit_fence.isChecked()
+
+        p._twokit_connect()
+
+        assert p._twokit is None, (
+            "_twokit must be None after start() throws even when fence is off"
+        )
+        msg = p.live_twokit_status.text()
+        assert msg, "status label must carry the error reason"
+        p.deleteLater()

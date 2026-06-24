@@ -1987,13 +1987,16 @@ class LivePanel(PanelBase):
             ]
 
         try:
+            mk_kw: dict = {}
+            if fence_polygon is not None:
+                mk_kw["fence_polygon"] = fence_polygon
+                mk_kw["fence_margin_m"] = self.live_twokit_fence_margin.value()
             ctrl = cc.MultiKitController(
                 specs,
                 output_device=self.live_twokit_out.currentData(),
                 sample_rate=44100.0,
                 agc_target_db=agc_db,
-                fence_polygon=fence_polygon,
-                fence_margin_m=self.live_twokit_fence_margin.value(),
+                **mk_kw,
             )
             ctrl.set_gain_db(float(self.live_gain.value()))
             ctrl.set_mute(self.live_mute.isChecked())
