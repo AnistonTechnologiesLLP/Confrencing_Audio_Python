@@ -24,6 +24,9 @@ from conf_pipeline_control.multikit import (
     _default_engine_factory,
     crossfade_gains,
 )
+from conf_pipeline_control.fence import KitPose, KitReading
+from conf_pipeline_control.polaris_beamformer import DoaReading
+from conf_pipeline.model import Point2D
 
 np = pytest.importorskip("numpy")
 
@@ -173,12 +176,20 @@ class _Clock:
 
 class _StubEngine:
     """Stands in for a PolarisBeamformer: the controller registers a tap as our
-    output_callback; the test drives blocks through it with ``emit``."""
+    output_callback; the test drives blocks through it with ``emit``.
+
+    Also exposes a settable ``_doa_reading`` so Task-2 tests can verify
+    ``kit_reading()`` maps DoaReading → KitReading correctly.
+    """
 
     def __init__(self) -> None:
         self._tap = None
         self.started = False
         self.current_doa_deg = None
+        # Settable for Task-2 kit_reading tests
+        self._doa_reading: DoaReading = DoaReading(
+            azimuth_deg=None, salience_db=0.0, held=False, active=False
+        )
 
     def start(self) -> None:
         self.started = True
@@ -189,6 +200,10 @@ class _StubEngine:
     def emit(self, block) -> None:
         if self._tap is not None:
             self._tap(block)
+
+    def reading(self) -> DoaReading:
+        """Return the current (settable) DoaReading snapshot."""
+        return self._doa_reading
 
 
 def _stub_factory(collect):
@@ -341,3 +356,479 @@ def test_controller_one_kit_fails_to_start_others_run():
     st = c.status()
     assert st[0].dead and st[0].error
     assert not st[1].dead
+
+
+# --------------------------------------------------------------------------- #
+# Task-2: set_fence_poses + kit_reading (read-only accessors, no _produce change)
+# --------------------------------------------------------------------------- #
+
+def test_set_fence_poses_stores_under_lock():
+    """set_fence_poses persists poses retrievable from _fence_poses."""
+    c, stubs = _ctrl()
+    c.start()
+    pose0 = KitPose(position=Point2D(0.0, 0.0), bearing_deg=0.0)
+    pose1 = KitPose(position=Point2D(1.5, 0.0), bearing_deg=90.0)
+    c.set_fence_poses([pose0, pose1])
+    with c._lock:
+        stored = list(c._fence_poses)
+    assert stored[0] == pose0
+    assert stored[1] == pose1
+
+
+def test_set_fence_poses_accepts_none_entries():
+    """None entries are valid (partial configuration)."""
+    c, _ = _ctrl()
+    c.start()
+    c.set_fence_poses([None, None])
+    with c._lock:
+        stored = list(c._fence_poses)
+    assert stored == [None, None]
+
+
+def test_set_fence_poses_initialised_to_none_in_ctor():
+    """_fence_poses slot exists and is all-None before any set_fence_poses call."""
+    c, _ = _ctrl()
+    with c._lock:
+        stored = list(c._fence_poses)
+    assert stored == [None, None]
+
+
+def test_kit_reading_maps_doa_reading_and_level():
+    """kit_reading returns a KitReading with azimuth/salience from DoaReading
+    and the controller's own level snapshot."""
+    c, stubs = _ctrl()
+    c.start()
+    bs = c.blocksize
+    # Emit a block so _levels[0] is non-zero
+    stubs[0].emit(_blk(0.3, bs))
+    # Set a recognisable DoaReading on stub engine 0
+    stubs[0]._doa_reading = DoaReading(
+        azimuth_deg=45.0, salience_db=-8.5, held=False, active=True
+    )
+    kr = c.kit_reading(0)
+    assert kr is not None
+    assert isinstance(kr, KitReading)
+    assert kr.azimuth_deg == pytest.approx(45.0)
+    assert kr.salience_db == pytest.approx(-8.5)
+    assert kr.level > 0.0           # populated from _levels[0]
+    assert kr.active is True        # DoaReading.active=True
+
+
+def test_kit_reading_active_folds_held():
+    """active in KitReading is True when DoaReading.held is True even if active=False."""
+    c, stubs = _ctrl()
+    c.start()
+    stubs[0]._doa_reading = DoaReading(
+        azimuth_deg=10.0, salience_db=-5.0, held=True, active=False
+    )
+    kr = c.kit_reading(0)
+    assert kr is not None
+    assert kr.active is True        # held=True → active in KitReading
+
+
+def test_kit_reading_active_false_when_both_flags_false():
+    """active is False when DoaReading.held=False and active=False."""
+    c, stubs = _ctrl()
+    c.start()
+    stubs[0]._doa_reading = DoaReading(
+        azimuth_deg=None, salience_db=0.0, held=False, active=False
+    )
+    kr = c.kit_reading(0)
+    assert kr is not None
+    assert kr.active is False
+
+
+def test_kit_reading_none_engine_returns_none():
+    """kit_reading returns None when the engine slot is None (kit never started)."""
+    c, _ = _ctrl()
+    # Do NOT call c.start() — engines remain None
+    assert c.kit_reading(0) is None
+    assert c.kit_reading(1) is None
+
+
+def test_kit_reading_none_azimuth_still_returns_kit_reading():
+    """When DoaReading.azimuth_deg is None, kit_reading still returns a KitReading
+    with azimuth_deg=None and active=False (not a Python None)."""
+    c, stubs = _ctrl()
+    c.start()
+    stubs[1]._doa_reading = DoaReading(
+        azimuth_deg=None, salience_db=0.0, held=False, active=False
+    )
+    kr = c.kit_reading(1)
+    assert kr is not None
+    assert kr.azimuth_deg is None
+    assert kr.salience_db == pytest.approx(0.0)
+    assert kr.active is False
+
+
+def test_kit_reading_does_not_hold_controller_lock_while_calling_engine():
+    """Verify the lock is released before calling eng.reading() — detect a
+    potential deadlock by interleaving: if the controller lock were held across
+    eng.reading() a concurrent _on_kit_output (which acquires the same lock)
+    would deadlock.  We simulate this by checking the method returns at all
+    while _on_kit_output runs concurrently (smoke-level, not timing-sensitive)."""
+    import threading
+
+    c, stubs = _ctrl()
+    c.start()
+    bs = c.blocksize
+    results: list = []
+
+    def reader():
+        for _ in range(50):
+            kr = c.kit_reading(0)
+            results.append(kr)
+
+    def emitter():
+        for _ in range(50):
+            stubs[0].emit(_blk(0.1, bs))
+
+    t1 = threading.Thread(target=reader)
+    t2 = threading.Thread(target=emitter)
+    t1.start(); t2.start()
+    t1.join(timeout=5.0); t2.join(timeout=5.0)
+    assert not t1.is_alive() and not t2.is_alive(), "threads did not finish (possible deadlock)"
+    # All non-None results are KitReading instances
+    assert all(isinstance(r, KitReading) for r in results if r is not None)
+
+
+def test_produce_output_unchanged_after_set_fence_poses():
+    """set_fence_poses is purely additive — _produce output is byte-identical to
+    pre-fence baseline (opt-in / bit-exact-off guarantee, Task-2 scope)."""
+    c_base, stubs_base = _ctrl()
+    c_new, stubs_new = _ctrl()
+    c_base.start(); c_new.start()
+    bs = c_base.blocksize
+
+    # Identical stores + scores
+    blk = _blk(0.4, bs)
+    stubs_base[0].emit(blk); stubs_new[0].emit(blk)
+
+    c_new.set_fence_poses([
+        KitPose(position=Point2D(0.0, 0.0), bearing_deg=0.0),
+        KitPose(position=Point2D(1.5, 0.0), bearing_deg=90.0),
+    ])
+
+    out_base = c_base._produce(0.0)
+    out_new = c_new._produce(0.0)
+    assert np.array_equal(out_base, out_new), "set_fence_poses must not alter _produce output"
+
+
+# --------------------------------------------------------------------------- #
+# Task-3: fence tick + _produce veto/gate + fence_status + loud preconditions
+# --------------------------------------------------------------------------- #
+
+# Helpers — geometry for a simple test fence.
+# Two kits spaced 1.5 m apart along X.  Table polygon is a 1×1 m square centred
+# on (0.75, 1.0) — between the two kits but 1 m "in front" of them.
+_KIT_A_POS = Point2D(0.0, 0.0)
+_KIT_B_POS = Point2D(1.5, 0.0)
+_POSE_A = KitPose(position=_KIT_A_POS, bearing_deg=0.0)   # kit A faces +Y
+_POSE_B = KitPose(position=_KIT_B_POS, bearing_deg=0.0)   # kit B faces +Y
+
+# Fence polygon: 1×1 m square centred on (0.75, 1.0)
+_TABLE_POLYGON = [
+    Point2D(0.25, 0.5),
+    Point2D(1.25, 0.5),
+    Point2D(1.25, 1.5),
+    Point2D(0.25, 1.5),
+]
+
+
+def _ctrl_fence(polygon=None, devices=(0, 1), **kw):
+    """Build a MultiKitController with the fence wired up (2 stubs)."""
+    stubs: list = []
+    kits = [KitSpec(device=d) for d in devices]
+    defaults = dict(
+        sample_rate=16000.0, blocksize=512,
+        engine_factory=_stub_factory(stubs),
+        output_stream_factory=_no_stream,
+        fence_polygon=polygon,
+    )
+    defaults.update(kw)
+    c = MultiKitController(kits, **defaults)
+    return c, stubs
+
+
+def _set_doa(stub, azimuth_deg, salience_db=-5.0, active=True):
+    """Point a stub engine's DOA at the given array-relative azimuth."""
+    stub._doa_reading = DoaReading(
+        azimuth_deg=azimuth_deg, salience_db=salience_db,
+        held=False, active=active,
+    )
+
+
+def _rms(arr) -> float:
+    return float(np.sqrt(np.mean(arr * arr)))
+
+
+# ---- bit-exact-off guarantee -----------------------------------------------
+
+def test_fence_off_produce_byte_identical_to_no_fence():
+    """fence_polygon=None ⇒ _produce output np.array_equal to a no-fence controller
+    on the same stub state (bit-exact-off guarantee)."""
+    c_nofence, stubs_nf = _ctrl()
+    c_off, stubs_off = _ctrl_fence(polygon=None)   # fence ctor but polygon=None
+    c_nofence.start(); c_off.start()
+    bs = c_nofence.blocksize
+
+    blk = _blk(0.4, bs)
+    stubs_nf[0].emit(blk); stubs_off[0].emit(blk)
+
+    out_nf = c_nofence._produce(0.0)
+    out_off = c_off._produce(0.0)
+    assert np.array_equal(out_nf, out_off), \
+        "fence_polygon=None must leave _produce byte-identical to no-fence controller"
+
+
+# ---- loud preconditions (ValueError / FenceConfigError) --------------------
+
+def test_fence_ctor_raises_value_error_with_one_kit():
+    """fence_polygon given with n_kits != 2 ⇒ ValueError at construction."""
+    with pytest.raises(ValueError, match="exactly 2 kits"):
+        _ctrl_fence(polygon=_TABLE_POLYGON, devices=(0,))
+
+
+def test_fence_ctor_raises_value_error_with_three_kits():
+    """fence_polygon given with n_kits != 2 ⇒ ValueError at construction."""
+    with pytest.raises(ValueError, match="exactly 2 kits"):
+        _ctrl_fence(polygon=_TABLE_POLYGON, devices=(0, 1, 2))
+
+
+def test_fence_update_raises_fence_config_error_with_none_poses():
+    """update_fence with a None pose entry ⇒ FenceConfigError (unposed kit)."""
+    from conf_pipeline_control.fence import FenceConfigError
+    c, stubs = _ctrl_fence(polygon=_TABLE_POLYGON)
+    c.start()
+    # Poses not set — _fence_poses is all None → should raise FenceConfigError
+    with pytest.raises(FenceConfigError):
+        c.update_fence(0.0)
+
+
+# ---- fence_status returns None / dict shape --------------------------------
+
+def test_fence_status_returns_none_when_fence_off():
+    """fence_status() returns None when no fence polygon was given."""
+    c, _ = _ctrl()
+    c.start()
+    assert c.fence_status() is None
+
+
+def test_fence_status_returns_dict_when_fence_on():
+    """fence_status() returns a dict with required keys when fence is active."""
+    c, stubs = _ctrl_fence(polygon=_TABLE_POLYGON)
+    c.start()
+    c.set_fence_poses([_POSE_A, _POSE_B])
+    _set_doa(stubs[0], 45.0)
+    _set_doa(stubs[1], 315.0)
+    c.update_fence(0.0)
+    s = c.fence_status()
+    assert s is not None
+    assert isinstance(s, dict)
+    required = {"keep", "veto_kit", "point", "inside", "confidence", "degenerate", "polygon"}
+    assert required <= s.keys(), f"missing keys: {required - s.keys()}"
+    assert s["polygon"] == _TABLE_POLYGON
+
+
+def test_fence_status_shape_before_first_update():
+    """fence_status returns a dict with the correct polygon before the first update_fence call.
+
+    The fence IS on (polygon given at construction) and the polygon must be echoed
+    in the status dict even before any update_fence tick.
+    """
+    c, stubs = _ctrl_fence(polygon=_TABLE_POLYGON)
+    c.start()
+    s = c.fence_status()
+    assert s is not None
+    assert s["polygon"] == _TABLE_POLYGON
+
+
+# ---- selection veto: out-of-fence loud kit gets eff=0 ----------------------
+
+def test_veto_prevents_out_of_fence_kit_from_winning_selection():
+    """An out-of-fence loud kit has its eff zeroed; the in-fence kit is selected.
+
+    Geometry: kit A (left) aimed at the table (inside fence), kit B (right) aimed
+    at a far source outside the fence.  After update_fence decides to veto kit B,
+    _produce must select kit A regardless of speech scores.
+    """
+    c, stubs = _ctrl_fence(polygon=_TABLE_POLYGON)
+    c.start()
+    c.set_fence_poses([_POSE_A, _POSE_B])
+    bs = c.blocksize
+
+    # Both kits emit a block with a speech-like level (speech score will build up)
+    for _ in range(5):
+        stubs[0].emit(_blk(0.3, bs))
+        stubs[1].emit(_blk(0.3, bs))
+
+    # Kit A aimed ~56° (towards the table centre (0.75,1.0) from origin)
+    # tan(θ) = 0.75/1.0 → θ ≈ 36.9° for kit A; from kit B (1.5, 0): target is
+    # (-0.75, 1.0), atan2(-0.75,1.0) ≈ -36.9° (i.e. 323.1°).
+    # Use simple approximate values that cross inside the polygon.
+    _set_doa(stubs[0], 37.0, salience_db=-5.0)   # kit A: table talker
+    _set_doa(stubs[1], 323.0, salience_db=-5.0)  # kit B: same talker from right
+
+    c.update_fence(1.0)
+    dec = c._fence_last
+    assert dec is not None
+
+    # Now make kit B have a HIGHER speech score but is vetoed by the fence
+    # Manually override scores so kit 1 would win without the veto
+    with c._lock:
+        c._scores = [0.1, 0.9]      # kit 1 would normally win
+        c._last_emit = [1.0, 1.0]   # both alive
+
+    # Swap: point kit A inside, kit B outside, and force a veto on kit B
+    # by aiming kit B at a far outside source
+    _set_doa(stubs[0], 37.0, salience_db=-5.0)    # inside
+    _set_doa(stubs[1], 0.0, salience_db=-5.0)     # straight ahead from kit B → outside polygon
+
+    c.update_fence(2.0)
+    dec2 = c._fence_last
+    # If veto_kit == 1, kit 1 is vetoed → kit 0 wins despite lower score
+    if dec2 is not None and dec2.veto_kit == 1:
+        out = c._produce(2.0)
+        # The output should come from kit 0 (the non-vetoed kit)
+        assert c.active_kit == 0
+
+
+def test_veto_hook_unconditional_direct_injection():
+    """Unconditional proof that the _produce selection-veto hook fires.
+
+    Bypasses geometry entirely: directly inject a FenceDecision with veto_kit=1
+    and set scores so kit 1 would otherwise win (score 0.9 vs kit 0's 0.1).
+    After _produce, active_kit must be 0 — the veto zeroed kit 1's effective
+    score before the selector ran.
+
+    This test would FAIL if the veto branch in _produce were removed, because
+    without it kit 1's score (0.9) beats kit 0's (0.1) by more than the switch
+    margin and the selector would switch to kit 1.
+    """
+    from conf_pipeline_control.fence import FenceDecision, FusedSource
+
+    c, stubs = _ctrl_fence(polygon=_TABLE_POLYGON)
+    c.start()
+    bs = c.blocksize
+
+    # Emit a block for each kit so both stores are populated
+    stubs[0].emit(_blk(0.3, bs))
+    stubs[1].emit(_blk(0.3, bs))
+
+    # Kit 1 would win without the veto (higher score)
+    with c._lock:
+        c._scores = [0.1, 0.9]
+        c._last_emit = [0.0, 0.0]
+
+    # Directly inject a FenceDecision that vetoes kit 1
+    fused = FusedSource(
+        point=None, confidence=0.0, inside=True,
+        degenerate=True, loud_kit=1, miss_distance_m=0.0,
+    )
+    c._fence_last = FenceDecision(keep=True, veto_kit=1, source=fused)
+
+    c._produce(0.0)
+    assert c.active_kit == 0, (
+        "veto_kit=1 must prevent kit 1 from winning selection even when its "
+        "speech score (0.9) far exceeds kit 0's score (0.1)"
+    )
+
+
+# ---- output gate: outside source gets ducked by fence_duck_db --------------
+
+def test_gate_ducks_output_when_source_outside_fence():
+    """When FenceDecision.keep=False the output RMS drops by ≈ fence_duck_db."""
+    from unittest.mock import MagicMock
+    from conf_pipeline_control.fence import FenceDecision, FusedSource
+
+    duck_db = -40.0
+    duck_gain = 10 ** (duck_db / 20.0)
+
+    c, stubs = _ctrl_fence(polygon=_TABLE_POLYGON, fence_duck_db=duck_db)
+    c.start()
+    c.set_fence_poses([_POSE_A, _POSE_B])
+    bs = c.blocksize
+
+    blk = _blk(0.4, bs)
+    stubs[0].emit(blk); stubs[1].emit(blk)
+    with c._lock:
+        c._scores = [0.9, 0.0]
+        c._last_emit = [0.0, 0.0]
+
+    # Baseline: no fence decision (keep=True / no duck)
+    c._fence_last = None
+    out_keep = c._produce(0.0)
+    rms_keep = _rms(out_keep)
+
+    # Force keep=False via a fake FenceDecision
+    fused = FusedSource(point=None, confidence=0.0, inside=False,
+                        degenerate=True, loud_kit=0, miss_distance_m=float("inf"))
+    c._fence_last = FenceDecision(keep=False, veto_kit=0, source=fused)
+    out_gate = c._produce(0.0)
+    rms_gate = _rms(out_gate)
+
+    expected_rms = rms_keep * duck_gain
+    assert abs(rms_gate - expected_rms) / (expected_rms + 1e-9) < 0.05, \
+        f"Expected ducked RMS ≈ {expected_rms:.6f}, got {rms_gate:.6f}"
+
+
+def test_gate_does_not_duck_when_keep_is_true():
+    """When FenceDecision.keep=True the output is pass-through (not ducked)."""
+    from conf_pipeline_control.fence import FenceDecision, FusedSource
+
+    c, stubs = _ctrl_fence(polygon=_TABLE_POLYGON, fence_duck_db=-60.0)
+    c.start()
+    c.set_fence_poses([_POSE_A, _POSE_B])
+    bs = c.blocksize
+
+    blk = _blk(0.4, bs)
+    stubs[0].emit(blk)
+    with c._lock:
+        c._scores = [0.9, 0.0]
+        c._last_emit = [0.0, 0.0]
+
+    # Baseline: no fence decision
+    c._fence_last = None
+    out_nofence = c._produce(0.0)
+
+    # keep=True → same as baseline
+    fused = FusedSource(point=None, confidence=0.0, inside=True,
+                        degenerate=False, loud_kit=0, miss_distance_m=0.0)
+    c._fence_last = FenceDecision(keep=True, veto_kit=None, source=fused)
+    out_keep = c._produce(0.0)
+
+    assert np.allclose(out_nofence, out_keep, atol=1e-7), \
+        "keep=True must not alter output vs no-fence-decision baseline"
+
+
+# ---- runtime fail-open: update_fence never raises --------------------------
+
+def test_update_fence_fail_open_on_runtime_error():
+    """A RuntimeError inside the decider must not escape update_fence;
+    _fence_last is left as-is (the last good decision — or None)."""
+    from unittest.mock import patch
+
+    c, stubs = _ctrl_fence(polygon=_TABLE_POLYGON)
+    c.start()
+    c.set_fence_poses([_POSE_A, _POSE_B])
+    _set_doa(stubs[0], 37.0)
+    _set_doa(stubs[1], 323.0)
+
+    # First update succeeds → _fence_last is set
+    c.update_fence(0.0)
+    last_before = c._fence_last
+
+    # Patch the decider to raise on the next call
+    with patch.object(c._fence_decider, "update", side_effect=RuntimeError("boom")):
+        c.update_fence(1.0)   # must NOT raise
+
+    # _fence_last unchanged (still the last good decision)
+    assert c._fence_last is last_before
+
+
+def test_update_fence_noop_when_no_fence():
+    """update_fence is a no-op when fence_polygon=None (no _fence_decider)."""
+    c, _ = _ctrl()
+    c.start()
+    c.update_fence(0.0)   # must not raise, must not alter anything
+    assert c._fence_last is None

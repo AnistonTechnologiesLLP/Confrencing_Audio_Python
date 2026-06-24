@@ -12,3 +12,6 @@ build/
 dist/
 .DS_Store
 shot_*.png
+
+# SDD subagent scratch (not part of the project)
+.sdd/
