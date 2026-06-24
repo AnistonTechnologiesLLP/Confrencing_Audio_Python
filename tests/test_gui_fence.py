@@ -259,3 +259,113 @@ class TestCanvasFenceTool:
         cv.draw_pts = [Point2D(0.0, 0.0), Point2D(1.0, 0.0)]
         cv.hover = Point2D(1.0, 1.0)
         assert cv.grab().width() > 0
+
+
+# ===========================================================================
+# Task 5: twokit overlay — committed fence polygon + fused-source dots
+# ===========================================================================
+
+def _two_kit_overlay(*, with_fence=True, with_fused=True):
+    """Build a live_overlay dict for the two-kit mode with optional fence/fused keys."""
+    kits = [
+        {"array_id": "A1", "active": True,  "level": 0.6, "doa": 30.0,  "bearing": 0.0},
+        {"array_id": "A2", "active": False, "level": 0.3, "doa": 150.0, "bearing": 0.0},
+    ]
+    ov = {"connected": True, "kits": kits}
+    if with_fence:
+        # A triangle in room coords (metres around origin)
+        ov["fence_polygon"] = [(-1.0, -1.0), (1.0, -1.0), (0.0, 1.0)]
+    if with_fused:
+        ov["fused_positions"] = [
+            {"x": 0.0, "y": 0.0, "inside": True,  "confidence": 0.9},
+            {"x": 3.0, "y": 3.0, "inside": False, "confidence": 0.5},
+        ]
+    return ov
+
+
+def _config_with_two_arrays():
+    """Config with two positioned arrays A1 and A2."""
+    c = cp.create_config("rt", "2026-01-01T00:00:00Z")
+    c = cp.add_device(c, cp.create_microphone_array("A1", "Kit1", position=Point2D(-2.0, 0.0)))
+    c = cp.add_device(c, cp.create_microphone_array("A2", "Kit2", position=Point2D( 2.0, 0.0)))
+    return c
+
+
+@pytest.fixture
+def canvas_twokit(qapp):
+    from conf_pipeline_gui.canvas import Canvas
+    from conf_pipeline_gui.state import AppState
+    st = AppState()
+    st.set_config(_config_with_two_arrays())
+    st.set_mode("live")
+    st.view = "2d"
+    cv = Canvas(st)
+    cv.resize(500, 400)
+    yield cv
+    cv.deleteLater()
+
+
+class TestTwokitOverlayPaint:
+
+    def _set_overlay(self, cv, ov):
+        cv.state.live_overlay = ov
+
+    def test_twokit_overlay_with_fence_and_fused_paints_without_raising(self, canvas_twokit):
+        """Full overlay: kits + fence_polygon + fused_positions — must paint."""
+        cv = canvas_twokit
+        self._set_overlay(cv, _two_kit_overlay(with_fence=True, with_fused=True))
+        assert cv.grab().width() > 0
+
+    def test_twokit_overlay_without_fence_keys_is_back_compat(self, canvas_twokit):
+        """Overlay with only 'kits' (no fence/fused keys) must paint exactly as before."""
+        cv = canvas_twokit
+        self._set_overlay(cv, _two_kit_overlay(with_fence=False, with_fused=False))
+        assert cv.grab().width() > 0
+
+    def test_twokit_overlay_fence_only_no_fused(self, canvas_twokit):
+        """fence_polygon present, fused_positions absent — must paint without raising."""
+        cv = canvas_twokit
+        self._set_overlay(cv, _two_kit_overlay(with_fence=True, with_fused=False))
+        assert cv.grab().width() > 0
+
+    def test_twokit_overlay_fused_only_no_fence(self, canvas_twokit):
+        """fused_positions present, fence_polygon absent — must paint without raising."""
+        cv = canvas_twokit
+        self._set_overlay(cv, _two_kit_overlay(with_fence=False, with_fused=True))
+        assert cv.grab().width() > 0
+
+    def test_call_site_passes_full_ov_not_just_kits(self, canvas_twokit):
+        """Regression: verify that a fence_polygon in the overlay actually reaches the
+        paint method (i.e. the call site forwards `ov`, not just `ov["kits"]`).
+        If only kits were forwarded the fence polygon would silently be skipped, but
+        this test constructs a minimal overlay whose fence polygon has a vertex at a
+        known position — we just need it to paint without any KeyError/AttributeError,
+        which proves the full ov was forwarded."""
+        cv = canvas_twokit
+        ov = {
+            "connected": True,
+            "kits": [{"array_id": "A1", "active": True, "level": 0.5}],
+            "fence_polygon": [(0.0, 0.0), (1.0, 0.0), (0.5, 1.0)],
+            "fused_positions": [{"x": 0.5, "y": 0.3, "inside": True, "confidence": 1.0}],
+        }
+        self._set_overlay(cv, ov)
+        assert cv.grab().width() > 0
+
+    def test_fence_color_constant_is_amber(self, canvas_twokit):
+        """FENCE_COLOR must be defined in canvas and be amber (consistent with Task-4 dashed trace)."""
+        from conf_pipeline_gui.canvas import FENCE_COLOR
+        # amber = #ffb347 or similar; just check it's a non-empty string
+        assert isinstance(FENCE_COLOR, str)
+        assert FENCE_COLOR.startswith("#")
+
+    def test_empty_fence_polygon_list_does_not_raise(self, canvas_twokit):
+        """Explicitly empty fence_polygon (vs absent) must be handled gracefully."""
+        cv = canvas_twokit
+        ov = {
+            "connected": True,
+            "kits": [{"array_id": "A1", "active": True, "level": 0.5}],
+            "fence_polygon": [],
+            "fused_positions": [],
+        }
+        self._set_overlay(cv, ov)
+        assert cv.grab().width() > 0

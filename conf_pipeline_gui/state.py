@@ -61,8 +61,9 @@ class AppState(QObject):
         #  "bearing": deg,                    # array mounting heading; rotates rays+sector to room
         #  "steer_az": deg | None,            # committed/locked beam look (array-relative); solid arrow
         #  "level": 0..1, "connected": bool,
-        #  "fence_polygon": [Point2D, ...] | None,  # live fence polygon (Task 4+5)
-        #  "fused_positions": [{"point": Point2D, "inside": bool}, ...] | None}  — or None when idle.
+        #  "fence_polygon": list[(x, y)] | None,  # committed room-coord fence vertices (Task 4+5)
+        #  "fused_positions": list[{"x", "y", "inside": bool, "confidence": float}] | None,
+        #     green dot if inside, red if outside; opacity ∝ confidence}  — or None when idle.
         self.live_overlay = None
         # ---- live-only fence polygon (transient; NOT serialized, NOT in undo/redo,
         #      untouched by set_config/persistence — cleared only on app exit) ----

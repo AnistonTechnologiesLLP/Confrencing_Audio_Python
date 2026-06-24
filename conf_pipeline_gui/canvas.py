@@ -44,6 +44,7 @@ def _zone_style(ztype: str):
 
 
 REC_COLOR = OVERLAY["rec"]  # placement-recommendation accent (green)
+FENCE_COLOR = "#ffb347"     # amber — committed fence polygon; matches the Task-4 in-progress dashed trace
 
 # What each workflow mode may edit / emphasises on the canvas. Selection works
 # everywhere (cross-mode synergy); geometry editing is a DESIGN job, talkers
@@ -973,9 +974,16 @@ class Canvas(QWidget):
         rad = math.radians(bearing_deg)
         return math.sin(rad), math.cos(rad)
 
-    def _paint_twokit_overlay(self, p, v, kits):
+    def _paint_twokit_overlay(self, p, v, ov):
         """Both kits' arrays on one map: a level halo + the dominant-talker DOA ray per kit, with the
-        active (currently-output) kit highlighted. Additive — only the 2-kit listening mode sends `kits`."""
+        active (currently-output) kit highlighted. Additive — only the 2-kit listening mode sends `kits`.
+
+        Extra overlay keys (Task 5):
+          ``fence_polygon``: list of (x, y) room-coord vertices — draws a committed amber polygon.
+          ``fused_positions``: list of {"x", "y", "inside": bool, "confidence": float} — green dot
+            if inside, red dot if outside; opacity scaled by confidence.
+        """
+        kits = ov["kits"]
         for k in kits:
             d = next((x for x in self.cfg.devices if x.id == k.get("array_id") and x.position), None)
             if d is None:
@@ -999,12 +1007,31 @@ class Canvas(QWidget):
                 self._label(p, tip.x() + 4, tip.y(), f"{float(doa):.0f}°", col)
             self._label(p, c.x() + 11, c.y() - 9, "● active" if active else "○", halo)
 
+        # ---- committed fence polygon (amber fill + solid boundary) ----
+        fence_pts = ov.get("fence_polygon") or []
+        if fence_pts:
+            screen_pts = [self.w2s(Point2D(float(pt[0]), float(pt[1])), v) for pt in fence_pts]
+            poly = QPolygonF(screen_pts)
+            p.setBrush(_qc(FENCE_COLOR, 30))
+            p.setPen(QPen(_qc(FENCE_COLOR, 200), 1.8))
+            p.drawPolygon(poly)
+
+        # ---- fused-source position dots (green = inside, red = outside) ----
+        for fpos in ov.get("fused_positions") or []:
+            sx = self.w2s(Point2D(float(fpos["x"]), float(fpos["y"])), v)
+            conf = max(0.0, min(1.0, float(fpos.get("confidence") or 1.0)))
+            alpha = 80 + int(conf * 175)   # 80–255: dim when uncertain, bright when confident
+            color = "#3ddc97" if fpos.get("inside") else "#ff6b81"
+            p.setPen(Qt.NoPen)
+            p.setBrush(_qc(color, alpha))
+            p.drawEllipse(sx, 6.0, 6.0)
+
     def _paint_live_overlay(self, p, v):
         ov = getattr(self.state, "live_overlay", None)
         if not ov or not ov.get("connected"):
             return
         if ov.get("kits"):
-            self._paint_twokit_overlay(p, v, ov["kits"])
+            self._paint_twokit_overlay(p, v, ov)
             return
         pos = self._live_array_pos(ov)
         if pos is None:
