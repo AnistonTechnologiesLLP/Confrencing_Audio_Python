@@ -2404,7 +2404,10 @@ class LivePanel(PanelBase):
         # 2-kit mode: both kits' arrays on the one map (each its own bearing + dominant DOA), with the
         # active (currently-output) kit flagged. None in every other mode → the canvas single-array path.
         kits = None
-        fence_polygon_ov = list(self.state.live_fence_polygon)   # always echoed (paints pre-Connect too)
+        fence_polygon_ov = [
+            (float(p.x), float(p.y)) if not isinstance(p, tuple) else p
+            for p in self.state.live_fence_polygon
+        ]
         fused_positions = []
         if self._twokit is not None:
             kits = []
@@ -2456,9 +2459,11 @@ class LivePanel(PanelBase):
             "nulls": nulls,
             "kits": kits,
             "connected": True,
-            # Fence overlay: always echo the drawn polygon (so it paints even pre-Connect when
-            # the canvas receives the overlay from a prior session); emit the fused-source dot
-            # if the fence decider returned a triangulated point this tick.
+            # Fence overlay: echo the drawn polygon as (x,y) float tuples so the canvas painter
+            # can subscript each vertex.  The committed polygon only renders once connected
+            # (kits must be present for _paint_twokit_overlay to run); pre-Connect the
+            # in-progress dashed trace is shown by the canvas fence-draw tool instead.
+            # Emit a fused-source dot if the fence decider returned a triangulated point this tick.
             "fence_polygon": fence_polygon_ov,
             "fused_positions": fused_positions,
         })

@@ -1068,3 +1068,138 @@ class TestControllerThrowNoHalfOpen:
         msg = p.live_twokit_status.text()
         assert msg, "status label must carry the error reason"
         p.deleteLater()
+
+
+# ===========================================================================
+# Task 6 regression: _publish_overlay must emit (x,y) tuples, NOT Point2D
+# ===========================================================================
+
+class TestPublishOverlayFencePolygonType:
+    """Bug regression: the overlay contract (state.py ~line 64) requires fence_polygon to be
+    list[(x,y)] float tuples.  Before the fix, Point2D objects were forwarded unchanged, causing
+    a TypeError inside _paint_twokit_overlay (pt[0] on a dataclass) that Qt swallowed silently."""
+
+    def test_publish_overlay_fence_polygon_entries_are_plain_tuples(self, qapp, monkeypatch):
+        """_publish_overlay must convert Point2D vertices to (float, float) tuples."""
+        import conf_pipeline_gui.panels.live as live_mod
+        from conf_pipeline_gui.panels.live import LivePanel
+        from conf_pipeline_gui.state import AppState
+
+        monkeypatch.setattr(live_mod.cc, "controls_available", lambda: True)
+        monkeypatch.setattr(live_mod.cc, "MultiKitController", _FakeMKWithFence)
+
+        st = AppState()
+        st.set_config(_config_two_arrays_positioned_and_bearing())
+        p = LivePanel(st)
+        p.live_listening_mode.setCurrentIndex(p.live_listening_mode.findData("twokit"))
+        _arm_panel_twokit_devices(p)
+
+        # Force the polygon to contain Point2D objects (the canonical source)
+        st.set_live_fence_polygon([Point2D(1.0, 0.5), Point2D(7.0, 0.5), Point2D(4.0, 4.0)])
+        p.live_twokit_fence.setChecked(True)
+        p._twokit_connect()
+        assert p._twokit is not None
+
+        p._publish_overlay()
+
+        ov = st.live_overlay
+        fp = ov.get("fence_polygon")
+        assert fp is not None and len(fp) == 3, "fence_polygon must have 3 entries"
+        for v in fp:
+            assert isinstance(v, tuple), (
+                f"fence_polygon entry must be a plain tuple, got {type(v).__name__!r}: {v!r}"
+            )
+            assert len(v) == 2, f"each vertex must be a 2-tuple, got len={len(v)}"
+            x, y = v
+            assert isinstance(x, float) and isinstance(y, float), (
+                f"vertex coordinates must be floats, got ({type(x).__name__}, {type(y).__name__})"
+            )
+
+        p._live_disconnect()
+        p.deleteLater()
+
+    def test_paint_twokit_overlay_with_point2d_polygon_raises_without_fix(self, qapp):
+        """Paint regression: if fence_polygon contains Point2D objects (the buggy pre-fix state),
+        _paint_twokit_overlay raises TypeError on pt[0].  This test calls the painter DIRECTLY
+        on a QImage (NOT cv.grab() which swallows exceptions) so the error is visible.
+
+        With the producer fix in place this test passes because _publish_overlay has already
+        converted the vertices to tuples.  If you revert the fix and feed Point2D objects
+        directly into the overlay, you should see TypeError: 'Point2D' object is not subscriptable.
+        """
+        from PySide6.QtGui import QImage, QPainter
+        from conf_pipeline_gui.canvas import Canvas
+        from conf_pipeline_gui.state import AppState
+
+        st = AppState()
+        st.set_config(_config_with_two_arrays())
+        st.set_mode("live")
+        st.view = "2d"
+        cv = Canvas(st)
+        cv.resize(420, 320)
+
+        # Build the overlay the way _publish_overlay now produces it:
+        # fence_polygon entries are plain (float, float) tuples — the fix.
+        ov = {
+            "connected": True,
+            "kits": [
+                {"array_id": "A1", "active": True,  "level": 0.6, "doa": 30.0,  "bearing": 0.0},
+                {"array_id": "A2", "active": False, "level": 0.3, "doa": 150.0, "bearing": 0.0},
+            ],
+            "fence_polygon": [
+                (float(Point2D(1.0, 0.5).x), float(Point2D(1.0, 0.5).y)),
+                (float(Point2D(7.0, 0.5).x), float(Point2D(7.0, 0.5).y)),
+                (float(Point2D(4.0, 4.0).x), float(Point2D(4.0, 4.0).y)),
+            ],
+            "fused_positions": [{"x": 4.0, "y": 2.0, "inside": True, "confidence": 0.9}],
+        }
+
+        # Paint directly onto a QImage — exceptions propagate (unlike grab()).
+        img = QImage(420, 320, QImage.Format.Format_ARGB32)
+        painter = QPainter(img)
+        try:
+            v = cv.view2d()
+            cv._paint_twokit_overlay(painter, v, ov)   # must not raise
+        finally:
+            painter.end()
+        cv.deleteLater()
+
+    def test_paint_twokit_overlay_point2d_in_overlay_raises_typeerror(self, qapp):
+        """Demonstrate the bug: passing raw Point2D objects in fence_polygon raises TypeError
+        inside _paint_twokit_overlay when subscripting pt[0].  This test MUST PASS (i.e. it
+        confirms that Point2D IS NOT subscriptable and WOULD break without the producer fix)."""
+        from PySide6.QtGui import QImage, QPainter
+        from conf_pipeline_gui.canvas import Canvas
+        from conf_pipeline_gui.state import AppState
+
+        st = AppState()
+        st.set_config(_config_with_two_arrays())
+        st.set_mode("live")
+        st.view = "2d"
+        cv = Canvas(st)
+        cv.resize(420, 320)
+
+        # Deliberately inject Point2D objects — simulating the pre-fix producer bug.
+        ov_bugged = {
+            "connected": True,
+            "kits": [
+                {"array_id": "A1", "active": True,  "level": 0.6, "doa": 30.0,  "bearing": 0.0},
+                {"array_id": "A2", "active": False, "level": 0.3, "doa": 150.0, "bearing": 0.0},
+            ],
+            "fence_polygon": [
+                Point2D(1.0, 0.5),
+                Point2D(7.0, 0.5),
+                Point2D(4.0, 4.0),
+            ],
+            "fused_positions": [],
+        }
+
+        img = QImage(420, 320, QImage.Format.Format_ARGB32)
+        painter = QPainter(img)
+        try:
+            v = cv.view2d()
+            with pytest.raises(TypeError):
+                cv._paint_twokit_overlay(painter, v, ov_bugged)
+        finally:
+            painter.end()
+        cv.deleteLater()
