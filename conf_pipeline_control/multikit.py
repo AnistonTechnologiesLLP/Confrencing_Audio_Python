@@ -33,7 +33,15 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional, Sequence
 
-from .fence import KitPose, KitReading
+from .fence import (
+    DEFAULT_FENCE_HOLD_TICKS,
+    DEFAULT_FENCE_MARGIN_M,
+    FenceConfigError,
+    FenceDecider,
+    FenceDecision,
+    KitPose,
+    KitReading,
+)
 from .agc import (
     DEFAULT_AGC_MAX_GAIN_DB,
     DEFAULT_AGC_SILENCE_DB,
@@ -255,7 +263,11 @@ class MultiKitController:
                  agc_silence_db: float = DEFAULT_AGC_SILENCE_DB,
                  engine_factory: Optional[Callable[..., Any]] = None,
                  output_stream_factory: Optional[Callable[..., Any]] = None,
-                 time_fn: Optional[Callable[[], float]] = None):
+                 time_fn: Optional[Callable[[], float]] = None,
+                 fence_polygon: Optional[Sequence[Any]] = None,
+                 fence_margin_m: float = DEFAULT_FENCE_MARGIN_M,
+                 fence_hold_ticks: int = DEFAULT_FENCE_HOLD_TICKS,
+                 fence_duck_db: float = -60.0):
         self.kits = list(kits)
         n = len(self.kits)
         if n < 1:
@@ -263,6 +275,19 @@ class MultiKitController:
         devs = [k.device for k in self.kits if k.device is not None]
         if len(devs) != len(set(devs)):                       # Invariant F: distinct devices, hard guard
             raise ValueError("each kit needs a DISTINCT input device (two POLARIS = two devices)")
+        # --- Audio fence (default-OFF / inert when fence_polygon is None) ---
+        _poly = list(fence_polygon) if fence_polygon else []
+        if _poly and n != 2:
+            raise ValueError(
+                f"Audio fence needs exactly 2 kits; got {n}"
+            )
+        self._fence_polygon: list = _poly
+        self._fence_decider: Optional[FenceDecider] = (
+            FenceDecider(hold_ticks=fence_hold_ticks, margin_m=fence_margin_m)
+            if _poly else None
+        )
+        self._fence_duck_gain: float = 10.0 ** (fence_duck_db / 20.0)
+        self._fence_last: Optional[FenceDecision] = None
         self.sample_rate = float(sample_rate)
         self.blocksize = int(blocksize) if blocksize else max(1, int(round(self.sample_rate * block_ms / 1000.0)))
         self._hop_s = self.blocksize / self.sample_rate
@@ -380,6 +405,85 @@ class MultiKitController:
             active=(dr.active or dr.held),
         )
 
+    # ---- audio fence (control-thread) ----
+
+    def update_fence(self, t: float) -> None:
+        """Tick the fence decider from the control thread (e.g. the GUI's ~60 ms timer).
+
+        Reads both kit readings + the stored poses, runs the :class:`FenceDecider`,
+        and atomically rebinds ``self._fence_last``.  Wrapped in try/except so
+        runtime fusion errors never raise; the stored decision is left unchanged
+        (fail-open / last-good).
+
+        The pose-precondition check happens **before** the fail-open guard so
+        operator-visible configuration errors (:class:`FenceConfigError`) still
+        surface — they are not swallowed silently.
+
+        When ``_fence_decider is None`` (fence off) this is a pure no-op.
+        """
+        if self._fence_decider is None:
+            return
+
+        # --- Pose precondition (setup error — intentionally raised before the
+        #     fail-open try/except so the caller sees it immediately) ---
+        with self._lock:
+            poses = list(self._fence_poses)
+        for k, pose in enumerate(poses[:2]):
+            if pose is None:
+                raise FenceConfigError(
+                    f"Audio fence: kit {k} has no pose — call set_fence_poses() "
+                    f"with a KitPose for each kit before update_fence()"
+                )
+
+        ra = self.kit_reading(0)
+        rb = self.kit_reading(1)
+        if ra is None:
+            ra = KitReading(azimuth_deg=None, salience_db=0.0, level=0.0, active=False)
+        if rb is None:
+            rb = KitReading(azimuth_deg=None, salience_db=0.0, level=0.0, active=False)
+
+        try:
+            dec = self._fence_decider.update(
+                ra, rb, poses[0], poses[1], self._fence_polygon, t
+            )
+            self._fence_last = dec
+        except Exception:
+            # Fail-open: leave _fence_last unchanged (last good decision / None)
+            pass
+
+    def fence_status(self) -> Optional[dict]:
+        """Telemetry snapshot for the GUI overlay.
+
+        Returns ``None`` when the fence is disabled (``_fence_decider is None``).
+        Otherwise returns a dict with keys: ``keep``, ``veto_kit``, ``point``
+        (``(x, y)`` tuple or ``None``), ``inside``, ``confidence``, ``degenerate``,
+        ``polygon`` (list of the fence polygon points).
+        """
+        if self._fence_decider is None:
+            return None
+        dec = self._fence_last
+        if dec is None:
+            return {
+                "keep": True,
+                "veto_kit": None,
+                "point": None,
+                "inside": False,
+                "confidence": 0.0,
+                "degenerate": True,
+                "polygon": list(self._fence_polygon),
+            }
+        src = dec.source
+        pt = (src.point.x, src.point.y) if src.point is not None else None
+        return {
+            "keep": dec.keep,
+            "veto_kit": dec.veto_kit,
+            "point": pt,
+            "inside": src.inside,
+            "confidence": src.confidence,
+            "degenerate": src.degenerate,
+            "polygon": list(self._fence_polygon),
+        }
+
     # ---- mute / gain (master, or per-kit) ----
     def set_mute(self, muted: bool, *, kit: Optional[int] = None) -> None:
         with self._lock:
@@ -471,6 +575,10 @@ class MultiKitController:
             dead.append(dead_in[k] or is_stale)
             stalled.append(is_stale)
         eff = [0.0 if (dead[k] or kit_mute[k]) else scores[k] for k in range(n)]
+        # Fence veto (audio-thread read of the atomically-stored decision — no fusion, no lock).
+        dec = self._fence_last
+        if dec is not None and dec.veto_kit is not None:
+            eff[dec.veto_kit] = 0.0
         state = self._selector.update(eff, t)
         if state.switching:
             fade_from = active                                # cross-fade from what we were playing
@@ -495,6 +603,10 @@ class MultiKitController:
                 fading = False
         if self._agc is not None:
             mono = self._agc.process(mono)                    # the ONE AGC (Invariant B)
+        # Fence output gate (scalar multiply — no branch glitch, rides the cross-fade).
+        # dec was read once above the selector; re-read here is safe (atomic rebind).
+        if dec is not None and not dec.keep:
+            mono = mono * self._fence_duck_gain
         if muted:
             mono = self._silence()
         elif gain_db != 0.0:
