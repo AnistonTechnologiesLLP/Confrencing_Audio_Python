@@ -420,6 +420,11 @@ class MultiKitController:
         surface — they are not swallowed silently.
 
         When ``_fence_decider is None`` (fence off) this is a pure no-op.
+
+        NOTE: Must be called from a single control thread (e.g. the GUI's
+        ``_tick_twokit`` timer).  :class:`FenceDecider` is not thread-safe and
+        this method deliberately holds no lock around the decider call because
+        there is exactly one caller.
         """
         if self._fence_decider is None:
             return

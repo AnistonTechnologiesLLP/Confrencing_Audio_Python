@@ -630,15 +630,17 @@ def test_fence_status_returns_dict_when_fence_on():
     assert s["polygon"] == _TABLE_POLYGON
 
 
-def test_fence_status_polygon_empty_before_update():
-    """fence_status polygon key echoes the configured polygon even before update_fence."""
+def test_fence_status_shape_before_first_update():
+    """fence_status returns a dict with the correct polygon before the first update_fence call.
+
+    The fence IS on (polygon given at construction) and the polygon must be echoed
+    in the status dict even before any update_fence tick.
+    """
     c, stubs = _ctrl_fence(polygon=_TABLE_POLYGON)
     c.start()
     s = c.fence_status()
-    # Before first update_fence, _fence_last is None — fence_status returns None-guarded dict
-    # or a dict indicating no decision yet.  The polygon must be echoed.
-    if s is not None:
-        assert s["polygon"] == _TABLE_POLYGON
+    assert s is not None
+    assert s["polygon"] == _TABLE_POLYGON
 
 
 # ---- selection veto: out-of-fence loud kit gets eff=0 ----------------------
@@ -689,6 +691,47 @@ def test_veto_prevents_out_of_fence_kit_from_winning_selection():
         out = c._produce(2.0)
         # The output should come from kit 0 (the non-vetoed kit)
         assert c.active_kit == 0
+
+
+def test_veto_hook_unconditional_direct_injection():
+    """Unconditional proof that the _produce selection-veto hook fires.
+
+    Bypasses geometry entirely: directly inject a FenceDecision with veto_kit=1
+    and set scores so kit 1 would otherwise win (score 0.9 vs kit 0's 0.1).
+    After _produce, active_kit must be 0 — the veto zeroed kit 1's effective
+    score before the selector ran.
+
+    This test would FAIL if the veto branch in _produce were removed, because
+    without it kit 1's score (0.9) beats kit 0's (0.1) by more than the switch
+    margin and the selector would switch to kit 1.
+    """
+    from conf_pipeline_control.fence import FenceDecision, FusedSource
+
+    c, stubs = _ctrl_fence(polygon=_TABLE_POLYGON)
+    c.start()
+    bs = c.blocksize
+
+    # Emit a block for each kit so both stores are populated
+    stubs[0].emit(_blk(0.3, bs))
+    stubs[1].emit(_blk(0.3, bs))
+
+    # Kit 1 would win without the veto (higher score)
+    with c._lock:
+        c._scores = [0.1, 0.9]
+        c._last_emit = [0.0, 0.0]
+
+    # Directly inject a FenceDecision that vetoes kit 1
+    fused = FusedSource(
+        point=None, confidence=0.0, inside=True,
+        degenerate=True, loud_kit=1, miss_distance_m=0.0,
+    )
+    c._fence_last = FenceDecision(keep=True, veto_kit=1, source=fused)
+
+    c._produce(0.0)
+    assert c.active_kit == 0, (
+        "veto_kit=1 must prevent kit 1 from winning selection even when its "
+        "speech score (0.9) far exceeds kit 0's score (0.1)"
+    )
 
 
 # ---- output gate: outside source gets ducked by fence_duck_db --------------
