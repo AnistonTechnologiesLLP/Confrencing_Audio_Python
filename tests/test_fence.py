@@ -443,12 +443,36 @@ class TestFenceDecider:
         assert not results[3].keep
 
     def test_no_chatter_on_boundary_jitter(self):
-        """Jitter across boundary → FenceDecider should flip at most once with hold_ticks=3."""
-        decider = FenceDecider(hold_ticks=3)
+        """Jitter across boundary → FenceDecider should flip at most once with hold_ticks=3.
 
-        # Alternate between a slightly-inside and slightly-outside position
-        slightly_inside = Point2D(0.8, 0.75)    # just inside the top edge
-        slightly_outside = Point2D(0.8, 0.90)   # just outside the top edge
+        Uses an explicit margin_m=0.20 to be independent of the default.
+        Table top edge at y=0.80; margin band extends to y=1.00.
+
+        Verified by checking fuse_position directly:
+          - slightly_inside (y=0.75) → inside=True  (fully within polygon)
+          - slightly_outside (y=1.10) → inside=False (0.30 m beyond top edge,
+            outside the 0.20 m margin band)
+        The two points genuinely alternate the raw inside/outside decision so
+        hysteresis is actually exercised.
+        """
+        # margin_m explicit so the test is self-documenting and margin-change-proof
+        margin_m = 0.20
+        decider = FenceDecider(hold_ticks=3, margin_m=margin_m)
+
+        # y=0.75 is clearly inside the table polygon
+        # y=1.10 is 0.30 m beyond the top edge (y=0.80) → outside the 0.20 m margin band
+        slightly_inside = Point2D(0.8, 0.75)
+        slightly_outside = Point2D(0.8, 1.10)
+
+        # Sanity-check the geometry: fuse_position must disagree on the two points
+        ra_in, rb_in = self._readings_for(slightly_inside)
+        ra_out, rb_out = self._readings_for(slightly_outside)
+        fused_in = fuse_position(ra_in, rb_in, self.POSE_A, self.POSE_B, self.TABLE_POLYGON,
+                                 margin_m=margin_m)
+        fused_out = fuse_position(ra_out, rb_out, self.POSE_A, self.POSE_B, self.TABLE_POLYGON,
+                                  margin_m=margin_m)
+        assert fused_in.inside is True, "test setup error: slightly_inside must fuse as inside"
+        assert fused_out.inside is False, "test setup error: slightly_outside must fuse as outside"
 
         decisions = []
         for i in range(20):
@@ -481,17 +505,20 @@ class TestFenceDecider:
         assert flips == 1, f"Expected exactly one flip, got {flips}: {decisions}"
 
     def test_veto_kit_set_when_rejecting(self):
-        """When keep=False, veto_kit should be the loud_kit."""
-        decider = FenceDecider(hold_ticks=3)
+        """When keep=False, veto_kit should be the loud_kit.
+
+        Uses explicit margin_m=0.20 so the test is margin-change-proof.
+        5 outside ticks with hold_ticks=3 guarantees rejection.
+        """
+        decider = FenceDecider(hold_ticks=3, margin_m=0.20)
         # Force outside rejection with loud kit A
         ra, rb = self._readings_for(self.FAR_SOURCE, level=0.005)
         for i in range(5):
             d = decider.update(ra, rb, self.POSE_A, self.POSE_B, self.TABLE_POLYGON, t=float(i))
 
-        # After enough ticks, should be rejecting
         last = d  # type: ignore[possibly-undefined]
-        if not last.keep:
-            assert last.veto_kit is not None
+        assert not last.keep, "Expected rejection after 5 consecutive outside ticks"
+        assert last.veto_kit is not None
 
     def test_veto_kit_none_when_keeping(self):
         """When keep=True, veto_kit must be None."""
@@ -500,6 +527,76 @@ class TestFenceDecider:
         for i in range(10):
             d = decider.update(ra, rb, self.POSE_A, self.POSE_B, self.TABLE_POLYGON, t=float(i))
             assert d.veto_kit is None
+
+    def test_level_cross_check_gates_quiet_inside_source(self):
+        """level_cross_check branch: geometrically inside + BOTH kits low-salience + quiet level
+        → rejected (level_ok=False, salience_strong=False, fused.inside=True).
+
+        The production branch is:
+            raw_keep = fused.inside and (level_ok or salience_strong)
+        When salience_strong is False (both kits salience_db ≤ -10) the result
+        depends entirely on level_ok — this is the path that was previously
+        unreachable because the default salience_db=0.0 always set salience_strong=True.
+        """
+        # Use hold_ticks=1 so the committed state flips immediately on disagreement
+        decider = FenceDecider(hold_ticks=1, margin_m=DEFAULT_FENCE_MARGIN_M)
+
+        # Salience well below the -10 dB threshold → salience_strong = False
+        salience_db = -20.0
+        # Level well below LEVEL_INSIDE_DB (-45 dBFS) → level_ok = False
+        quiet_level = 1e-5   # 20*log10(1e-5) = -100 dB
+
+        # Table talker is geometrically inside — confirmed above in TestFusePosition
+        ra = _kit_reading_for_source(
+            self.POSE_A.position, self.POSE_A.bearing_deg, self.TABLE_TALKER,
+            level=quiet_level, salience_db=salience_db,
+        )
+        rb = _kit_reading_for_source(
+            self.POSE_B.position, self.POSE_B.bearing_deg, self.TABLE_TALKER,
+            level=quiet_level, salience_db=salience_db,
+        )
+
+        # Sanity-check: source IS geometrically inside and salience_strong IS False
+        fused = fuse_position(ra, rb, self.POSE_A, self.POSE_B, self.TABLE_POLYGON,
+                              margin_m=DEFAULT_FENCE_MARGIN_M)
+        assert fused.inside is True, "test setup error: table talker must fuse as inside"
+        assert not ((ra.salience_db > -10.0) or (rb.salience_db > -10.0)), (
+            "test setup error: salience_strong must be False"
+        )
+
+        # Two ticks with hold_ticks=1: first tick keeps (initial state), second flips to reject
+        d0 = decider.update(ra, rb, self.POSE_A, self.POSE_B, self.TABLE_POLYGON, t=0.0)
+        d1 = decider.update(ra, rb, self.POSE_A, self.POSE_B, self.TABLE_POLYGON, t=1.0)
+        assert not d1.keep, (
+            "Quiet+low-salience inside source must be rejected by level_cross_check gate"
+        )
+
+    def test_level_cross_check_passes_loud_inside_source(self):
+        """level_cross_check branch: geometrically inside + BOTH kits low-salience + LOUD level
+        → kept (level_ok=True even though salience_strong=False).
+        """
+        decider = FenceDecider(hold_ticks=3, margin_m=DEFAULT_FENCE_MARGIN_M)
+
+        salience_db = -20.0
+        # Level well above LEVEL_INSIDE_DB (-45 dBFS) → level_ok = True
+        loud_level = 0.05   # 20*log10(0.05) ≈ -26 dB
+
+        ra = _kit_reading_for_source(
+            self.POSE_A.position, self.POSE_A.bearing_deg, self.TABLE_TALKER,
+            level=loud_level, salience_db=salience_db,
+        )
+        rb = _kit_reading_for_source(
+            self.POSE_B.position, self.POSE_B.bearing_deg, self.TABLE_TALKER,
+            level=loud_level, salience_db=salience_db,
+        )
+
+        results = [
+            decider.update(ra, rb, self.POSE_A, self.POSE_B, self.TABLE_POLYGON, t=float(i))
+            for i in range(10)
+        ]
+        assert all(r.keep for r in results), (
+            "Loud+low-salience inside source must be kept via level_cross_check"
+        )
 
     def test_empty_polygon_always_keep(self):
         """Empty polygon → always keep=True (inert mode)."""
