@@ -151,7 +151,8 @@ MODE_DELAYSUM = "delaysum"        # integer-sample time-domain delay-and-sum (de
 MODE_FRACDELAY = "fracdelay"      # sub-sample (fractional) delay-and-sum via windowed-sinc FIR
 MODE_SUPERDIRECTIVE = "superdirective"  # frequency-domain diffuse-noise MVDR (fixed analytic Γ)
 MODE_MVDR = "mvdr"                # frequency-domain data-adaptive MVDR (measured noise covariance)
-_BEAM_MODES = (MODE_DELAYSUM, MODE_FRACDELAY, MODE_SUPERDIRECTIVE, MODE_MVDR)
+MODE_RTF_MVDR = "rtf_mvdr"        # data-adaptive MVDR steered by a data-estimated RTF (not plane-wave a0)
+_BEAM_MODES = (MODE_DELAYSUM, MODE_FRACDELAY, MODE_SUPERDIRECTIVE, MODE_MVDR, MODE_RTF_MVDR)
 _NOISE_WARMUP_FRAMES = 16         # gated noise frames before the measured covariance feeds the MVDR solve
 
 

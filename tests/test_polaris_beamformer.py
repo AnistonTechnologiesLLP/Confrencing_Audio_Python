@@ -1215,3 +1215,13 @@ def test_wait_mode_start_does_not_raise_when_device_absent(monkeypatch):
     bf.stop()
     assert not bf.connected
     assert bf._supervisor_thread is None and bf._doa_thread is None
+
+
+def test_rtf_mvdr_mode_is_accepted():
+    from conf_pipeline_control.polaris_beamformer import (
+        PolarisBeamformer, MODE_RTF_MVDR, _BEAM_MODES,
+    )
+    assert MODE_RTF_MVDR == "rtf_mvdr"
+    assert MODE_RTF_MVDR in _BEAM_MODES
+    bf = PolarisBeamformer(device=None, mode=MODE_RTF_MVDR)   # constructs without raising
+    assert bf.mode == MODE_RTF_MVDR
