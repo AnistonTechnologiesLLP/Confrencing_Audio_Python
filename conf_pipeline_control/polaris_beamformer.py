@@ -1338,6 +1338,21 @@ class PolarisBeamformer(PreampHost, MicController):
                 return None
             return self._noise_cov.copy(), self._cov_band
 
+    def _rtf_cov_snapshot(self) -> Any:
+        """Thread-safe snapshot for RTF-MVDR: ``(target_cov, noise_cov, band_indices)`` once BOTH the
+        target and noise covariances have passed warmup, else ``None`` (cold start → plane-wave
+        fallback in the beam). Copies under the cov lock; the band indices map to the beam's rfft bins."""
+        # Lock-free fast-out: mirror _noise_cov_snapshot pattern — check frame counters without the
+        # lock; only take the lock to copy (avoids blocking the audio thread on the common cold path).
+        if (self._target_cov is None or self._noise_cov is None
+                or self._target_frames < _NOISE_WARMUP_FRAMES
+                or self._noise_frames < _NOISE_WARMUP_FRAMES):
+            return None
+        with self._cov_lock:
+            if self._target_cov is None or self._noise_cov is None:  # re-check: concurrent reset
+                return None
+            return self._target_cov.copy(), self._noise_cov.copy(), self._cov_band
+
     def _accumulate_rtf_covariance(self, inst: Any, *, target_present: bool,
                                    noise_only: bool = False) -> None:
         """Three-way gated EMA update (audio thread, holds the cov lock at the call site).

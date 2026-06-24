@@ -1242,3 +1242,23 @@ def test_target_and_noise_covariances_are_gated_separately():
     assert bf._noise_frames >= 1 and bf._target_frames == 1
     bf._accumulate_rtf_covariance(inst, target_present=False, noise_only=False)  # ambiguous → neither
     assert bf._target_frames == 1
+
+
+def test_rtf_cov_snapshot_none_until_both_warm():
+    import numpy as np
+    from conf_pipeline_control.polaris_beamformer import (
+        PolarisBeamformer, MODE_RTF_MVDR, _NOISE_WARMUP_FRAMES,
+    )
+    bf = PolarisBeamformer(device=None, mode=MODE_RTF_MVDR)
+    bf._setup_runtime()
+    assert bf._rtf_cov_snapshot() is None                       # cold
+    nb, M = bf._target_cov.shape[0], bf._target_cov.shape[1]
+    inst = np.tile(np.eye(M, dtype=complex), (nb, 1, 1))
+    for _ in range(_NOISE_WARMUP_FRAMES + 1):
+        bf._accumulate_rtf_covariance(inst, target_present=True)
+        bf._accumulate_rtf_covariance(inst, target_present=False, noise_only=True)
+    snap = bf._rtf_cov_snapshot()
+    assert snap is not None
+    tcov, ncov, band = snap
+    assert tcov.shape == bf._target_cov.shape and ncov.shape == bf._noise_cov.shape
+    assert len(band) == tcov.shape[0]
