@@ -316,3 +316,9 @@ def test_missing_extra_raises_install_hint(monkeypatch):
     monkeypatch.setattr(be, "controls_available", lambda: False)
     with pytest.raises(RuntimeError, match=r"\[control\]"):
         BeamEngine(device=None).start()
+
+
+def test_beam_engine_forwards_rtf_mode():
+    from conf_pipeline_control.polaris_beamformer import MODE_RTF_MVDR
+    eng = BeamEngine(device=None, mode="steered", steered_cfg={"mode": MODE_RTF_MVDR})
+    assert eng._steered.mode == MODE_RTF_MVDR

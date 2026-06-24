@@ -547,6 +547,7 @@ class LivePanel(PanelBase):
         self.live_beameng_mode = QComboBox()
         self.live_beameng_mode.addItem("Steered (DOA + beam)", "steered")
         self.live_beameng_mode.addItem("Grid (select loudest)", "grid")
+        self.live_beameng_mode.addItem("RTF-MVDR (learns the talker's signature)", cc.MODE_RTF_MVDR)
         self.live_beameng_mode.setEnabled(False)        # enabled when the engine is ticked
         self.live_beameng_mode.currentIndexChanged.connect(
             lambda *_a: None if self._refreshing else self._on_beameng_mode_changed())

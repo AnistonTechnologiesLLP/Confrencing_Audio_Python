@@ -110,6 +110,7 @@ from .autosteer import AutoSteerController, SectorConfig  # noqa: F401
 from .polaris_beamformer import (  # noqa: F401
     MODE_FRACDELAY,
     MODE_MVDR,
+    MODE_RTF_MVDR,
     DeviceConfigError,
     DoaReading,
     PolarisBeamformer,
@@ -140,7 +141,7 @@ __all__ = [
     "pickup_directions", "exclusion_directions",
     "steering_vector", "delay_and_sum_weights", "lcmv_weights",
     "superdirective_weights", "diffuse_coherence", "directivity_index_db",
-    "MODE_DELAYSUM", "MODE_SUPERDIRECTIVE", "MODE_FRACDELAY", "MODE_MVDR", "response",
+    "MODE_DELAYSUM", "MODE_SUPERDIRECTIVE", "MODE_FRACDELAY", "MODE_MVDR", "MODE_RTF_MVDR", "response",
     "response_db", "white_noise_gain_db", "beam_pattern_azimuth",
     "analyze_lobes", "LobeReport", "talker_leakage_db",
     "design_zone_beams", "design_from_bearings", "design_multi_bearings",
