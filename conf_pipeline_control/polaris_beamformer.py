@@ -151,7 +151,9 @@ MODE_DELAYSUM = "delaysum"        # integer-sample time-domain delay-and-sum (de
 MODE_FRACDELAY = "fracdelay"      # sub-sample (fractional) delay-and-sum via windowed-sinc FIR
 MODE_SUPERDIRECTIVE = "superdirective"  # frequency-domain diffuse-noise MVDR (fixed analytic Γ)
 MODE_MVDR = "mvdr"                # frequency-domain data-adaptive MVDR (measured noise covariance)
-_BEAM_MODES = (MODE_DELAYSUM, MODE_FRACDELAY, MODE_SUPERDIRECTIVE, MODE_MVDR)
+MODE_RTF_MVDR = "rtf_mvdr"        # data-adaptive MVDR steered by a data-estimated RTF (not plane-wave a0)
+_BEAM_MODES = (MODE_DELAYSUM, MODE_FRACDELAY, MODE_SUPERDIRECTIVE, MODE_MVDR, MODE_RTF_MVDR)
+RTF_DOA_MIN_COS = 0.5            # per-band RTF↔plane-wave cosine below this → keep plane-wave (cross-check)
 _NOISE_WARMUP_FRAMES = 16         # gated noise frames before the measured covariance feeds the MVDR solve
 
 
@@ -625,7 +627,8 @@ class _FreqDomainBeam(BeamStrategy):
                  *, loading: float = DEFAULT_SUPERDIRECTIVE_LOADING,
                  off_nadir_deg: float = DEFAULT_OFF_NADIR_DEG,
                  frame: int = _STFT_FRAME,
-                 noise_cov_provider: Optional[Callable[[], Any]] = None):
+                 noise_cov_provider: Optional[Callable[[], Any]] = None,
+                 rtf_cov_provider: Optional[Callable[[], Any]] = None):
         self._geom = geom
         self._sr = float(sample_rate)
         self._c = float(speed_of_sound)
@@ -640,6 +643,7 @@ class _FreqDomainBeam(BeamStrategy):
         # mode="mvdr": a callable returning ``(noise_cov (n_band, M, M), band_indices)`` or ``None``
         # (cold start). ``None`` provider ⇒ fixed superdirective (mode="superdirective").
         self._noise_cov_provider = noise_cov_provider
+        self._rtf_cov_provider = rtf_cov_provider          # mode="rtf_mvdr": (target_cov, noise_cov, band)|None
         self._W: Any = None            # (nbins, M) complex — published atomically, read by process()
         self._init_state()
         self.set_look(0.0, off_nadir_deg)
@@ -707,6 +711,25 @@ class _FreqDomainBeam(BeamStrategy):
             tr = np.maximum(np.einsum("bii->b", rn).real / na, 1e-20)       # per-bin mean diagonal power
             rn = rn + (self._loading * tr)[:, None, None] * np.eye(na)[None, :, :]   # trace-relative loading
             R[np.asarray(band_idx)] = rn                                    # measured R where we have it
+
+        rtf_snap = self._rtf_cov_provider() if self._rtf_cov_provider is not None else None
+        if rtf_snap is not None:
+            target_cov, noise_cov, band_idx = rtf_snap
+            band_idx = np.asarray(band_idx)
+            # active-capsule submatrices on the DOA-band bins
+            tt = np.asarray(target_cov)[:, idx][:, :, idx]                 # (n_band, na, na)
+            nn = np.asarray(noise_cov)[:, idx][:, :, idx]                  # (n_band, na, na)
+            from .rtf_mvdr import estimate_rtf_gevd, rtf_cosine_to_manifold
+            h = estimate_rtf_gevd(tt, nn, loading=self._loading)         # (n_band, na) unit-norm RTF
+            a_band = a[band_idx]                                          # plane-wave manifold on the band
+            cos = rtf_cosine_to_manifold(h, a_band)                      # (n_band,) cross-check
+            use_rtf = cos >= RTF_DOA_MIN_COS                             # per-band: trust the RTF or not
+            a_new = a_band.copy()
+            a_new[use_rtf] = h[use_rtf]
+            a[band_idx] = a_new                                          # steer with RTF where it agrees
+            # overlay the measured NOISE covariance as R on the band (trace-relative loading, as MODE_MVDR)
+            tr = np.maximum(np.einsum("bii->b", nn).real / na, 1e-20)
+            R[band_idx] = nn + (self._loading * tr)[:, None, None] * np.eye(na)[None, :, :]
 
         phis = _acceptable_nulls(nulls, azimuth_deg, na - 1)
         if not phis:                                                        # K=0: plain MVDR (unchanged path)
@@ -1156,6 +1179,9 @@ class PolarisBeamformer(PreampHost, MicController):
         # NR floor learns from cold-start audio until the DOA thread confirms a noise-only frame.
         self._noise_gate = False
         self._noise_cov_alpha = 0.05
+        self._target_cov: Any = None         # (n_band, M, M) EMA, gated on confident-talker frames (RTF-MVDR)
+        self._target_frames = 0
+        self._target_cov_alpha = 0.05
 
         self.device = device
         self.sample_rate = float(sample_rate)
@@ -1312,12 +1338,14 @@ class PolarisBeamformer(PreampHost, MicController):
 
     def _make_beam(self, geom: ArrayGeometry) -> BeamStrategy:
         """Build the steering strategy for the configured ``mode``."""
-        if self.mode in (MODE_SUPERDIRECTIVE, MODE_MVDR):
-            provider = self._noise_cov_snapshot if self.mode == MODE_MVDR else None
+        if self.mode in (MODE_SUPERDIRECTIVE, MODE_MVDR, MODE_RTF_MVDR):
+            provider = self._noise_cov_snapshot if self.mode in (MODE_MVDR, MODE_RTF_MVDR) else None
+            rtf_provider = self._rtf_cov_snapshot if self.mode == MODE_RTF_MVDR else None
             return _FreqDomainBeam(geom, self.sample_rate, self.speed_of_sound,
                                    loading=self.superdirective_loading, off_nadir_deg=self.off_nadir_deg,
                                    frame=self.nfft,   # share the DOA covariance bin grid (mvdr overlay alignment)
-                                   noise_cov_provider=provider)
+                                   noise_cov_provider=provider,
+                                   rtf_cov_provider=rtf_provider)
         if self.mode == MODE_FRACDELAY:
             return _FracDelaySumBeam(geom, self.sample_rate, self.speed_of_sound)
         return _DelaySumBeam(geom, self.sample_rate, self.speed_of_sound)
@@ -1333,6 +1361,45 @@ class PolarisBeamformer(PreampHost, MicController):
             if self._noise_cov is None:                  # re-check: a concurrent reset may have cleared it
                 return None
             return self._noise_cov.copy(), self._cov_band
+
+    def _rtf_cov_snapshot(self) -> Any:
+        """Thread-safe snapshot for RTF-MVDR: ``(target_cov, noise_cov, band_indices)`` once BOTH the
+        target and noise covariances have passed warmup, else ``None`` (cold start → plane-wave
+        fallback in the beam). Copies under the cov lock; the band indices map to the beam's rfft bins."""
+        # Lock-free fast-out: mirror _noise_cov_snapshot pattern — check frame counters without the
+        # lock; only take the lock to copy (avoids blocking the audio thread on the common cold path).
+        if (self._target_cov is None or self._noise_cov is None
+                or self._target_frames < _NOISE_WARMUP_FRAMES
+                or self._noise_frames < _NOISE_WARMUP_FRAMES):
+            return None
+        with self._cov_lock:
+            if self._target_cov is None or self._noise_cov is None:  # re-check: concurrent reset
+                return None
+            return self._target_cov.copy(), self._noise_cov.copy(), self._cov_band
+
+    def _accumulate_rtf_covariance(self, inst: Any, *, target_present: bool,
+                                   noise_only: bool = False) -> None:
+        """Three-way gated EMA update (audio thread, holds the cov lock at the call site).
+
+        ``inst`` is the per-band instantaneous cross-spectrum ``(n_band, M, M)``. A confident-talker
+        frame trains ``_target_cov``; a ``noise_only`` frame trains ``_noise_cov``; an ambiguous
+        frame trains neither, so neither covariance is contaminated.
+
+        v1 drives this as a binary target/noise gate from the DOA active flag: ``target_present``
+        is ``True`` when the dominant DOA is inside the look sector and ``noise_only`` is ``True``
+        otherwise.  The three-way ambiguous branch (``target_present=False, noise_only=False``) is
+        retained for a future salience-based gate that can withhold updates on frames where the
+        talker is uncertain — it is currently unused by the call site."""
+        if target_present and self._target_cov is not None:
+            a = self._target_cov_alpha
+            self._target_cov *= (1.0 - a)
+            self._target_cov += a * inst
+            self._target_frames += 1
+        elif noise_only and self._noise_cov is not None:
+            an = self._noise_cov_alpha
+            self._noise_cov *= (1.0 - an)
+            self._noise_cov += an * inst
+            self._noise_frames += 1
 
     # ---- public API ----
     def start(self) -> None:
@@ -1457,7 +1524,7 @@ class PolarisBeamformer(PreampHost, MicController):
 
     def _freq_domain(self) -> bool:
         """The beam mode supports nulls (LCMV) only in the frequency-domain tiers."""
-        return self.mode in (MODE_SUPERDIRECTIVE, MODE_MVDR)
+        return self.mode in (MODE_SUPERDIRECTIVE, MODE_MVDR, MODE_RTF_MVDR)
 
     def _nulls_engaged(self) -> bool:
         """True when nulls can change tick-to-tick, so the look must be re-planned every tick."""
@@ -1549,7 +1616,7 @@ class PolarisBeamformer(PreampHost, MicController):
             else self._steered_az
         nulls = self._compose_nulls(dets, target_az) if target_az is not None else []
         if target_az is not None and (
-                target_az != self._steered_az or self.mode == MODE_MVDR or self._nulls_engaged()):
+                target_az != self._steered_az or self.mode in (MODE_MVDR, MODE_RTF_MVDR) or self._nulls_engaged()):
             plan = self._beam.plan_look(target_az, self.off_nadir_deg, nulls)   # heavy work off the lock
             with self._beam_lock:
                 if self._steer_gen == gen0:             # no set_steering interleaved → safe to commit
@@ -1631,8 +1698,11 @@ class PolarisBeamformer(PreampHost, MicController):
         self._cov_freqs = freqs_full[self._cov_band]
         with self._cov_lock:
             self._cov = np.zeros((len(self._cov_band), self.n_channels, self.n_channels), dtype=complex)
-            if self.mode == MODE_MVDR:                          # gated noise covariance for the MVDR solve
+            if self.mode in (MODE_MVDR, MODE_RTF_MVDR):        # gated noise covariance for the MVDR solve
                 self._noise_cov = np.zeros_like(self._cov)
+            if self.mode == MODE_RTF_MVDR:                     # gated target covariance for the RTF estimate
+                self._target_cov = np.zeros_like(self._cov)
+                self._target_frames = 0
         self._noise_frames = 0
         if self.beam_bandlimit_hz:
             # Anti-alias the beam output: a Hann-windowed-sinc low-pass at the band-limit
@@ -1818,6 +1888,7 @@ class PolarisBeamformer(PreampHost, MicController):
         with self._cov_lock:
             self._cov = None
             self._noise_cov = None
+            self._target_cov = None
         self._stftbuf = None
         self._level = 0.0
         self._streaming = False
@@ -1896,7 +1967,7 @@ class PolarisBeamformer(PreampHost, MicController):
         sr = self.sample_rate or 44100.0
         ms = 1000.0 / sr
         lat = float(self.blocksize) * ms                         # one input block of buffering
-        if self.mode in (MODE_SUPERDIRECTIVE, MODE_MVDR):        # freq-domain beam ≈ one STFT frame
+        if self.mode in (MODE_SUPERDIRECTIVE, MODE_MVDR, MODE_RTF_MVDR):        # freq-domain beam ≈ one STFT frame
             lat += float(self.nfft) * ms
         for stage in (self._aec, self._dereverb, self._post_nr):
             if stage is not None:
@@ -1920,7 +1991,10 @@ class PolarisBeamformer(PreampHost, MicController):
                 self._cov[...] = 0.0
             if self._noise_cov is not None:
                 self._noise_cov[...] = 0.0
+            if self._target_cov is not None:
+                self._target_cov[...] = 0.0
         self._noise_frames = 0
+        self._target_frames = 0
         self._noise_gate = False              # re-acquire on the next DOA tick (don't train on the switch transient)
         if self._stftbuf is not None and self._np is not None:
             self._stftbuf = self._np.zeros((0, self.n_channels), dtype=float)
@@ -2071,6 +2145,7 @@ class PolarisBeamformer(PreampHost, MicController):
         with self._cov_lock:
             self._cov = None              # don't let stale covariance drive DOA after a drop
             self._noise_cov = None
+            self._target_cov = None
 
     def _raw_level(self) -> float:
         return self._level
@@ -2124,7 +2199,11 @@ class PolarisBeamformer(PreampHost, MicController):
                 if self._cov is not None:                            # release_external/drop may have nulled either
                     self._cov *= (1.0 - a)
                     self._cov += a * inst
-                if gate and self._noise_cov is not None:
+                if self.mode == MODE_RTF_MVDR:
+                    self._accumulate_rtf_covariance(
+                        inst, target_present=not gate, noise_only=gate,
+                    )
+                elif gate and self._noise_cov is not None:
                     an = self._noise_cov_alpha
                     self._noise_cov *= (1.0 - an)
                     self._noise_cov += an * inst
@@ -2251,7 +2330,7 @@ def _demo(argv: Optional[Sequence[str]] = None) -> int:
         monitor=args.monitor, output_device=args.output_device,
         wait_for_device=args.wait, **bl_kw,
     )
-    if args.auto_null and bf.mode not in (MODE_SUPERDIRECTIVE, MODE_MVDR):
+    if args.auto_null and bf.mode not in (MODE_SUPERDIRECTIVE, MODE_MVDR, MODE_RTF_MVDR):
         print(f"Note: --auto-null needs a frequency-domain mode; '{bf.mode}' has no null DOF (ignored).")
     assert bf.geometry is not None
     print(f"Array: {bf.geometry.n_active}/{POLARIS_N_MICS} capsules, aperture "

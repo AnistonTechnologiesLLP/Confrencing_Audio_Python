@@ -1215,3 +1215,104 @@ def test_wait_mode_start_does_not_raise_when_device_absent(monkeypatch):
     bf.stop()
     assert not bf.connected
     assert bf._supervisor_thread is None and bf._doa_thread is None
+
+
+def test_rtf_mvdr_mode_is_accepted():
+    from conf_pipeline_control.polaris_beamformer import (
+        PolarisBeamformer, MODE_RTF_MVDR, _BEAM_MODES,
+    )
+    assert MODE_RTF_MVDR == "rtf_mvdr"
+    assert MODE_RTF_MVDR in _BEAM_MODES
+    bf = PolarisBeamformer(device=None, mode=MODE_RTF_MVDR)   # constructs without raising
+    assert bf.mode == MODE_RTF_MVDR
+
+
+def test_target_and_noise_covariances_are_gated_separately():
+    import numpy as np
+    from conf_pipeline_control.polaris_beamformer import PolarisBeamformer, MODE_RTF_MVDR
+    bf = PolarisBeamformer(device=None, mode=MODE_RTF_MVDR)
+    bf._setup_runtime()                                  # device-free allocation
+    assert bf._target_cov is not None and bf._noise_cov is not None
+    assert bf._target_frames == 0
+    nb = bf._target_cov.shape[0]; M = bf._target_cov.shape[1]
+    inst = np.tile(np.eye(M, dtype=complex), (nb, 1, 1))
+    bf._accumulate_rtf_covariance(inst, target_present=True)    # talker frame
+    assert bf._target_frames == 1
+    bf._accumulate_rtf_covariance(inst, target_present=False, noise_only=True)   # noise frame
+    assert bf._noise_frames >= 1 and bf._target_frames == 1
+    bf._accumulate_rtf_covariance(inst, target_present=False, noise_only=False)  # ambiguous → neither
+    assert bf._target_frames == 1
+
+
+def test_rtf_cov_snapshot_none_until_both_warm():
+    import numpy as np
+    from conf_pipeline_control.polaris_beamformer import (
+        PolarisBeamformer, MODE_RTF_MVDR, _NOISE_WARMUP_FRAMES,
+    )
+    bf = PolarisBeamformer(device=None, mode=MODE_RTF_MVDR)
+    bf._setup_runtime()
+    assert bf._rtf_cov_snapshot() is None                       # cold
+    nb, M = bf._target_cov.shape[0], bf._target_cov.shape[1]
+    inst = np.tile(np.eye(M, dtype=complex), (nb, 1, 1))
+    for _ in range(_NOISE_WARMUP_FRAMES + 1):
+        bf._accumulate_rtf_covariance(inst, target_present=True)
+        bf._accumulate_rtf_covariance(inst, target_present=False, noise_only=True)
+    snap = bf._rtf_cov_snapshot()
+    assert snap is not None
+    tcov, ncov, band = snap
+    assert tcov.shape == bf._target_cov.shape and ncov.shape == bf._noise_cov.shape
+    assert len(band) == tcov.shape[0]
+
+
+def test_freqdomain_rtf_branch_nulls_interferer_better_than_planewave():
+    import numpy as np
+    from conf_pipeline_control.geometry import sensibel_8
+    from conf_pipeline_control.polaris_beamformer import _FreqDomainBeam
+
+    geom = sensibel_8()
+    # measured covariances on the beam's band bins: target at az0, interferer at az1, + diffuse.
+    beam = _FreqDomainBeam(geom, 44100.0, 343.0)
+    band = np.arange(20, 60)                       # a slice of in-band bins
+    M = geom.n_channels
+    # build synthetic (n_band, M, M) target/noise covs from manifolds at two azimuths
+    def manifold_band(az):
+        idx = list(geom.active_indices()); el = np.array([geom.elements[i] for i in idx])
+        from conf_pipeline_control.beamformer import _unit_from_az_offnadir
+        u = np.array(_unit_from_az_offnadir(az, 90.0))
+        k = 2 * np.pi * beam._freqs[band] / 343.0
+        a = np.zeros((len(band), M), complex)
+        a[:, idx] = np.exp(1j * k[:, None] * (el @ u)[None, :])
+        return a
+    at, ai = manifold_band(20.0), manifold_band(80.0)
+    ncov = np.einsum("bi,bj->bij", ai, ai.conj()) * 4.0 + np.eye(M)[None] * 1.0
+    tcov = np.einsum("bi,bj->bij", at, at.conj()) * 10.0 + ncov
+    # Provider returns band-ordered (n_band, M, M) — the same contract as _rtf_cov_snapshot.
+    # (Full-rfft-length zero-padded arrays are the WRONG contract and triggered the C1 IndexError.)
+    beam._rtf_cov_provider = lambda: (tcov, ncov, band)
+
+    W = beam._compute_weights(20.0, 90.0, ())     # RTF branch active
+    # response of the beam to the interferer manifold should be well below the target response
+    resp_t = np.abs(np.sum(np.conj(W[band]) * at, axis=1))
+    resp_i = np.abs(np.sum(np.conj(W[band]) * ai, axis=1))
+    assert np.median(resp_t) > np.median(resp_i) * 10.0         # RTF-MVDR suppression >> plane-wave (plane-wave ~4.7x, RTF ~43x)
+
+
+def test_freqdomain_rtf_provider_none_is_identical_to_planewave():
+    import numpy as np
+    from conf_pipeline_control.geometry import sensibel_8
+    from conf_pipeline_control.polaris_beamformer import _FreqDomainBeam
+    geom = sensibel_8()
+    a = _FreqDomainBeam(geom, 44100.0, 343.0)                   # no rtf provider
+    b = _FreqDomainBeam(geom, 44100.0, 343.0)
+    b._rtf_cov_provider = lambda: None                         # cold start → fallback
+    Wa = a._compute_weights(33.0, 90.0, ())
+    Wb = b._compute_weights(33.0, 90.0, ())
+    assert np.allclose(Wa, Wb)                                  # byte-equivalent fallback
+
+
+def test_make_beam_wires_rtf_providers():
+    from conf_pipeline_control.polaris_beamformer import PolarisBeamformer, MODE_RTF_MVDR
+    bf = PolarisBeamformer(device=None, mode=MODE_RTF_MVDR)
+    beam = bf._make_beam(bf.geometry)
+    assert beam._rtf_cov_provider is not None
+    assert beam._noise_cov_provider is not None        # measured noise overlay still active

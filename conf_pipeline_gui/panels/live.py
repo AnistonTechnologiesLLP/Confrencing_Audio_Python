@@ -547,6 +547,7 @@ class LivePanel(PanelBase):
         self.live_beameng_mode = QComboBox()
         self.live_beameng_mode.addItem("Steered (DOA + beam)", "steered")
         self.live_beameng_mode.addItem("Grid (select loudest)", "grid")
+        self.live_beameng_mode.addItem("RTF-MVDR (learns the talker's signature)", cc.MODE_RTF_MVDR)
         self.live_beameng_mode.setEnabled(False)        # enabled when the engine is ticked
         self.live_beameng_mode.currentIndexChanged.connect(
             lambda *_a: None if self._refreshing else self._on_beameng_mode_changed())
@@ -1048,7 +1049,12 @@ class LivePanel(PanelBase):
 
     # ---- POLARIS A/B engine (BeamEngine: steered ↔ grid on one stream) ----
     def _beameng_mode(self):
-        return self.live_beameng_mode.currentData() or "steered"
+        raw = self.live_beameng_mode.currentData() or "steered"
+        # RTF-MVDR is a steered beam from BeamEngine's perspective (mode="steered");
+        # the inner steered back-end's mode is set via steered_cfg["mode"] = MODE_RTF_MVDR.
+        if raw == cc.MODE_RTF_MVDR:
+            return "steered"
+        return raw
 
     def _on_beameng_toggled(self):
         """Enable the strategy picker when the engine is selected, and keep the
@@ -1554,9 +1560,13 @@ class LivePanel(PanelBase):
     def _beameng_steered_cfg(self, base: dict) -> dict:
         """The steered back-end's config from the A/B-card noise options (fixed at Connect). Adaptive-null
         ⇒ data-adaptive MVDR (+ auto-null); seat-nulling alone ⇒ superdirective (both are frequency-domain,
-        so seat nulls still apply under MVDR); the post-beam noise gate is independent of the mode."""
+        so seat nulls still apply under MVDR); RTF-MVDR strategy ⇒ MODE_RTF_MVDR in steered_cfg (the
+        outer BeamEngine mode is always "steered" — RTF is a sub-mode of the steered back-end); the
+        post-beam noise gate is independent of the mode."""
         cfg = dict(base)
-        if self.live_beameng_adaptnull.isChecked():
+        if self.live_beameng_mode.currentData() == cc.MODE_RTF_MVDR:
+            cfg["mode"] = cc.MODE_RTF_MVDR            # steered back-end learns the talker's RTF signature
+        elif self.live_beameng_adaptnull.isChecked():
             cfg["mode"] = cc.MODE_MVDR                # data-adaptive: null the measured room noise field
             cfg["auto_null"] = True
         elif self.live_beameng_nullseats.isChecked():

@@ -9,6 +9,14 @@ the TS sibling is at matching v5 parity. The desktop app is presented as
 
 ## [Unreleased]
 
+### Added
+- **RTF-MVDR beam mode (`mode="rtf_mvdr"`).** A data-adaptive MVDR steered by a measured **relative
+  transfer function** (GEVD / max-SNR over a target vs noise covariance) instead of the plane-wave
+  manifold — captures real reverb / near-field / per-capsule mismatch. SRP-PHAT stays for DOA/UI and
+  gates the target-vs-noise frames + cross-checks the RTF direction; warmup + cross-check + loading
+  fall back to plane-wave MVDR so it is never worse than the existing beam. Opt-in (Beam → Mode),
+  default unchanged, bit-exact when off. `PolarisBeamformer` / A-B-engine path (v1).
+
 ### Fixed
 - **Real-time DeepFilterNet3 (`post_nr_engine="dfn3"`) no longer distorts the voice.** Offline DFN3 (the
   New_OCTOVOX reference) sounds perfect; the live path was distorted by four separate, measured defects,
