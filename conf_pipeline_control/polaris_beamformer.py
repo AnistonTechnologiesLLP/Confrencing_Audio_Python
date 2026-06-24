@@ -717,8 +717,8 @@ class _FreqDomainBeam(BeamStrategy):
             target_cov, noise_cov, band_idx = rtf_snap
             band_idx = np.asarray(band_idx)
             # active-capsule submatrices on the DOA-band bins
-            tt = np.asarray(target_cov)[band_idx][:, idx][:, :, idx]      # (n_band, na, na)
-            nn = np.asarray(noise_cov)[band_idx][:, idx][:, :, idx]       # (n_band, na, na)
+            tt = np.asarray(target_cov)[:, idx][:, :, idx]                 # (n_band, na, na)
+            nn = np.asarray(noise_cov)[:, idx][:, :, idx]                  # (n_band, na, na)
             from .rtf_mvdr import estimate_rtf_gevd, rtf_cosine_to_manifold
             h = estimate_rtf_gevd(tt, nn, loading=self._loading)         # (n_band, na) unit-norm RTF
             a_band = a[band_idx]                                          # plane-wave manifold on the band
@@ -1382,8 +1382,14 @@ class PolarisBeamformer(PreampHost, MicController):
         """Three-way gated EMA update (audio thread, holds the cov lock at the call site).
 
         ``inst`` is the per-band instantaneous cross-spectrum ``(n_band, M, M)``. A confident-talker
-        frame trains ``_target_cov``; a ``noise_only`` frame trains ``_noise_cov`` (today's path);
-        an ambiguous frame trains neither, so neither covariance is contaminated."""
+        frame trains ``_target_cov``; a ``noise_only`` frame trains ``_noise_cov``; an ambiguous
+        frame trains neither, so neither covariance is contaminated.
+
+        v1 drives this as a binary target/noise gate from the DOA active flag: ``target_present``
+        is ``True`` when the dominant DOA is inside the look sector and ``noise_only`` is ``True``
+        otherwise.  The three-way ambiguous branch (``target_present=False, noise_only=False``) is
+        retained for a future salience-based gate that can withhold updates on frames where the
+        talker is uncertain — it is currently unused by the call site."""
         if target_present and self._target_cov is not None:
             a = self._target_cov_alpha
             self._target_cov *= (1.0 - a)

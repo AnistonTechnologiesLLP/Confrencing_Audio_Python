@@ -1286,9 +1286,9 @@ def test_freqdomain_rtf_branch_nulls_interferer_better_than_planewave():
     at, ai = manifold_band(20.0), manifold_band(80.0)
     ncov = np.einsum("bi,bj->bij", ai, ai.conj()) * 4.0 + np.eye(M)[None] * 1.0
     tcov = np.einsum("bi,bj->bij", at, at.conj()) * 10.0 + ncov
-    full_t = np.zeros((len(beam._freqs), M, M), complex); full_t[band] = tcov
-    full_n = np.zeros((len(beam._freqs), M, M), complex); full_n[band] = ncov
-    beam._rtf_cov_provider = lambda: (full_t, full_n, band)
+    # Provider returns band-ordered (n_band, M, M) — the same contract as _rtf_cov_snapshot.
+    # (Full-rfft-length zero-padded arrays are the WRONG contract and triggered the C1 IndexError.)
+    beam._rtf_cov_provider = lambda: (tcov, ncov, band)
 
     W = beam._compute_weights(20.0, 90.0, ())     # RTF branch active
     # response of the beam to the interferer manifold should be well below the target response
