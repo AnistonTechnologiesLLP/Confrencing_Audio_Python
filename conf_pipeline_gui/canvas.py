@@ -827,6 +827,18 @@ class Canvas(QWidget):
             if isinstance(self.hover, Point2D):
                 path.lineTo(self.w2s(self.hover, v))
             p.drawPath(path)
+        # in-progress fence polygon (dashed amber trace while placing points)
+        if self.state.tool == "fence" and self.draw_pts:
+            pen = QPen(QColor("#ffb347"), 1.5)
+            pen.setDashPattern([6, 3])
+            p.setPen(pen)
+            path = QPainterPath()
+            path.moveTo(self.w2s(self.draw_pts[0], v))
+            for pt in self.draw_pts[1:]:
+                path.lineTo(self.w2s(pt, v))
+            if isinstance(self.hover, Point2D):
+                path.lineTo(self.w2s(self.hover, v))
+            p.drawPath(path)
         err, warn = self._error_refs()
         # devices
         for d in self.cfg.devices:
@@ -1264,6 +1276,32 @@ class Canvas(QWidget):
                 self.state.set_config(cp.set_room(self.cfg, RoomLayout(vertices=pts, height=self._room_h(), units="meters", objects=[])))
             else:
                 self.update()
+        elif self.state.view == "2d" and self.state.tool == "fence":
+            # Dedup adjacent identical points (can occur on double-click: two mousePressEvents
+            # fire before the double-click event, so the last two entries may be duplicates).
+            pts = []
+            for pt in self.draw_pts:
+                if not pts or pts[-1].x != pt.x or pts[-1].y != pt.y:
+                    pts.append(pt)
+            self.draw_pts = []
+            self.hover = None
+            if len(pts) >= 3:
+                # Commit the fence polygon to transient live state — NOT to config.
+                self.state.set_live_fence_polygon(pts)
+                self.state.tool = "select"
+            else:
+                self.update()
+
+    def keyPressEvent(self, e):
+        """Escape cancels an in-progress fence draw without committing anything."""
+        from PySide6.QtCore import Qt
+        if self.state.tool == "fence" and e.key() == Qt.Key.Key_Escape:
+            self.draw_pts = []
+            self.hover = None
+            self.state.tool = "select"
+            self.update()
+        else:
+            super().keyPressEvent(e)
 
     def wheelEvent(self, e):
         if self.state.view != "3d":
@@ -1426,6 +1464,9 @@ class Canvas(QWidget):
             elif tool == "room":
                 self.draw_pts.append(psnap)
                 self.update()
+            elif tool == "fence":
+                self.draw_pts.append(psnap)
+                self.update()
             elif tool == "talker":
                 tid = self.state.next_talker_id()
                 self.state.set_config(cp.add_talker(self.cfg, cp.create_talker(tid, f"Talker {tid}", psnap)))
@@ -1467,7 +1508,7 @@ class Canvas(QWidget):
         """Cursor feedback so interactive items feel grabbable in the Select tool."""
         if self.state.tool != "select":
             # tool-specific cursors: crosshair for drawing/placing
-            self.setCursor(Qt.CrossCursor if self.state.tool in ("room", "zone", "talker") else Qt.ArrowCursor)
+            self.setCursor(Qt.CrossCursor if self.state.tool in ("room", "zone", "talker", "fence") else Qt.ArrowCursor)
             return
         hit = self._hit_test(world, v)
         if hit is None:
@@ -1488,7 +1529,7 @@ class Canvas(QWidget):
         v = self.view2d()
         w = self.s2w(pos.x(), pos.y(), v)
         self._coord(w)
-        if self.state.tool == "room":
+        if self.state.tool in ("room", "fence"):
             self.hover = Point2D(self.snap(w.x), self.snap(w.y))
             return self.update()
         if self.state.tool == "connect" and self.connect_from:

@@ -60,8 +60,13 @@ class AppState(QObject):
         #  "seat": {"id", "x", "y"} | None,   # room seat the dominant talker maps to
         #  "bearing": deg,                    # array mounting heading; rotates rays+sector to room
         #  "steer_az": deg | None,            # committed/locked beam look (array-relative); solid arrow
-        #  "level": 0..1, "connected": bool}  — or None when idle.
+        #  "level": 0..1, "connected": bool,
+        #  "fence_polygon": [Point2D, ...] | None,  # live fence polygon (Task 4+5)
+        #  "fused_positions": [{"point": Point2D, "inside": bool}, ...] | None}  — or None when idle.
         self.live_overlay = None
+        # ---- live-only fence polygon (transient; NOT serialized, NOT in undo/redo,
+        #      untouched by set_config/persistence — cleared only on app exit) ----
+        self.live_fence_polygon: list = []
 
     # ---- mode ----
     def set_mode(self, mode: str) -> None:
@@ -77,6 +82,13 @@ class AppState(QObject):
         if data == self.live_overlay:
             return
         self.live_overlay = data
+        self.liveOverlayChanged.emit()
+
+    def set_live_fence_polygon(self, pts) -> None:
+        """Store the operator-drawn fence polygon (live-only — transient, never persisted).
+        Accepts any sequence of Point2D (or None/empty to clear).  Emits liveOverlayChanged
+        so the canvas repaints the fence trace immediately."""
+        self.live_fence_polygon = list(pts or [])
         self.liveOverlayChanged.emit()
 
     # ---- coverage simulation (recomputed on config change, cached for paint) ----
