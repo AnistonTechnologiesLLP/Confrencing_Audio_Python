@@ -153,6 +153,7 @@ MODE_SUPERDIRECTIVE = "superdirective"  # frequency-domain diffuse-noise MVDR (f
 MODE_MVDR = "mvdr"                # frequency-domain data-adaptive MVDR (measured noise covariance)
 MODE_RTF_MVDR = "rtf_mvdr"        # data-adaptive MVDR steered by a data-estimated RTF (not plane-wave a0)
 _BEAM_MODES = (MODE_DELAYSUM, MODE_FRACDELAY, MODE_SUPERDIRECTIVE, MODE_MVDR, MODE_RTF_MVDR)
+RTF_DOA_MIN_COS = 0.5            # per-band RTF↔plane-wave cosine below this → keep plane-wave (cross-check)
 _NOISE_WARMUP_FRAMES = 16         # gated noise frames before the measured covariance feeds the MVDR solve
 
 
@@ -626,7 +627,8 @@ class _FreqDomainBeam(BeamStrategy):
                  *, loading: float = DEFAULT_SUPERDIRECTIVE_LOADING,
                  off_nadir_deg: float = DEFAULT_OFF_NADIR_DEG,
                  frame: int = _STFT_FRAME,
-                 noise_cov_provider: Optional[Callable[[], Any]] = None):
+                 noise_cov_provider: Optional[Callable[[], Any]] = None,
+                 rtf_cov_provider: Optional[Callable[[], Any]] = None):
         self._geom = geom
         self._sr = float(sample_rate)
         self._c = float(speed_of_sound)
@@ -641,6 +643,7 @@ class _FreqDomainBeam(BeamStrategy):
         # mode="mvdr": a callable returning ``(noise_cov (n_band, M, M), band_indices)`` or ``None``
         # (cold start). ``None`` provider ⇒ fixed superdirective (mode="superdirective").
         self._noise_cov_provider = noise_cov_provider
+        self._rtf_cov_provider = rtf_cov_provider          # mode="rtf_mvdr": (target_cov, noise_cov, band)|None
         self._W: Any = None            # (nbins, M) complex — published atomically, read by process()
         self._init_state()
         self.set_look(0.0, off_nadir_deg)
@@ -708,6 +711,25 @@ class _FreqDomainBeam(BeamStrategy):
             tr = np.maximum(np.einsum("bii->b", rn).real / na, 1e-20)       # per-bin mean diagonal power
             rn = rn + (self._loading * tr)[:, None, None] * np.eye(na)[None, :, :]   # trace-relative loading
             R[np.asarray(band_idx)] = rn                                    # measured R where we have it
+
+        rtf_snap = self._rtf_cov_provider() if self._rtf_cov_provider is not None else None
+        if rtf_snap is not None:
+            target_cov, noise_cov, band_idx = rtf_snap
+            band_idx = np.asarray(band_idx)
+            # active-capsule submatrices on the DOA-band bins
+            tt = np.asarray(target_cov)[band_idx][:, idx][:, :, idx]      # (n_band, na, na)
+            nn = np.asarray(noise_cov)[band_idx][:, idx][:, :, idx]       # (n_band, na, na)
+            from .rtf_mvdr import estimate_rtf_gevd, rtf_cosine_to_manifold
+            h = estimate_rtf_gevd(tt, nn, loading=self._loading)         # (n_band, na) unit-norm RTF
+            a_band = a[band_idx]                                          # plane-wave manifold on the band
+            cos = rtf_cosine_to_manifold(h, a_band)                      # (n_band,) cross-check
+            use_rtf = cos >= RTF_DOA_MIN_COS                             # per-band: trust the RTF or not
+            a_new = a_band.copy()
+            a_new[use_rtf] = h[use_rtf]
+            a[band_idx] = a_new                                          # steer with RTF where it agrees
+            # overlay the measured NOISE covariance as R on the band (trace-relative loading, as MODE_MVDR)
+            tr = np.maximum(np.einsum("bii->b", nn).real / na, 1e-20)
+            R[band_idx] = nn + (self._loading * tr)[:, None, None] * np.eye(na)[None, :, :]
 
         phis = _acceptable_nulls(nulls, azimuth_deg, na - 1)
         if not phis:                                                        # K=0: plain MVDR (unchanged path)

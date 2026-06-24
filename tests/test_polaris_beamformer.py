@@ -1262,3 +1262,49 @@ def test_rtf_cov_snapshot_none_until_both_warm():
     tcov, ncov, band = snap
     assert tcov.shape == bf._target_cov.shape and ncov.shape == bf._noise_cov.shape
     assert len(band) == tcov.shape[0]
+
+
+def test_freqdomain_rtf_branch_nulls_interferer_better_than_planewave():
+    import numpy as np
+    from conf_pipeline_control.geometry import sensibel_8
+    from conf_pipeline_control.polaris_beamformer import _FreqDomainBeam
+
+    geom = sensibel_8()
+    # measured covariances on the beam's band bins: target at az0, interferer at az1, + diffuse.
+    beam = _FreqDomainBeam(geom, 44100.0, 343.0)
+    band = np.arange(20, 60)                       # a slice of in-band bins
+    M = geom.n_channels
+    # build synthetic (n_band, M, M) target/noise covs from manifolds at two azimuths
+    def manifold_band(az):
+        idx = list(geom.active_indices()); el = np.array([geom.elements[i] for i in idx])
+        from conf_pipeline_control.beamformer import _unit_from_az_offnadir
+        u = np.array(_unit_from_az_offnadir(az, 90.0))
+        k = 2 * np.pi * beam._freqs[band] / 343.0
+        a = np.zeros((len(band), M), complex)
+        a[:, idx] = np.exp(1j * k[:, None] * (el @ u)[None, :])
+        return a
+    at, ai = manifold_band(20.0), manifold_band(80.0)
+    ncov = np.einsum("bi,bj->bij", ai, ai.conj()) * 4.0 + np.eye(M)[None] * 1.0
+    tcov = np.einsum("bi,bj->bij", at, at.conj()) * 10.0 + ncov
+    full_t = np.zeros((len(beam._freqs), M, M), complex); full_t[band] = tcov
+    full_n = np.zeros((len(beam._freqs), M, M), complex); full_n[band] = ncov
+    beam._rtf_cov_provider = lambda: (full_t, full_n, band)
+
+    W = beam._compute_weights(20.0, 90.0, ())     # RTF branch active
+    # response of the beam to the interferer manifold should be well below the target response
+    resp_t = np.abs(np.sum(np.conj(W[band]) * at, axis=1))
+    resp_i = np.abs(np.sum(np.conj(W[band]) * ai, axis=1))
+    assert np.median(resp_t) > np.median(resp_i) * 10.0         # RTF-MVDR suppression >> plane-wave (plane-wave ~4.7x, RTF ~43x)
+
+
+def test_freqdomain_rtf_provider_none_is_identical_to_planewave():
+    import numpy as np
+    from conf_pipeline_control.geometry import sensibel_8
+    from conf_pipeline_control.polaris_beamformer import _FreqDomainBeam
+    geom = sensibel_8()
+    a = _FreqDomainBeam(geom, 44100.0, 343.0)                   # no rtf provider
+    b = _FreqDomainBeam(geom, 44100.0, 343.0)
+    b._rtf_cov_provider = lambda: None                         # cold start → fallback
+    Wa = a._compute_weights(33.0, 90.0, ())
+    Wb = b._compute_weights(33.0, 90.0, ())
+    assert np.allclose(Wa, Wb)                                  # byte-equivalent fallback
