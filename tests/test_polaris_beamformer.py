@@ -1308,3 +1308,11 @@ def test_freqdomain_rtf_provider_none_is_identical_to_planewave():
     Wa = a._compute_weights(33.0, 90.0, ())
     Wb = b._compute_weights(33.0, 90.0, ())
     assert np.allclose(Wa, Wb)                                  # byte-equivalent fallback
+
+
+def test_make_beam_wires_rtf_providers():
+    from conf_pipeline_control.polaris_beamformer import PolarisBeamformer, MODE_RTF_MVDR
+    bf = PolarisBeamformer(device=None, mode=MODE_RTF_MVDR)
+    beam = bf._make_beam(bf.geometry)
+    assert beam._rtf_cov_provider is not None
+    assert beam._noise_cov_provider is not None        # measured noise overlay still active

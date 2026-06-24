@@ -1338,12 +1338,14 @@ class PolarisBeamformer(PreampHost, MicController):
 
     def _make_beam(self, geom: ArrayGeometry) -> BeamStrategy:
         """Build the steering strategy for the configured ``mode``."""
-        if self.mode in (MODE_SUPERDIRECTIVE, MODE_MVDR):
-            provider = self._noise_cov_snapshot if self.mode == MODE_MVDR else None
+        if self.mode in (MODE_SUPERDIRECTIVE, MODE_MVDR, MODE_RTF_MVDR):
+            provider = self._noise_cov_snapshot if self.mode in (MODE_MVDR, MODE_RTF_MVDR) else None
+            rtf_provider = self._rtf_cov_snapshot if self.mode == MODE_RTF_MVDR else None
             return _FreqDomainBeam(geom, self.sample_rate, self.speed_of_sound,
                                    loading=self.superdirective_loading, off_nadir_deg=self.off_nadir_deg,
                                    frame=self.nfft,   # share the DOA covariance bin grid (mvdr overlay alignment)
-                                   noise_cov_provider=provider)
+                                   noise_cov_provider=provider,
+                                   rtf_cov_provider=rtf_provider)
         if self.mode == MODE_FRACDELAY:
             return _FracDelaySumBeam(geom, self.sample_rate, self.speed_of_sound)
         return _DelaySumBeam(geom, self.sample_rate, self.speed_of_sound)
@@ -1516,7 +1518,7 @@ class PolarisBeamformer(PreampHost, MicController):
 
     def _freq_domain(self) -> bool:
         """The beam mode supports nulls (LCMV) only in the frequency-domain tiers."""
-        return self.mode in (MODE_SUPERDIRECTIVE, MODE_MVDR)
+        return self.mode in (MODE_SUPERDIRECTIVE, MODE_MVDR, MODE_RTF_MVDR)
 
     def _nulls_engaged(self) -> bool:
         """True when nulls can change tick-to-tick, so the look must be re-planned every tick."""
@@ -1608,7 +1610,7 @@ class PolarisBeamformer(PreampHost, MicController):
             else self._steered_az
         nulls = self._compose_nulls(dets, target_az) if target_az is not None else []
         if target_az is not None and (
-                target_az != self._steered_az or self.mode == MODE_MVDR or self._nulls_engaged()):
+                target_az != self._steered_az or self.mode in (MODE_MVDR, MODE_RTF_MVDR) or self._nulls_engaged()):
             plan = self._beam.plan_look(target_az, self.off_nadir_deg, nulls)   # heavy work off the lock
             with self._beam_lock:
                 if self._steer_gen == gen0:             # no set_steering interleaved → safe to commit
@@ -1959,7 +1961,7 @@ class PolarisBeamformer(PreampHost, MicController):
         sr = self.sample_rate or 44100.0
         ms = 1000.0 / sr
         lat = float(self.blocksize) * ms                         # one input block of buffering
-        if self.mode in (MODE_SUPERDIRECTIVE, MODE_MVDR):        # freq-domain beam ≈ one STFT frame
+        if self.mode in (MODE_SUPERDIRECTIVE, MODE_MVDR, MODE_RTF_MVDR):        # freq-domain beam ≈ one STFT frame
             lat += float(self.nfft) * ms
         for stage in (self._aec, self._dereverb, self._post_nr):
             if stage is not None:
@@ -2322,7 +2324,7 @@ def _demo(argv: Optional[Sequence[str]] = None) -> int:
         monitor=args.monitor, output_device=args.output_device,
         wait_for_device=args.wait, **bl_kw,
     )
-    if args.auto_null and bf.mode not in (MODE_SUPERDIRECTIVE, MODE_MVDR):
+    if args.auto_null and bf.mode not in (MODE_SUPERDIRECTIVE, MODE_MVDR, MODE_RTF_MVDR):
         print(f"Note: --auto-null needs a frequency-domain mode; '{bf.mode}' has no null DOF (ignored).")
     assert bf.geometry is not None
     print(f"Array: {bf.geometry.n_active}/{POLARIS_N_MICS} capsules, aperture "
