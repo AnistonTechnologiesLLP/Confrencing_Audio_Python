@@ -1,13 +1,15 @@
 # Task 3 Report — MultiKitController fence tick + _produce veto/gate + preconditions
 
 ## Status
-COMPLETE — all targeted tests green, mypy clean, full suite pending.
+COMPLETE — all targeted tests green, mypy clean, full suite green.
 
 ## Targeted tests
 `tests/test_multikit.py`: **41 passed** (29 pre-existing + 12 new Task-3 tests)
 
 ## Full suite
-Pending (running as background job).
+**866 passed** in 78.56s (excluding known-slow headless GUI tests per CLAUDE.md:
+test_gui_calibrate_front, test_gui_coverage, test_gui_live_seat, test_gui_smoke,
+test_gui_twokit — these require offscreen Linux CI).
 
 ## What was built
 
