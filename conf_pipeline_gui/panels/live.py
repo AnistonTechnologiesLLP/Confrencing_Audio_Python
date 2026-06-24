@@ -10,6 +10,7 @@ installed this runs live; otherwise a simulated controller keeps the UI usable.
 from __future__ import annotations
 
 import math
+import time
 
 from PySide6.QtCore import QSettings, Qt, QThreadPool, QTimer
 from PySide6.QtGui import QFont
@@ -700,7 +701,48 @@ class LivePanel(PanelBase):
         self.live_twokit_agc.setToolTip("One target-loudness AGC on the combined output so a near vs far "
                                         "talker land at a consistent level.")
         tkf.addRow("Loudness", self.live_twokit_agc)
+        # --- Audio fence (Task 6) ---
+        self.live_twokit_fence = QCheckBox("Table fence (reject out-of-area sources)")
+        self.live_twokit_fence.setToolTip(
+            "Soft spatial fence: fuses two kit bearings into a 2-D position and gates sources "
+            "whose estimated position falls outside the drawn region.  Requires BOTH kits to have "
+            "position and bearing set (Design → array) and to be spaced apart.  The fence is "
+            "approximate — a 40 mm aperture gives coarse bearings; the fence guards against "
+            "far-room sources on a near-identical bearing, not a surgical edge.\n\n"
+            "Draw the table outline on the map first (Draw button), then Connect."
+        )
+        tkf.addRow("Fence", self.live_twokit_fence)
+        self.live_twokit_fence_margin = NoWheelDoubleSpinBox()
+        self.live_twokit_fence_margin.setRange(0.0, 1.0)
+        self.live_twokit_fence_margin.setSingleStep(0.05)
+        self.live_twokit_fence_margin.setDecimals(2)
+        self.live_twokit_fence_margin.setValue(0.20)
+        self.live_twokit_fence_margin.setSuffix(" m")
+        self.live_twokit_fence_margin.setToolTip(
+            "Soft-fence tolerance band (metres).  A source within this distance of the fence "
+            "boundary is treated as inside (prevents chattering on the edge)."
+        )
+        self.live_twokit_fence_margin.setEnabled(False)
+        tkf.addRow("Fence margin", self.live_twokit_fence_margin)
+        fence_btn_row = QHBoxLayout()
+        self.live_twokit_fence_draw = QPushButton("Draw fence…")
+        self.live_twokit_fence_draw.setToolTip(
+            "Arm the canvas fence-draw tool: click to place vertices, double-click to close "
+            "the polygon.  The fence is shown on the map as an amber outline."
+        )
+        self.live_twokit_fence_draw.setEnabled(False)
+        self.live_twokit_fence_clear = QPushButton("Clear fence")
+        self.live_twokit_fence_clear.setToolTip("Remove the drawn fence polygon.")
+        self.live_twokit_fence_clear.setEnabled(False)
+        fence_btn_row.addWidget(self.live_twokit_fence_draw)
+        fence_btn_row.addWidget(self.live_twokit_fence_clear)
+        fence_btn_row.addStretch(1)
         twokit.body_lay.addLayout(tkf)
+        twokit.body_lay.addLayout(fence_btn_row)
+        self.live_twokit_fence.toggled.connect(
+            lambda *_a: None if self._refreshing else self._on_twokit_fence_toggled())
+        self.live_twokit_fence_draw.clicked.connect(self._on_twokit_fence_draw)
+        self.live_twokit_fence_clear.clicked.connect(self._on_twokit_fence_clear)
         self.live_twokit_status = QLabel("Pick a DISTINCT input device for each kit, then Connect.")
         self.live_twokit_status.setWordWrap(True)
         twokit.body_lay.addWidget(self.live_twokit_status)
@@ -1066,6 +1108,27 @@ class LivePanel(PanelBase):
         self.live_beameng_adaptnull.setEnabled(on)
         if on:
             self.live_autosteer.setChecked(False)
+
+    # ---- Two-kit fence (opt-in spatial reject, control-thread) ----
+
+    def _on_twokit_fence_toggled(self) -> None:
+        """Enable or disable the fence margin + draw/clear buttons when the fence checkbox changes.
+
+        The fence controls are only live when: the checkbox is checked AND no session is running
+        (they are locked during a live session, exactly like ``live_beameng_nullseats``).
+        """
+        on = self.live_twokit_fence.isChecked() and not self._live_busy()
+        self.live_twokit_fence_margin.setEnabled(on)
+        self.live_twokit_fence_draw.setEnabled(on)
+        self.live_twokit_fence_clear.setEnabled(on)
+
+    def _on_twokit_fence_draw(self) -> None:
+        """Arm the canvas fence-draw tool so the user can trace the table polygon."""
+        self.state.tool = "fence"
+
+    def _on_twokit_fence_clear(self) -> None:
+        """Remove the drawn fence polygon."""
+        self.state.set_live_fence_polygon([])
 
     def _on_beameng_mode_changed(self):
         """Switch a running engine's strategy live (glitch-free crossfade); otherwise
@@ -1874,26 +1937,83 @@ class LivePanel(PanelBase):
         # level-preserving makeup keeps each kit's voice full-bodied (not weak).
         cfg: dict = ({"post_nr": True, "post_nr_engine": clean, "post_nr_amount": _CLEANING_AMOUNT_DEFAULT}
                      if clean is not None else {})
+        arr_ids = [self.live_twokit_arr_a.currentData(), self.live_twokit_arr_b.currentData()]
         specs = [
-            cc.KitSpec(device=dev_a, array_id=self.live_twokit_arr_a.currentData(), radius_m=0.04, cfg=dict(cfg)),
-            cc.KitSpec(device=dev_b, array_id=self.live_twokit_arr_b.currentData(), radius_m=0.04, cfg=dict(cfg)),
+            cc.KitSpec(device=dev_a, array_id=arr_ids[0], radius_m=0.04, cfg=dict(cfg)),
+            cc.KitSpec(device=dev_b, array_id=arr_ids[1], radius_m=0.04, cfg=dict(cfg)),
         ]
         agc_db = -20.0 if self.live_twokit_agc.isChecked() else None
+
+        # ---- Audio fence: validate preconditions BEFORE connecting (Task 6) ----
+        # Fence is opt-in. When unchecked, fence_polygon=None and we skip all precondition checks.
+        fence_polygon = None
+        fence_poses = None
+        if self.live_twokit_fence.isChecked():
+            raw_pts = self.state.live_fence_polygon
+            if len(raw_pts) < 3:
+                self.live_twokit_status.setText(
+                    "Draw the table fence first (≥3 points) — use the Draw button, click corners "
+                    "on the map, double-click to close — then Connect."
+                )
+                return
+            # Both kit arrays must have position AND bearing_deg set in the config.
+            kit_labels = ("A", "B")
+            arr_devs = [
+                next((d for d in self.state.config.devices if d.id == aid), None)
+                for aid in arr_ids
+            ]
+            for k, (arr, aid) in enumerate(zip(arr_devs, arr_ids)):
+                label = kit_labels[k]
+                arr_name = aid or f"kit-{label}"
+                if arr is None or getattr(arr, "position", None) is None:
+                    self.live_twokit_status.setText(
+                        f"Fence: kit {label} array '{arr_name}' has no position — "
+                        f"set it in DESIGN (drag the array onto the map) and front-calibrate, "
+                        f"or untick Table fence."
+                    )
+                    return
+                if getattr(arr, "bearing_deg", None) is None:
+                    self.live_twokit_status.setText(
+                        f"Fence: kit {label} array '{arr_name}' has no bearing — "
+                        f"set it in DESIGN (Bearing °) and front-calibrate, "
+                        f"or untick Table fence."
+                    )
+                    return
+            # Preconditions met — build the fence polygon and poses.
+            fence_polygon = [cp.Point2D(float(p.x), float(p.y)) for p in raw_pts]
+            fence_poses = [
+                cc.KitPose(position=arr.position, bearing_deg=arr.bearing_deg)
+                for arr in arr_devs
+            ]
+
         try:
-            ctrl = cc.MultiKitController(specs, output_device=self.live_twokit_out.currentData(),
-                                         sample_rate=44100.0, agc_target_db=agc_db)
+            ctrl = cc.MultiKitController(
+                specs,
+                output_device=self.live_twokit_out.currentData(),
+                sample_rate=44100.0,
+                agc_target_db=agc_db,
+                fence_polygon=fence_polygon,
+                fence_margin_m=self.live_twokit_fence_margin.value(),
+            )
             ctrl.set_gain_db(float(self.live_gain.value()))
             ctrl.set_mute(self.live_mute.isChecked())
+            if fence_poses is not None:
+                ctrl.set_fence_poses(fence_poses)
             ctrl.start()
-        except Exception as exc:                      # distinct-device guard / hardware open → report, stay disconnected
+        except Exception as exc:                      # distinct-device guard / hardware open / FenceConfigError → report
             self.live_twokit_status.setText(f"Two-kit connect failed: {exc}")
             return
         self._twokit = ctrl
         self._push_preamp_gain()
-        self._session_array_id = self.live_twokit_arr_a.currentData()
+        self._session_array_id = arr_ids[0]
         self.live_connect.setText("Disconnect")
         self.live_mute.setEnabled(True)
         self.live_gain.setEnabled(True)
+        # Lock the fence controls for the duration of the session.
+        self.live_twokit_fence.setEnabled(False)
+        self.live_twokit_fence_margin.setEnabled(False)
+        self.live_twokit_fence_draw.setEnabled(False)
+        self.live_twokit_fence_clear.setEnabled(False)
         self.live_twokit_status.setText("Two kits connected — speak in each area; the active kit is output.")
         self._notify_session_changed()
 
@@ -2103,6 +2223,15 @@ class LivePanel(PanelBase):
             self.live_twokit_meter_a.reset()
             self.live_twokit_meter_b.reset()
             self.live_twokit_status.setText("Disconnected.")
+            # Re-enable fence controls for the next session.
+            # live_fence_polygon is intentionally KEPT (not cleared) so the operator
+            # can reconnect with the same fence without re-drawing.
+            self.live_twokit_fence.setEnabled(True)
+            # margin / draw / clear follow the checkbox state
+            fence_on = self.live_twokit_fence.isChecked()
+            self.live_twokit_fence_margin.setEnabled(fence_on)
+            self.live_twokit_fence_draw.setEnabled(fence_on)
+            self.live_twokit_fence_clear.setEnabled(fence_on)
         if self._beam_engine is not None:
             try:
                 self._beam_engine.stop()
@@ -2272,6 +2401,8 @@ class LivePanel(PanelBase):
         # 2-kit mode: both kits' arrays on the one map (each its own bearing + dominant DOA), with the
         # active (currently-output) kit flagged. None in every other mode → the canvas single-array path.
         kits = None
+        fence_polygon_ov = list(self.state.live_fence_polygon)   # always echoed (paints pre-Connect too)
+        fused_positions = []
         if self._twokit is not None:
             kits = []
             active_k = self._twokit.active_kit
@@ -2286,6 +2417,19 @@ class LivePanel(PanelBase):
                     "level": s.level,
                     "active": s.index == active_k,
                 })
+            # Fence telemetry: emit a fused-position dot when we have a triangulated point.
+            try:
+                fs = self._twokit.fence_status()
+                if fs is not None and fs.get("point") is not None:
+                    px, py = fs["point"]
+                    fused_positions = [{
+                        "x": float(px),
+                        "y": float(py),
+                        "inside": bool(fs.get("inside", False)),
+                        "confidence": float(fs.get("confidence", 0.0)),
+                    }]
+            except Exception:
+                pass   # fail-open: a fence_status() error must not crash the overlay tick
         # Feature D — the null bearings actually applied this tick (door + out-of-pickup talkers, or
         # detected interferers). Array-relative; the canvas lifts them by `bearing`. Drawn as barred-
         # circle markers so an operator can SEE what's being cut. Empty for modes that don't null.
@@ -2309,6 +2453,11 @@ class LivePanel(PanelBase):
             "nulls": nulls,
             "kits": kits,
             "connected": True,
+            # Fence overlay: always echo the drawn polygon (so it paints even pre-Connect when
+            # the canvas receives the overlay from a prior session); emit the fused-source dot
+            # if the fence decider returned a triangulated point this tick.
+            "fence_polygon": fence_polygon_ov,
+            "fused_positions": fused_positions,
         })
 
     # ---- first-run setup guide (the LIVE getting-started checklist) ----
@@ -2517,6 +2666,12 @@ class LivePanel(PanelBase):
         tk = self._twokit
         if tk is None:
             return
+
+        # Drive the fence decider on the control thread (no-op when fence is disabled).
+        try:
+            tk.update_fence(time.monotonic())
+        except Exception:
+            pass   # fail-open: a FenceConfigError or fusion error must not crash the tick
 
         def _pct(lvl):
             if lvl <= 1e-6:
