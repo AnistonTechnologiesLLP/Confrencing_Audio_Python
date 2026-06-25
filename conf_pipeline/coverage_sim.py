@@ -367,6 +367,69 @@ def mic_coverage(config: SystemConfig, array, targets: list[Target]) -> Optional
 
 
 # --------------------------------------------------------------------------- #
+# Aperture-honesty caveats
+# --------------------------------------------------------------------------- #
+def coverage_caveats(config: SystemConfig) -> list[str]:
+    """Honesty warnings for aperture-limited arrays.
+
+    Returns one or more strings per array that has *aperture_m* set:
+
+    * A separability warning for each pair of pickup zones whose angular
+      separation is narrower than 1.5 × the steered beam half-width.
+    * A grating-lobe note when the spatial-aliasing ceiling is below 8 kHz
+      (i.e. lies within the speech band).
+
+    Returns an empty list for arrays whose profile has no *aperture_m*
+    (ceiling/table/legacy), so existing configs produce no new warnings.
+    """
+    from .directivity import alias_ceiling_hz, separable, steered_beamwidth_deg, SIM_SPEECH_FREQ_HZ
+
+    out: list[str] = []
+    for device in config.devices:
+        if device.type != "microphoneArray":
+            continue
+        cap = device_capabilities(device)
+        if cap.aperture_m is None or device.position is None:
+            continue
+
+        zones = [z for z in device.zones if is_pickup_zone(z)]
+        elev = _device_elev(config, device)
+        src = Point3D(device.position.x, device.position.y, elev)
+
+        # Compute per-zone (label, azimuth_deg, beam_half_deg)
+        looks: list[tuple[str, float, float]] = []
+        for z in zones:
+            cen = _zone_centroid(z)
+            sa = steering_angles(src, Point3D(cen.x, cen.y, SEATED_HEAD_M))
+            half = steered_beamwidth_deg(cap.aperture_m, SIM_SPEECH_FREQ_HZ, sa.downtilt_deg)
+            looks.append((z.label, sa.azimuth_deg, half))
+
+        # Pairwise separability check
+        for i in range(len(looks)):
+            for j in range(i + 1, len(looks)):
+                sep = angular_separation_deg(looks[i][1], looks[j][1])
+                worst_half = max(looks[i][2], looks[j][2])
+                if not separable(sep, worst_half):
+                    out.append(
+                        f"{device.label}: zones '{looks[i][0]}' and '{looks[j][0]}' are "
+                        f"{sep:.0f}° apart but this array's steered beam is "
+                        f"~{worst_half:.0f}° half-width — it cannot separate them."
+                    )
+
+        # Grating-lobe / spatial-aliasing note
+        if cap.element_spacing_m is not None:
+            ceil_hz = alias_ceiling_hz(cap.element_spacing_m)
+            if ceil_hz < 8000.0:
+                out.append(
+                    f"{device.label}: directivity degrades above "
+                    f"~{ceil_hz / 1000.0:.1f} kHz "
+                    "(spatial aliasing / grating lobes)."
+                )
+
+    return out
+
+
+# --------------------------------------------------------------------------- #
 # Aggregator
 # --------------------------------------------------------------------------- #
 MicCoverageFn = Callable[[SystemConfig, Any, list[Target]], Optional[MicCoverage]]
@@ -422,5 +485,7 @@ def simulate_room_coverage(
     }
     return RoomCoverage(
         mics=mics, cameras=cameras, speakers=speakers, occluders=occluders, targets=targets,
-        fidelity="geometric", caveats=list(_GEOMETRIC_CAVEATS), summary=summary,
+        fidelity="geometric",
+        caveats=list(_GEOMETRIC_CAVEATS) + coverage_caveats(config),
+        summary=summary,
     )
