@@ -16,9 +16,10 @@ SIM_SPEECH_FREQ_HZ = 1500.0   # representative speech-band centre for the single
 NEAR_OMNI_HALF_DEG = 90.0     # a half-angle of 90 deg = no usable directivity in the look plane
 
 # Calibration constants (refined in tests/test_directivity_calibration.py).
-_BW_K = 0.55                  # 3 dB half-beamwidth ~= _BW_K * lambda / aperture (radians)
+_BW_K = 0.886                 # 3 dB full-beamwidth factor: full_rad ≈ _BW_K * lambda / aperture;
+                              # the function divides by 2 to yield the half-angle.
+                              # Standard sinc-aperture value; treated as a first-pass — calibrated in a later task.
 _ENDFIRE_WIDEN = 1.6          # extra widening as the look tilts toward endfire (off-nadir 90 deg)
-_MIN_HALF_DEG = 30.0          # physical floor: a small circular array focuses no tighter than ~60 deg FWHM
 
 
 def steered_beamwidth_deg(aperture_m: Optional[float], freq_hz: float, steer_deg: float) -> float:
@@ -33,7 +34,7 @@ def steered_beamwidth_deg(aperture_m: Optional[float], freq_hz: float, steer_deg
     lam = SOUND_SPEED_MPS / freq_hz
     half_deg = math.degrees(_BW_K * lam / aperture_m) / 2.0          # broadside half-angle
     widen = 1.0 + (_ENDFIRE_WIDEN - 1.0) * (min(abs(steer_deg), 90.0) / 90.0)
-    return min(NEAR_OMNI_HALF_DEG, max(_MIN_HALF_DEG, half_deg * widen))
+    return min(NEAR_OMNI_HALF_DEG, max(2.0, half_deg * widen))
 
 
 def alias_ceiling_hz(element_spacing_m: Optional[float]) -> float:

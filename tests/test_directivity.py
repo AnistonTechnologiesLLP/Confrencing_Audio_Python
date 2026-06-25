@@ -33,8 +33,8 @@ def test_polaris_is_near_omni_low_and_coarse_high():
     assert steered_beamwidth_deg(POLARIS_AP, 3400.0, 0.0) >= 30.0
 
 def test_ceiling_reference_aperture_is_about_35_deg():
-    # a ~0.10 m aperture at the speech centre lands near the legacy 35 deg half-angle
-    h = steered_beamwidth_deg(0.10, SIM_SPEECH_FREQ_HZ, 0.0)
+    # a ~0.18 m (large/ceiling-class) aperture at the speech centre lands near the legacy 35 deg half-angle
+    h = steered_beamwidth_deg(0.18, SIM_SPEECH_FREQ_HZ, 0.0)
     assert 28.0 <= h <= 45.0
 
 def test_alias_ceiling_polaris_about_5p6k():
