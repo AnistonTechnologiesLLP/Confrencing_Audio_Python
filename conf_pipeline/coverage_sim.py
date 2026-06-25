@@ -37,6 +37,7 @@ from .model import (
     point_in_polygon,
     point_in_sector,
 )
+from .directivity import SIM_SPEECH_FREQ_HZ, steered_beamwidth_deg
 from .profiles import device_capabilities
 
 # Per-zone steered-beam half-angle for the geometric mic tier (deg). The profile's
@@ -316,15 +317,22 @@ def mic_coverage(config: SystemConfig, array, targets: list[Target]) -> Optional
 
     pickup_zones = [z for z in array.zones if is_pickup_zone(z)]
     wedges: list[CoverageWedge] = []
+
+    def _half_for(off_nadir_deg: float) -> float:
+        if cap.aperture_m is None:
+            return DEFAULT_PICKUP_BEAM_HALF_DEG
+        return steered_beamwidth_deg(cap.aperture_m, SIM_SPEECH_FREQ_HZ, off_nadir_deg)
+
     if pickup_zones:
         src = Point3D(center.x, center.y, elev)
         for z in pickup_zones:
             cen = _zone_centroid(z)
             sa = steering_angles(src, Point3D(cen.x, cen.y, SEATED_HEAD_M))
             reach = circ_radius if circ_radius > 0 else max(sa.horizontal_distance, 1.0)
+            half = _half_for(sa.downtilt_deg)
             wedges.append(CoverageWedge(
                 apex=center, apex_elev_m=elev, azimuth_deg=sa.azimuth_deg, tilt_deg=sa.downtilt_deg,
-                h_half_deg=DEFAULT_PICKUP_BEAM_HALF_DEG, v_half_deg=DEFAULT_PICKUP_BEAM_HALF_DEG,
+                h_half_deg=half, v_half_deg=half,
                 range_m=reach,
             ))
     else:
