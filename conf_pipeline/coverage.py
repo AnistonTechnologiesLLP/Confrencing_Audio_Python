@@ -13,6 +13,7 @@ from .model import (
     AecConfig,
     CoverageMode,
     CoverageZone,
+    CoverageZoneType,
     MicrophoneArray,
     Point2D,
     Port,
@@ -174,6 +175,42 @@ def _with_gain(zone: CoverageZone, gain_db: Optional[float]) -> CoverageZone:
     z = copy.copy(zone)
     z.gain_db = gain_db
     return z
+
+
+def set_zone_type(array: MicrophoneArray, zone_id: str, zone_type: CoverageZoneType) -> MicrophoneArray:
+    """Change a coverage zone's type (``dynamic``/``dedicated``/``exclusion``).
+
+    Enforces the ``always_on == (type == "dedicated")`` invariant. Flipping TO
+    ``exclusion`` ("cut" — no pickup) clears any ``output_channel`` (an exclusion
+    zone may not carry one). Regenerates the array's output ports. Raises
+    ``CoverageError`` if the zone is unknown, or if the change would push the
+    pickup-zone count above ``MAX_MANUAL_LOBES`` while the array is in manual mode
+    (only un-cutting / flipping to a pickup type can trip this)."""
+    zone = next((z for z in array.zones if z.id == zone_id), None)
+    if zone is None:
+        raise CoverageError("COVERAGE_ZONE_INVALID", f'Array "{array.id}" has no zone "{zone_id}".')
+
+    becomes_pickup = zone_type != "exclusion"
+    others_pickup = sum(1 for z in array.zones if z.id != zone_id and is_pickup_zone(z))
+    new_pickup = others_pickup + (1 if becomes_pickup else 0)
+    if array.coverage_mode == "manual" and new_pickup > MAX_MANUAL_LOBES:
+        raise CoverageError(
+            "MANUAL_LOBE_LIMIT",
+            f'Array "{array.id}" in manual mode would have {new_pickup} pickup lobes; max is {MAX_MANUAL_LOBES}.',
+        )
+
+    def _flip(z: CoverageZone) -> CoverageZone:
+        n = copy.copy(z)
+        n.type = zone_type
+        n.always_on = zone_type == "dedicated"
+        if zone_type == "exclusion":
+            n.output_channel = None
+        return n
+
+    new = copy.copy(array)
+    new.zones = [copy.copy(z) if z.id != zone_id else _flip(z) for z in array.zones]
+    new.ports = generate_array_output_ports(array.id, array.coverage_mode, pickup_zone_count(new.zones), new.zones)
+    return new
 
 
 def auto_assign_zone_channels(array: MicrophoneArray) -> MicrophoneArray:

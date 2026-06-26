@@ -16,6 +16,22 @@ the TS sibling is at matching v5 parity. The desktop app is presented as
   gates the target-vs-noise frames + cross-checks the RTF direction; warmup + cross-check + loading
   fall back to plane-wave MVDR so it is never worse than the existing beam. Opt-in (Beam → Mode),
   default unchanged, bit-exact when off. `PolarisBeamformer` / A-B-engine path (v1).
+- **Honest aperture-aware coverage simulation** (`conf_pipeline/directivity.py`; sub-feature #1 of the
+  POLARIS table-array coverage workflow) — the placement scorer and `mic_coverage` report now use a
+  real **aperture-limited 3 dB beamwidth** for arrays that declare `aperture_m` in their profile,
+  replacing the previous fixed 35° half-angle. `steered_beamwidth_deg(aperture_m, freq_hz, steer_deg)`
+  (pure stdlib) computes the broadside half-angle (≈ `_BW_K·λ/aperture`), widens it toward endfire,
+  and clamps near-omni when λ ≫ aperture. `_BW_K = 0.47` is **calibrated to the measured sensiBel
+  POLARIS delay-sum beam** — within ~1° at 1500/3000 Hz (a coherent circular ring is ~2× narrower than
+  the raw linear-aperture formula); guarded by a `[control]`/numpy calibration test. New **`polaris-8`
+  profile** (aperture 0.08 m, element spacing 0.0306 m) uses this path; existing profiles (no
+  `aperture_m`) keep the legacy 35° — no regression. The coverage report gains **honesty caveats**
+  (`coverage_caveats` → `RoomCoverage.caveats`): per-pickup-zone-pair **separability warnings** (zones
+  the beam cannot resolve) and a **grating-lobe / spatial-aliasing note** above the alias ceiling
+  (`alias_ceiling_hz(element_spacing_m)`, ~5.6 kHz for POLARIS spacing); both surfaced in the Simulate
+  panel's **"Coverage warnings"** list. No schema change — `aperture_m` / `element_spacing_m` are
+  profile-catalog constants (code-only, not serialized); configs persist only `profileId`, round-trip
+  byte-identically at CONFIG_VERSION 5, no TS-sibling change.
 
 ### Fixed
 - **Real-time DeepFilterNet3 (`post_nr_engine="dfn3"`) no longer distorts the voice.** Offline DFN3 (the
@@ -230,6 +246,11 @@ the TS sibling is at matching v5 parity. The desktop app is presented as
   cut) for the talker+interferer A/B. Pure offline math (reuses `apply_design_offline`); hardware-free and
   deterministic. (+2 tests.) Note: live capture from POLARIS still needs the engine's own input stream —
   `record_clip`/`sd.rec` can't open these WDM-KS/DirectSound endpoints at 8 ch.
+- **"Cut (no pickup)" zone toggle** (`cp.set_zone_type`). One click in DESIGN flips a coverage zone
+  between active (`dynamic`) and cut (`exclusion`), so you can silence a problem area (a hallway, an
+  HVAC corner, an auto-generated zone over a doorway) without deleting and redrawing it. A cut zone is
+  excluded from steer targets and nulled live by the existing "Cut the door…" auto-steer toggle. No
+  schema change.
 - **Learn array orientation from a DOA measurement** (`cp.learn_bearing(array_pos, ref_point,
   measured_az_deg) -> float`; `cp.set_array_bearing`; DESIGN-panel **"Learn bearing from a reference…"**
   button; `scripts/learn_bearing.py`) — infers a mic array's `bearingDeg` from a single DOA measurement

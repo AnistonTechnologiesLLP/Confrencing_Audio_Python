@@ -120,6 +120,7 @@ from .coverage import (  # noqa: F401
     pickup_zone_count,
     set_zone_gain_db as array_set_zone_gain_db,
     set_zone_output_channel as array_set_zone_output_channel,
+    set_zone_type as array_set_zone_type,
 )
 from .devices import (  # noqa: F401
     create_camera,
@@ -353,6 +354,7 @@ from .api import (  # noqa: F401
     set_zone_gain_db,
     set_zone_output_channel,
     set_zone_shape,
+    set_zone_type,
     talker_coverage,
     talker_elevation,
     unroute,
