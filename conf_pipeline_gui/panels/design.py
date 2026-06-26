@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QListWidget,
     QListWidgetItem,
+    QMessageBox,
     QPushButton,
     QVBoxLayout,
     QWidget,
@@ -108,6 +109,10 @@ class DesignPanel(PanelBase):
         addz.setToolTip("Add a default zone of the kind picked on the Zone tool's flyout")
         addz.clicked.connect(self._add_zone_default)
         cl.addWidget(addz)
+        auto_btn = QPushButton("Auto-generate zones from seating")
+        auto_btn.setToolTip("Derive coverage zones from chairs/sofas in the room layout (one undo step)")
+        auto_btn.clicked.connect(self._auto_zones_from_seating)
+        cl.addWidget(auto_btn)
         cl.addWidget(QLabel("Tip: pick the Zone tool (Z) and drag on the canvas."))
         lay.addWidget(cov)
 
@@ -205,6 +210,23 @@ class DesignPanel(PanelBase):
         else:
             z = cp.dynamic_zone(zid, f"Records {zid}", RectShape(origin=Point2D(1, 1), width=2, height=2))
         self.state.set_config(cp.add_coverage_zone(self.state.config, aid, z))
+
+    def _auto_zones_from_seating(self):
+        """Derive coverage zones from room furniture seats (one undo step on success)."""
+        aid = self._selected_array_id()
+        if not aid:
+            return self._toast("Add a microphone array first.")
+        try:
+            res = cp.generate_seat_zones(self.state.config, aid)
+        except ValueError as exc:
+            return self._toast(str(exc))
+        if not res.created:
+            return self._toast(res.warnings[0] if res.warnings else "No seats to cover.")
+        self.state.set_config(res.config)  # one undo step + repaint
+        lines = [f"Created {len(res.created)} zone(s): " + ", ".join(res.created)]
+        lines += res.merged + res.warnings
+        QMessageBox.information(self, "Auto-generate zones from seating", "\n".join(lines))
+        self._toast("Generated zones from seating")
 
     def _add_talker(self):
         tid = self.state.next_talker_id()
