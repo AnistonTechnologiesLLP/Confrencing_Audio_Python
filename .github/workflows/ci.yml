@@ -2,6 +2,7 @@ name: CI
 
 on:
   push:
+    branches: [master]
   pull_request:
 
 jobs:
@@ -11,7 +12,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.10", "3.11", "3.12", "3.13"]
+        # Trimmed from 3.10–3.13 to a single version to cut CI wall-clock
+        # (the 4-version matrix serialized to ~100–120 min). mypy still pins 3.10
+        # as the floor; re-add versions here if a release needs broader coverage.
+        python-version: ["3.12"]
     steps:
       - uses: actions/checkout@v4
 
