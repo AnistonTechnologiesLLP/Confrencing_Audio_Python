@@ -127,5 +127,24 @@ worth a confirming pass since `profiles.py` is touched.
 - **Representative frequency vs per-band:** the sim is single-narrowband today. Start with one
   representative speech frequency for the beamwidth; per-band refinement is a later enhancement if the
   single value misleads.
-- **Ceiling continuity:** must verify the chosen `k` keeps ceiling-array scores within noise of today's
-  (the calibration's "reduces to 35°" check + the regression tests cover this).
+- **Ceiling continuity:** ceiling-array scores must stay within noise of today's. **Resolved at the
+  calibration step (see "Calibration outcome" below):** continuity is guaranteed by the
+  `aperture_m is None → 35°` fallback, not by the formula reducing to 35° — the regression tests cover
+  this.
+
+## Calibration outcome (Task 6)
+
+Calibration (endfire/horizontal sweep of the measured `sensibel_8` delay-sum beam) found:
+
+- A coherent circular ring array is **~2× narrower** than the linear-aperture formula (raw sinc
+  value `k=0.886`) at speech frequencies.  `_BW_K` was calibrated down to **0.47**; the analytic
+  model now matches the measured beam within **~1°** at 1500 Hz and 3000 Hz (worst gap ~0.79°,
+  well inside the ±15° tolerance).
+- The spec's "formula reduces to ≈35° at a ceiling reference" anchor (0.18 m aperture @ 1500 Hz)
+  was **dropped**: with the calibrated constant, a 0.18 m ring gives ~17°, not ~35°.  This is not a
+  regression — **ceiling-array scoring continuity is instead guaranteed by the `aperture_m is None →
+  35°` fallback** in `scoring.py`/`coverage_sim.py` (no scoring regression; confirmed by
+  `tests/test_aperture_scoring.py` and `tests/test_coverage_sim_aperture.py`).
+- `test_directivity.py` was updated to reflect calibrated physics: the POLARIS broadside half-angle
+  at 3400 Hz is ~17° (calibrated band 10–25°), and the "ceiling aperture ≈ 35°" test was rewritten
+  as `test_larger_aperture_gives_tighter_beam` asserting physically correct monotonicity.

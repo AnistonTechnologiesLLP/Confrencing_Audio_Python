@@ -28,14 +28,34 @@ def test_off_broadside_is_wider():
     assert endfire >= broad
 
 def test_polaris_is_near_omni_low_and_coarse_high():
-    # 40 mm array: essentially omni at low speech freq, still coarse (>30 deg half) up high
-    assert steered_beamwidth_deg(POLARIS_AP, 700.0, 90.0) >= 80.0
-    assert steered_beamwidth_deg(POLARIS_AP, 3400.0, 0.0) >= 30.0
+    """40 mm POLARIS: near-omni at low speech frequencies, monotonically narrowing with frequency.
 
-def test_ceiling_reference_aperture_is_about_35_deg():
-    # a ~0.18 m (large/ceiling-class) aperture at the speech centre lands near the legacy 35 deg half-angle
-    h = steered_beamwidth_deg(0.18, SIM_SPEECH_FREQ_HZ, 0.0)
-    assert 28.0 <= h <= 45.0
+    The high-freq bound is calibrated to the measured sensibel_8 ring beam (Task 6):
+    at 3400 Hz broadside the real half-angle is ~17°, not the 30°+ the old linear-aperture
+    formula predicted.  We assert the calibrated physics band (10–25°) and that the
+    high-freq beam is strictly narrower than the low-freq near-omni value.
+    """
+    lo = steered_beamwidth_deg(POLARIS_AP, 700.0, 90.0)
+    hi = steered_beamwidth_deg(POLARIS_AP, 3400.0, 0.0)
+    assert lo >= 80.0               # near-omni at low freq
+    assert 10.0 <= hi <= 25.0       # calibrated measured band at 3400 Hz broadside
+    assert hi < lo                  # monotonically narrower at high frequency
+
+def test_larger_aperture_gives_tighter_beam():
+    """A larger aperture produces a meaningfully tighter beam at the speech centre frequency.
+
+    After calibrating _BW_K to the measured sensibel_8 ring beam (Task 6), a 0.18 m
+    aperture gives ~17° at 1500 Hz — NOT the ~35° the old formula predicted.  The
+    spec's "ceiling scoring preserved" guarantee is provided by the aperture_m is None →
+    35° FALLBACK in the scorer/coverage_sim (tested in test_aperture_scoring.py /
+    test_coverage_sim_aperture.py), NOT by the formula matching 35° at 0.18 m.
+
+    This test asserts the physically correct truth: a larger array is tighter.
+    """
+    small = steered_beamwidth_deg(0.08, SIM_SPEECH_FREQ_HZ, 0.0)
+    big = steered_beamwidth_deg(0.18, SIM_SPEECH_FREQ_HZ, 0.0)
+    assert big < small                      # larger aperture → tighter beam
+    assert 10.0 <= big <= 25.0             # calibrated physics band for 0.18 m at 1500 Hz
 
 def test_alias_ceiling_polaris_about_5p6k():
     assert 5200.0 <= alias_ceiling_hz(POLARIS_SP) <= 6000.0

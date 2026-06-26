@@ -16,9 +16,12 @@ SIM_SPEECH_FREQ_HZ = 1500.0   # representative speech-band centre for the single
 NEAR_OMNI_HALF_DEG = 90.0     # a half-angle of 90 deg = no usable directivity in the look plane
 
 # Calibration constants (refined in tests/test_directivity_calibration.py).
-_BW_K = 0.886                 # 3 dB full-beamwidth factor: full_rad ≈ _BW_K * lambda / aperture;
+_BW_K = 0.47                  # 3 dB full-beamwidth factor: full_rad ≈ _BW_K * lambda / aperture;
                               # the function divides by 2 to yield the half-angle.
-                              # Standard sinc-aperture value; treated as a first-pass — calibrated in a later task.
+                              # Calibrated to the measured sensibel_8 ring beam (Task 6): a coherent
+                              # circular ring is ~2× narrower than the linear-aperture formula
+                              # (raw sinc value 0.886), giving _BW_K ≈ 0.47. The calibrated model
+                              # matches the measured delay-sum endfire beam within ~1° at 1500/3000 Hz.
 _ENDFIRE_WIDEN = 1.6          # extra widening as the look tilts toward endfire (off-nadir 90 deg)
 
 
