@@ -201,10 +201,11 @@ def generate_seat_zones(config: SystemConfig, array_id: str) -> SeatZoneResult:
             )
         anchors = {sid: anchor for sid, anchor in owned}
         seat_ids = [sid for sid, _ in owned]
-        groups: list[list[str]] = [[sid] for sid in seat_ids][:8]
-        if len(seat_ids) > 8:
+        groups: list[list[str]] = [[sid] for sid in seat_ids][:MAX_ZONES_PER_ARRAY]
+        if len(seat_ids) > MAX_ZONES_PER_ARRAY:
             warnings.append(
-                "More than 8 seats and no array position — only the first 8 got zones."
+                f"More than {MAX_ZONES_PER_ARRAY} seats and no array position — "
+                f"only the first {MAX_ZONES_PER_ARRAY} got zones."
             )
         warnings.append("Set the array position for separability-aware grouping.")
         forced = False
