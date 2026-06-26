@@ -76,3 +76,39 @@ def test_rotated_sofa_spreads_along_rotated_width():
     ys = sorted(a.position.y for _, a in seats)
     assert all(abs(a.position.x) < 1e-6 for _, a in seats)  # spread now along Y
     assert abs(ys[0] - (-2.0 / 3.0)) < 1e-6 and abs(ys[2] - (2.0 / 3.0)) < 1e-6
+
+
+# ---------------------------------------------------------------------------
+# Task 2: cluster_seats
+# ---------------------------------------------------------------------------
+from conf_pipeline.seat_zones import SeatLook, cluster_seats
+
+
+def test_well_separated_seats_stay_individual():
+    looks = [SeatLook("a", 0.0, 10.0), SeatLook("b", 60.0, 10.0), SeatLook("c", 120.0, 10.0)]
+    groups, forced = cluster_seats(looks)
+    assert groups == [["a"], ["b"], ["c"]]
+    assert forced is False
+
+
+def test_close_seats_below_resolution_merge():
+    # 10° apart, half-width 30° → separable needs ≥ 1.5*30 = 45° → merge all three
+    looks = [SeatLook("a", 0.0, 30.0), SeatLook("b", 10.0, 30.0), SeatLook("c", 20.0, 30.0)]
+    groups, forced = cluster_seats(looks)
+    assert groups == [["a", "b", "c"]]
+    assert forced is False
+
+
+def test_more_groups_than_cap_force_merge_and_flag():
+    looks = [SeatLook(str(i), float(i * 20), 5.0) for i in range(10)]  # 10 resolvable seats, cap 8
+    groups, forced = cluster_seats(looks, max_zones=8)
+    assert len(groups) == 8
+    assert forced is True
+    # every seat still assigned exactly once
+    assert sorted(s for g in groups for s in g) == sorted(str(i) for i in range(10))
+
+
+def test_output_is_azimuth_sorted():
+    looks = [SeatLook("hi", 170.0, 10.0), SeatLook("lo", 5.0, 10.0)]
+    groups, _ = cluster_seats(looks)
+    assert groups == [["lo"], ["hi"]]
