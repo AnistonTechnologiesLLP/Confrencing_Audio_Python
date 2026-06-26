@@ -137,7 +137,7 @@ conf_pipeline_control/ host-side array-microphone control (optional [control] ex
   virtual_mic_grid.py    Nureva-style fixed near-field virtual-mic grid, loudest selected
   beam_engine.py      A/B engine: steered + grid back-ends on one shared input stream
   tracking.py         swappable smoothers (EMA + constant-velocity/Kalman-family hook)
-tests/                pytest suite (1027 tests; incl. headless GUI smoke)
+tests/                pytest suite (1044 tests; incl. headless GUI smoke)
 run_gui.py            launcher
 ```
 
@@ -724,6 +724,24 @@ Honest limits to set expectations:
   triangulation) even when well-spaced; corner-place or angle the kits so the rays cross at a useful
   angle. Near-parallel rays fall back to a level cross-check. Connection is refused with a visible
   reason if fewer than exactly 2 posed kits (each with `bearingDeg` + position set) are connected.
+
+**Learn the array's bearing from a DOA measurement** — if you can't read the array's mounting heading
+from the ceiling or a drawing, the DESIGN panel's **"Learn bearing from a reference…"** button infers it
+from one DOA capture: stand a reference talker at a known room point, record a short clip (the button
+reuses the existing calibrate-front DOA worker), and `cp.learn_bearing(array_pos, ref_point,
+measured_az_deg)` back-computes the heading and calls `cp.set_array_bearing` for you. The CLI
+`scripts/learn_bearing.py` does the same with explicit `--ref-x / --ref-y` coordinates. The GUI
+button's default reference is a point 2 m straight ahead (+Y) of the array; a room-seat picker for
+arbitrary reference points is a follow-up. The pure geometric solve is tested; live DOA capture is the
+hardware part (validate at the kit). No schema change — sets the existing v5 `bearingDeg` field.
+
+**Per-zone live gain on the mono beam** (opt-in, **off by default**) — pickup zones carry a per-zone
+`gain_db` trim whose primary use is separate Dante output channels (one output per zone). The
+**"Apply per-zone gain (live)"** checkbox surfaces it for the single mono feed: `cp.active_zone_gain_db`
+looks up which pickup zone the active azimuth falls into and applies its `gain_db` as a **post-AGC
+static offset** — the AGC normalises loudness first, then the zone trim adjusts it, so they don't fight.
+Auto-steer-scoped in v1 (A/B engine and zone-beam paths are unaffected). No schema change. Live A/B
+pending at the kit.
 
 **Caveat:** the ~cm aperture means coarse-zone selection, not MXA920/Nureva-scale pinpoint — these
 isolate a zone, A/B two strategies, or (with **Capture everyone**) separate 2-3 well-spaced talkers,

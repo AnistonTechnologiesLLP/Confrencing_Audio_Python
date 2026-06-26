@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import math
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QThreadPool
 from PySide6.QtWidgets import (
     QComboBox,
     QFormLayout,
@@ -25,7 +25,7 @@ from PySide6.QtWidgets import (
 import conf_pipeline as cp
 from conf_pipeline.model import Point2D, RectShape
 
-from .common import DEVICE_TYPES, NoWheelDoubleSpinBox, PanelBase, clear_layout
+from .common import DEVICE_TYPES, NoWheelDoubleSpinBox, PanelBase, _CalibWorker, clear_layout
 
 
 class DesignPanel(PanelBase):
@@ -34,6 +34,7 @@ class DesignPanel(PanelBase):
 
     def __init__(self, state):
         super().__init__(state)
+        self._calib_workers: set = set()   # strong refs to bearing-learn runnables
         root = QVBoxLayout(self)
         root.setContentsMargins(10, 8, 10, 8)
         root.addWidget(self._header())
@@ -339,7 +340,22 @@ class DesignPanel(PanelBase):
         if d.type in ("camera", "loudspeaker", "microphoneArray"):
             bearing = self._spin(float(getattr(d, "bearing_deg", 0.0) or 0.0), lambda v: self._set_bearing(d, v))
             bearing.setRange(0, 360)
-            form.addRow("Bearing (°)", bearing)
+            if d.type == "microphoneArray":
+                bearing_row = QHBoxLayout()
+                bearing_row.addWidget(bearing, 1)
+                learn_btn = QPushButton("Learn bearing…")
+                learn_btn.setToolTip(
+                    "Records a reference talker at a KNOWN point and infers the array bearing.\n"
+                    "Have someone stand at the reference point and talk for ~4 s, then click.\n"
+                    "Needs the [control] extra (numpy + sounddevice) and a connected device."
+                )
+                _did = d.id
+                learn_btn.clicked.connect(lambda _checked=False, did=_did: self._start_learn_bearing(did))
+                self._learn_btn = learn_btn
+                bearing_row.addWidget(learn_btn)
+                form.addRow("Bearing (°)", bearing_row)
+            else:
+                form.addRow("Bearing (°)", bearing)
             if d.type in ("camera", "loudspeaker"):
                 tilt = self._spin(float(getattr(d, "tilt_deg", 0.0) or 0.0), lambda v: self._set_tilt(d, v))
                 tilt.setRange(-90, 90)
@@ -380,6 +396,105 @@ class DesignPanel(PanelBase):
     def _set_tilt(self, d, v):
         fn = cp.set_camera_tilt if d.type == "camera" else cp.set_speaker_tilt
         self.state.set_config(fn(self.state.config, d.id, float(v)))
+
+    # ---- learn-bearing: pure solve + capture wiring ----
+
+    def _apply_learned_bearing(self, array_id: str, ref_point: Point2D, measured_az_deg: float) -> None:
+        """Apply the bearing inferred from a DOA measurement of a reference at ``ref_point``.
+
+        Pure, testable apply path — called by the GUI capture callback (hardware) AND
+        directly by tests (no audio). One undo step. Guards if the array has no position.
+        """
+        arr = next((d for d in self.state.config.devices if d.id == array_id), None)
+        if arr is None:
+            return
+        if arr.position is None:
+            self._toast("Place the array on the floor-plan first (position required).")
+            return
+        bearing = cp.learn_bearing(arr.position, ref_point, measured_az_deg)
+        self.state.set_config(cp.set_array_bearing(self.state.config, array_id, bearing))
+
+    def _start_learn_bearing(self, array_id: str) -> None:
+        """Launch the DOA capture worker; on completion call ``_apply_learned_bearing``.
+
+        Uses the same _CalibWorker path as the Live panel's 'Calibrate front' button.
+        Prompts for a reference point (2 m straight ahead of the array in its current
+        room +Y) if the array has no room seat within range; uses Point2D(0,2) relative
+        shift as a sensible default when no explicit input is given (operator can refine
+        via the Bearing spin after). Hardware — not unit-tested.
+        """
+        import conf_pipeline_control as cc  # noqa: PLC0415 (lazy import — control extra optional)
+
+        if not cc.controls_available():
+            self._toast("Learn bearing needs the [control] extra (numpy + sounddevice).")
+            return
+        arr = next((d for d in self.state.config.devices if d.id == array_id), None)
+        if arr is None or arr.position is None:
+            self._toast("Place the array on the floor-plan first (position required).")
+            return
+
+        # Default reference: 2 m in the room +Y direction from the array.
+        # The operator stands at this point and talks for ~4 s.
+        ref_point = Point2D(arr.position.x, arr.position.y + 2.0)
+
+        # Reuse the same geometry the Live panel uses: default 8-capsule POLARIS ring,
+        # capsule 5 masked off (the known dead-capsule default), 35 mm radius.
+        DEAD_CAPSULE = 5
+        POLARIS_RADIUS_M = 0.035
+        geom = cc.sensibel_8(radius_m=POLARIS_RADIUS_M)
+        geom = cc.with_active_channels(geom, [i != DEAD_CAPSULE for i in range(8)])
+
+        # device: try to find a connected input device; fall back to 0 (will fail loudly).
+        try:
+            from conf_pipeline_control.audio import list_input_devices
+            devs = list_input_devices()
+            polaris = next(
+                (d for d in devs if "POLARIS" in (d.name or "").upper() or "SB-" in (d.name or "").upper()),
+                devs[0] if devs else None,
+            )
+            device = polaris.index if polaris else 0
+        except Exception:
+            device = 0
+
+        self._toast("Learning bearing — talk from 2 m in front of the array for ~4 s…")
+        btn = getattr(self, "_learn_btn", None)
+        if btn is not None:
+            btn.setEnabled(False)
+        self._learn_ref_point = ref_point
+        self._learn_array_id = array_id
+        worker = _CalibWorker(geom, device, 44100, 90.0)
+        worker.signals.done.connect(self._on_learn_bearing_done)
+        worker.signals.failed.connect(self._on_learn_bearing_failed)
+        self._calib_workers.add(worker)
+        QThreadPool.globalInstance().start(worker)
+
+    def _on_learn_bearing_done(self, payload) -> None:
+        self._calib_workers.clear()
+        btn = getattr(self, "_learn_btn", None)
+        if btn is not None:
+            btn.setEnabled(True)
+        az, sal = payload
+        if az is None:
+            self._toast("Learn bearing: no clear talker detected — try again, louder / closer.")
+            return
+        ref_point = getattr(self, "_learn_ref_point", Point2D(0.0, 2.0))
+        array_id = getattr(self, "_learn_array_id", None)
+        if array_id is None:
+            return
+        self._apply_learned_bearing(array_id, ref_point, az)
+        arr = next((d for d in self.state.config.devices if d.id == array_id), None)
+        bearing = getattr(arr, "bearing_deg", None) if arr else None
+        self._toast(
+            f"Bearing learned: DOA {az:.0f}° at reference → bearing set to {bearing:.0f}° "
+            f"({sal:.0f} dB)."
+        )
+
+    def _on_learn_bearing_failed(self, msg: str) -> None:
+        self._calib_workers.clear()
+        btn = getattr(self, "_learn_btn", None)
+        if btn is not None:
+            btn.setEnabled(True)
+        self._toast(f"Learn bearing failed: {msg}")
 
     def _talker_props(self, t):
         form = QFormLayout()
