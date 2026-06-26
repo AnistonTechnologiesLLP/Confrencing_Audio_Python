@@ -137,7 +137,7 @@ conf_pipeline_control/ host-side array-microphone control (optional [control] ex
   virtual_mic_grid.py    Nureva-style fixed near-field virtual-mic grid, loudest selected
   beam_engine.py      A/B engine: steered + grid back-ends on one shared input stream
   tracking.py         swappable smoothers (EMA + constant-velocity/Kalman-family hook)
-tests/                pytest suite (1048 tests; incl. headless GUI smoke)
+tests/                pytest suite (1066 tests; incl. headless GUI smoke)
 run_gui.py            launcher
 ```
 
@@ -746,6 +746,16 @@ warnings are surfaced in the **Simulate** panel's read-only "Coverage warnings" 
 (`conf_pipeline` stays numpy-free); the calibration test is numpy-only and guarded by a `[control]`
 skip. No schema change — `aperture_m` and `element_spacing_m` are profile-catalog constants (code-only,
 never serialized); configs persist only `profileId` and round-trip byte-identically at CONFIG_VERSION 5.
+
+**Auto-generate coverage zones from furniture seating** (`cp.generate_seat_zones`; sub-feature #2 of
+the POLARIS table-array coverage workflow): one DESIGN click derives seats from the furniture already
+in the room — chairs contribute one seat each, sofas spread N seats across the cushion span, and
+explicit `SeatAnchor` objects on a piece of furniture win over the catalog defaults. Seats that the
+array cannot physically resolve (closer together than the 3 dB beamwidth from sub-feature #1) are
+merged into shared zones, so the result is honest by construction — never more than 8 zones, and it
+will never produce a zone plan the beam can't execute. The operation replaces the selected array's
+pickup zones in one step (one undo, a summary dialog). No schema change — zones are already v5
+serialized fields; `conf_pipeline` stays numpy-free throughout.
 
 ## Designer-inspired workflow (1.8.0)
 
