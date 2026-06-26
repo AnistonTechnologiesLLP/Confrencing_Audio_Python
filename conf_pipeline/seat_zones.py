@@ -7,12 +7,26 @@ pickup zone per cluster. No numpy, no schema change.
 """
 from __future__ import annotations
 
+import copy
 import math
 from dataclasses import dataclass
 
-from .directivity import separable
+from .angles import Point3D, steering_angles
+from .coverage import add_coverage_zone, dynamic_zone, remove_coverage_zone
+from .coverage_sim import DEFAULT_PICKUP_BEAM_HALF_DEG, SEATED_HEAD_M, _device_elev
+from .directivity import SIM_SPEECH_FREQ_HZ, separable, steered_beamwidth_deg
 from .furniture import furniture_type, resolved_dimensions
-from .model import MAX_ZONES_PER_ARRAY, Point2D, SeatAnchor, SystemConfig, angular_separation_deg
+from .model import (
+    MAX_ZONES_PER_ARRAY,
+    CoverageZone,
+    MicrophoneArray,
+    Point2D,
+    RectShape,
+    SeatAnchor,
+    SystemConfig,
+    angular_separation_deg,
+)
+from .profiles import device_capabilities
 
 
 def derived_room_seats(config: SystemConfig) -> list[tuple[str, SeatAnchor]]:
@@ -93,3 +107,153 @@ def cluster_seats(
         del groups[best_i + 1]
 
     return [[L.seat_id for L in g] for g in groups], forced
+
+
+# ---------------------------------------------------------------------------
+# Task 3: zone generation
+# ---------------------------------------------------------------------------
+
+_ZONE_MARGIN_M = 0.35   # capture radius padding around the seat point(s)
+_ZONE_MIN_SIDE_M = 0.6  # smallest zone side
+
+
+@dataclass
+class SeatZoneResult:
+    config: SystemConfig
+    created: list[str]        # generated zone labels
+    merged: list[str]         # human-readable "merged because …" notes
+    warnings: list[str]
+
+
+def _owned_seats(
+    config: SystemConfig,
+    array_id: str,
+    seats: list[tuple[str, SeatAnchor]],
+) -> list[tuple[str, SeatAnchor]]:
+    """The subset of ``seats`` whose nearest microphone array (Euclidean) is
+    ``array_id`` — mirrors :func:`conf_pipeline.seat_mapper.seats_owned_by_array`
+    but over derived seats. Ties go to the lowest array id. Arrays without a
+    position are ignored as owners."""
+    arrays = [
+        d for d in config.devices
+        if isinstance(d, MicrophoneArray) and d.position is not None
+    ]
+    if not arrays:
+        return []
+    out: list[tuple[str, SeatAnchor]] = []
+    for sid, anchor in seats:
+        best_id: str | None = None
+        best_d = float("inf")
+        for a in sorted(arrays, key=lambda a: a.id):
+            assert a.position is not None  # filtered above
+            d = math.hypot(
+                a.position.x - anchor.position.x,
+                a.position.y - anchor.position.y,
+            )
+            if d < best_d - 1e-9:
+                best_d, best_id = d, a.id
+        if best_id == array_id:
+            out.append((sid, anchor))
+    return out
+
+
+def _zone_for_group(
+    array_id: str,
+    n: int,
+    points: list[Point2D],
+    seat_ids: list[str],
+) -> CoverageZone:
+    xs = [p.x for p in points]
+    ys = [p.y for p in points]
+    x0, x1 = min(xs) - _ZONE_MARGIN_M, max(xs) + _ZONE_MARGIN_M
+    y0, y1 = min(ys) - _ZONE_MARGIN_M, max(ys) + _ZONE_MARGIN_M
+    w = max(x1 - x0, _ZONE_MIN_SIDE_M)
+    h = max(y1 - y0, _ZONE_MIN_SIDE_M)
+    cx, cy = (x0 + x1) / 2.0, (y0 + y1) / 2.0
+    shape = RectShape(origin=Point2D(cx - w / 2.0, cy - h / 2.0), width=w, height=h)
+    label = (
+        f"Seat {seat_ids[0].split('-seat')[-1]}"
+        if len(seat_ids) == 1
+        else f"Seats ({len(seat_ids)})"
+    )
+    return dynamic_zone(id=f"{array_id}-z{n}", label=label, shape=shape)
+
+
+def generate_seat_zones(config: SystemConfig, array_id: str) -> SeatZoneResult:
+    """Replace ``array_id``'s coverage zones with zones derived from room seating,
+    clustered by what the array can physically resolve (sub-feature #1 beamwidth)."""
+    array = next((d for d in config.devices if d.id == array_id), None)
+    if not isinstance(array, MicrophoneArray):
+        raise ValueError(f"No microphone array {array_id!r} in config")
+
+    all_seats = derived_room_seats(config)
+    warnings: list[str] = []
+
+    if array.position is None:
+        # no pose → can't compute nearest-array ownership or looks → per-seat, no merge
+        owned = all_seats
+        if not owned:
+            return SeatZoneResult(
+                config,
+                [],
+                [],
+                ["No seats found for this array — place chairs/sofas or set seat anchors."],
+            )
+        anchors = {sid: anchor for sid, anchor in owned}
+        seat_ids = [sid for sid, _ in owned]
+        groups: list[list[str]] = [[sid] for sid in seat_ids][:8]
+        if len(seat_ids) > 8:
+            warnings.append(
+                "More than 8 seats and no array position — only the first 8 got zones."
+            )
+        warnings.append("Set the array position for separability-aware grouping.")
+        forced = False
+    else:
+        owned = _owned_seats(config, array_id, all_seats)
+        if not owned:
+            return SeatZoneResult(
+                config,
+                [],
+                [],
+                ["No seats found for this array — place chairs/sofas or set seat anchors."],
+            )
+        anchors = {sid: anchor for sid, anchor in owned}
+        cap = device_capabilities(array)
+        src = Point3D(array.position.x, array.position.y, _device_elev(config, array))
+        looks: list[SeatLook] = []
+        for sid, anchor in owned:
+            sa = steering_angles(
+                src, Point3D(anchor.position.x, anchor.position.y, SEATED_HEAD_M)
+            )
+            half = (
+                steered_beamwidth_deg(cap.aperture_m, SIM_SPEECH_FREQ_HZ, sa.downtilt_deg)
+                if cap.aperture_m is not None
+                else DEFAULT_PICKUP_BEAM_HALF_DEG
+            )
+            looks.append(SeatLook(sid, sa.azimuth_deg, half))
+        groups, forced = cluster_seats(looks)
+
+    # build zones; replace-all on the array
+    new_array = array
+    for zid in [z.id for z in array.zones]:
+        new_array = remove_coverage_zone(new_array, zid)
+    created: list[str] = []
+    merged: list[str] = []
+    for n, group in enumerate(groups, start=1):
+        pts = [anchors[sid].position for sid in group]
+        zone = _zone_for_group(array_id, n, pts, group)
+        new_array = add_coverage_zone(new_array, zone)
+        created.append(zone.label)
+        if len(group) > 1:
+            merged.append(
+                f"{zone.label}: merged {len(group)} seats this array cannot resolve apart."
+            )
+    if forced:
+        warnings.append(
+            "More seats than this array can address — merged the closest into shared zones."
+        )
+
+    new_devices = [new_array if d.id == array_id else d for d in config.devices]
+    new_config = copy.copy(config)
+    new_config.devices = new_devices
+    return SeatZoneResult(new_config, created, merged, warnings)

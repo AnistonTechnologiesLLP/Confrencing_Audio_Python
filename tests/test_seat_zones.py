@@ -112,3 +112,120 @@ def test_output_is_azimuth_sorted():
     looks = [SeatLook("hi", 170.0, 10.0), SeatLook("lo", 5.0, 10.0)]
     groups, _ = cluster_seats(looks)
     assert groups == [["lo"], ["hi"]]
+
+
+# ---------------------------------------------------------------------------
+# Task 3: generate_seat_zones + SeatZoneResult
+# ---------------------------------------------------------------------------
+import conf_pipeline as cp
+from conf_pipeline.coverage_sim import coverage_caveats
+from conf_pipeline.model import (
+    AutomixerConfig,
+    MatrixMixer,
+    MicrophoneArray,
+    Point2D,
+    RoomObject,
+    RoomLayout,
+    SystemConfig,
+)
+from conf_pipeline.seat_zones import generate_seat_zones
+
+
+def _polaris_room(objects, *, bearing=0.0, pos=Point2D(0.0, 0.0)):
+    arr = cp.create_microphone_array("a1", "Array", position=pos)
+    arr.profile_id = "polaris-8"
+    arr.bearing_deg = bearing
+    arr.elevation = 0.75
+    return SystemConfig(
+        version=5,
+        devices=[arr],
+        routes=[],
+        matrix=MatrixMixer(processor_id=""),
+        automixer=AutomixerConfig(processor_id=""),
+        mute_links=[],
+        talkers=[],
+        metadata={},
+        room=RoomLayout(vertices=[Point2D(-4, -4), Point2D(4, -4), Point2D(4, 4), Point2D(-4, 4)],
+                        height=3.0, objects=objects),
+    )
+
+
+def test_well_spaced_seats_get_individual_zones():
+    # two chairs ~3.5 m apart, ~2 m from the array → wide azimuth gap → 2 zones
+    cfg = _polaris_room([
+        RoomObject(id="c1", kind="chair", position=Point2D(-1.8, 2.0)),
+        RoomObject(id="c2", kind="chair", position=Point2D(1.8, 2.0)),
+    ])
+    res = generate_seat_zones(cfg, "a1")
+    arr = next(d for d in res.config.devices if d.id == "a1")
+    assert len(arr.zones) == 2
+    assert all(z.type == "dynamic" for z in arr.zones)
+    assert len(res.created) == 2
+
+
+def test_close_seats_merge_into_one_zone_coherent_with_caveats():
+    # two chairs ~0.4 m apart at ~1.2 m. Coherence with sub-feature #1: if coverage_caveats
+    # flags the two seat positions (as separate zones) un-separable, generate_seat_zones must
+    # merge those same two seats into ONE zone.
+    cfg = _polaris_room([
+        RoomObject(id="c1", kind="chair", position=Point2D(-0.2, 1.2)),
+        RoomObject(id="c2", kind="chair", position=Point2D(0.2, 1.2)),
+    ])
+    # 1) seed the two seats as separate manual zones and confirm #1 calls them unseparable
+    seeded = cp.add_coverage_zone(cfg, "a1",
+        cp.dynamic_zone("z-c1", "c1", cp.RectShape(Point2D(-0.5, 0.9), 0.6, 0.6)))
+    seeded = cp.add_coverage_zone(seeded, "a1",
+        cp.dynamic_zone("z-c2", "c2", cp.RectShape(Point2D(-0.1, 0.9), 0.6, 0.6)))
+    assert any("separat" in c.lower() for c in coverage_caveats(seeded))
+    # 2) the generator merges the same two seats into one zone
+    res = generate_seat_zones(cfg, "a1")
+    arr = next(d for d in res.config.devices if d.id == "a1")
+    assert len(arr.zones) == 1
+    assert res.merged  # a human-readable merge note
+
+
+def test_replace_all_clears_existing_zones():
+    cfg = _polaris_room([RoomObject(id="c1", kind="chair", position=Point2D(0.0, 2.0))])
+    # pre-seed a manual zone
+    cfg2 = cp.add_coverage_zone(cfg, "a1", cp.dynamic_zone("manual", "Manual", cp.RectShape(Point2D(-3, -3), 0.5, 0.5)))
+    res = generate_seat_zones(cfg2, "a1")
+    arr = next(d for d in res.config.devices if d.id == "a1")
+    assert all(z.id != "manual" for z in arr.zones)  # manual zone gone (replace-all)
+
+
+def test_no_seats_leaves_config_unchanged_with_warning():
+    cfg = _polaris_room([RoomObject(id="t1", kind="table", position=Point2D(0.0, 1.5))])
+    res = generate_seat_zones(cfg, "a1")
+    assert res.created == []
+    assert res.warnings
+    arr = next(d for d in res.config.devices if d.id == "a1")
+    assert arr.zones == []  # unchanged (was empty)
+
+
+def test_unknown_array_raises():
+    cfg = _polaris_room([RoomObject(id="c1", kind="chair", position=Point2D(0.0, 2.0))])
+    import pytest
+    with pytest.raises(ValueError):
+        generate_seat_zones(cfg, "nope")
+
+
+def test_result_zones_validate():
+    cfg = _polaris_room([
+        RoomObject(id="c1", kind="chair", position=Point2D(-1.8, 2.0)),
+        RoomObject(id="c2", kind="chair", position=Point2D(1.8, 2.0)),
+    ])
+    res = generate_seat_zones(cfg, "a1")
+    assert cp.validate(res.config).ok
+
+
+def test_no_position_falls_back_to_per_seat_with_warning():
+    cfg = _polaris_room([
+        RoomObject(id="c1", kind="chair", position=Point2D(-0.2, 1.2)),
+        RoomObject(id="c2", kind="chair", position=Point2D(0.2, 1.2)),
+    ])
+    arr = next(d for d in cfg.devices if d.id == "a1")
+    arr.position = None  # un-pose: can't compute looks
+    res = generate_seat_zones(cfg, "a1")
+    out = next(d for d in res.config.devices if d.id == "a1")
+    assert len(out.zones) == 2          # per-seat, no merge
+    assert any("position" in w.lower() for w in res.warnings)

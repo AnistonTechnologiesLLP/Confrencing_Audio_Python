@@ -204,6 +204,9 @@ from .seat_mapper import (  # noqa: F401
     seats_owned_by_array,
 )
 
+# ---- auto-generate coverage zones from furniture seating ----
+from .seat_zones import SeatZoneResult, derived_room_seats, generate_seat_zones  # noqa: F401
+
 # ---- design report export ----
 from .report import CommissioningInfo, commissioning_report, design_report  # noqa: F401
 
