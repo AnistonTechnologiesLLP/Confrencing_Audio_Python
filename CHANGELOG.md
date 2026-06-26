@@ -32,6 +32,11 @@ the TS sibling is at matching v5 parity. The desktop app is presented as
   panel's **"Coverage warnings"** list. No schema change — `aperture_m` / `element_spacing_m` are
   profile-catalog constants (code-only, not serialized); configs persist only `profileId`, round-trip
   byte-identically at CONFIG_VERSION 5, no TS-sibling change.
+- **Auto-generate coverage zones from furniture seating** (`cp.generate_seat_zones`, sub-feature #2 of
+  the POLARIS table-array coverage workflow). One DESIGN click derives seats from chairs/sofas (or
+  explicit seat anchors), clusters seats the array cannot physically resolve into shared zones (reusing
+  the calibrated aperture beamwidth), and replaces the selected array's zones. Honest by construction —
+  never more than 8 zones, merges what a small array can't separate. No schema change.
 
 ### Fixed
 - **Real-time DeepFilterNet3 (`post_nr_engine="dfn3"`) no longer distorts the voice.** Offline DFN3 (the
