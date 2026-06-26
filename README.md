@@ -137,7 +137,7 @@ conf_pipeline_control/ host-side array-microphone control (optional [control] ex
   virtual_mic_grid.py    Nureva-style fixed near-field virtual-mic grid, loudest selected
   beam_engine.py      A/B engine: steered + grid back-ends on one shared input stream
   tracking.py         swappable smoothers (EMA + constant-velocity/Kalman-family hook)
-tests/                pytest suite (605 tests; incl. headless GUI smoke)
+tests/                pytest suite (1027 tests; incl. headless GUI smoke)
 run_gui.py            launcher
 ```
 
