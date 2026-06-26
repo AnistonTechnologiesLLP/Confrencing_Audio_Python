@@ -137,7 +137,7 @@ conf_pipeline_control/ host-side array-microphone control (optional [control] ex
   virtual_mic_grid.py    Nureva-style fixed near-field virtual-mic grid, loudest selected
   beam_engine.py      A/B engine: steered + grid back-ends on one shared input stream
   tracking.py         swappable smoothers (EMA + constant-velocity/Kalman-family hook)
-tests/                pytest suite (605 tests; incl. headless GUI smoke)
+tests/                pytest suite (1048 tests; incl. headless GUI smoke)
 run_gui.py            launcher
 ```
 
@@ -728,6 +728,24 @@ Honest limits to set expectations:
 **Caveat:** the ~cm aperture means coarse-zone selection, not MXA920/Nureva-scale pinpoint — these
 isolate a zone, A/B two strategies, or (with **Capture everyone**) separate 2-3 well-spaced talkers,
 but two people seated close together at one table still merge into a single beam.
+
+**Honest aperture-aware coverage simulation** (`conf_pipeline/directivity.py`; sub-feature #1 of the
+POLARIS table-array coverage workflow): the geometric coverage simulator now scores each array with its
+**real aperture-limited beamwidth** instead of a fixed 35° half-angle placeholder. For profiles that
+declare `aperture_m` (currently only `polaris-8`), `steered_beamwidth_deg(aperture_m, freq_hz, steer_deg)`
+computes the 3 dB main-lobe half-angle (broadside ≈ 0.47·λ/aperture, widening toward endfire, clamping
+near-omni when λ ≫ aperture). The constant `_BW_K = 0.47` is calibrated to the measured sensiBel POLARIS
+delay-sum beam — it matches the real beam to within ~1° at 1500/3000 Hz (a coherent circular ring is
+roughly 2× narrower than the naive linear-aperture formula). The **`polaris-8` profile** (aperture 0.08 m,
+element spacing 0.0306 m) uses this path; all other profiles keep the legacy 35° (no regression). The
+coverage report (`cp.simulate_room_coverage`) also gains **honesty caveats** (`coverage_caveats` →
+`RoomCoverage.caveats`): a per-pickup-zone-pair **separability warning** for zone pairs the beam cannot
+resolve (zones closer than the 3 dB beamwidth), and a **spatial-aliasing / grating-lobe note** for the
+~5.6 kHz alias ceiling (`alias_ceiling_hz(element_spacing_m)`) above which directivity degrades. Both
+warnings are surfaced in the **Simulate** panel's read-only "Coverage warnings" list. This is pure-stdlib
+(`conf_pipeline` stays numpy-free); the calibration test is numpy-only and guarded by a `[control]`
+skip. No schema change — `aperture_m` and `element_spacing_m` are profile-catalog constants (code-only,
+never serialized); configs persist only `profileId` and round-trip byte-identically at CONFIG_VERSION 5.
 
 ## Designer-inspired workflow (1.8.0)
 

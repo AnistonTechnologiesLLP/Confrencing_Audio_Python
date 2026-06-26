@@ -20,6 +20,7 @@ import math
 from typing import Optional
 
 from ..angles import Point3D, SteeringAngles, steering_angles
+from ..directivity import SIM_SPEECH_FREQ_HZ, steered_beamwidth_deg
 from ..model import (
     MicrophoneArray,
     Point2D,
@@ -27,6 +28,7 @@ from ..model import (
     default_elevation,
     point_in_shape,
 )
+from ..profiles import device_capabilities
 from .types import Candidate, PlacementScore, SimParams
 
 
@@ -64,6 +66,15 @@ def off_axis_deg(ang: SteeringAngles, steer_off_nadir_deg: float, steer_az_deg: 
     s = _unit_from_nadir(steer_off_nadir_deg, steer_az_deg)
     dot = t[0] * s[0] + t[1] * s[1] + t[2] * s[2]
     return math.degrees(math.acos(max(-1.0, min(1.0, dot))))
+
+
+def effective_halfwidth_deg(array: MicrophoneArray, off_nadir_deg: float, params: SimParams) -> float:
+    """Main-lobe half-angle to use for ``array``: the aperture-aware value when the array's
+    profile declares an aperture, else the legacy fixed ``params.lobe_halfwidth_deg``."""
+    cap = device_capabilities(array)
+    if cap.aperture_m is None:
+        return params.lobe_halfwidth_deg
+    return steered_beamwidth_deg(cap.aperture_m, SIM_SPEECH_FREQ_HZ, off_nadir_deg)
 
 
 # --------------------------------------------------------------------------- #
@@ -136,11 +147,13 @@ def drr_db(distance_m: float, critical_distance_m: Optional[float]) -> Optional[
 # --------------------------------------------------------------------------- #
 # per-objective sub-scores
 # --------------------------------------------------------------------------- #
-def direct_level_db(distance_m: float, off_axis_angle_deg: float, params: SimParams) -> float:
+def direct_level_db(distance_m: float, off_axis_angle_deg: float, params: SimParams,
+                    halfwidth_deg: Optional[float] = None) -> float:
     """Relative direct-path level (dB) vs ``ref_distance``: spreading + directivity."""
+    hw = params.lobe_halfwidth_deg if halfwidth_deg is None else halfwidth_deg
     d = max(distance_m, 0.25)
     spread_db = -20.0 * math.log10(d / params.ref_distance_m)
-    x = off_axis_angle_deg / params.lobe_halfwidth_deg
+    x = off_axis_angle_deg / hw
     dir_db = -3.0 * (x * x)
     return spread_db + dir_db
 
@@ -155,10 +168,12 @@ def drr_score(drr_db_value: Optional[float], params: SimParams) -> float:
     return _norm(drr_db_value, params.drr_window_db)
 
 
-def coverage_score(off_axis_angle_deg: float, in_pickup: bool, in_exclusion: bool, params: SimParams) -> float:
+def coverage_score(off_axis_angle_deg: float, in_pickup: bool, in_exclusion: bool, params: SimParams,
+                   halfwidth_deg: Optional[float] = None) -> float:
+    hw = params.lobe_halfwidth_deg if halfwidth_deg is None else halfwidth_deg
     if in_exclusion:
         return 0.0
-    lobe = math.exp(-0.5 * (off_axis_angle_deg / params.lobe_halfwidth_deg) ** 2)
+    lobe = math.exp(-0.5 * (off_axis_angle_deg / hw) ** 2)
     zone_factor = 1.0 if in_pickup else 0.6  # soft penalty when no pickup zone is defined
     return _clamp01(lobe * zone_factor)
 
@@ -313,13 +328,14 @@ def talker_quality(
         Point3D(talker_pos.x, talker_pos.y, talker_elev),
     )
     oa = off_axis_deg(ang, steer_off_nadir_deg, steer_az_deg)
-    level_db = direct_level_db(ang.distance, oa, params)
+    hw = effective_halfwidth_deg(array, ang.off_nadir_deg, params)
+    level_db = direct_level_db(ang.distance, oa, params, halfwidth_deg=hw)
     drr_value = drr_db(ang.distance, critical_distance_m)
     in_pickup, in_exclusion = zone_membership(array, talker_pos)
 
     snr = snr_score(level_db, params)
     drr = drr_score(drr_value, params)
-    cov = coverage_score(oa, in_pickup, in_exclusion, params)
+    cov = coverage_score(oa, in_pickup, in_exclusion, params, halfwidth_deg=hw)
     return PlacementScore(
         total=geom_quality(snr, drr, cov, params),
         snr=snr,

@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (
     QGroupBox,
     QHBoxLayout,
     QLabel,
+    QListWidget,
     QPushButton,
     QSlider,
     QVBoxLayout,
@@ -116,6 +117,15 @@ class SimulatePanel(PanelBase):
         self.sim_backend_hint = QLabel("")
         self.sim_backend_hint.setWordWrap(True)
         lay.addWidget(self.sim_backend_hint)
+
+        self.sim_warnings_box = QGroupBox("Coverage warnings")
+        cov_lay = QVBoxLayout(self.sim_warnings_box)
+        cov_lay.setContentsMargins(6, 4, 6, 4)
+        self.sim_warnings_list = QListWidget()
+        self.sim_warnings_list.setWordWrap(True)
+        self.sim_warnings_list.setMaximumHeight(120)
+        cov_lay.addWidget(self.sim_warnings_list)
+        lay.addWidget(self.sim_warnings_box)
 
         lay.addStretch(1)
         return w
@@ -306,6 +316,7 @@ class SimulatePanel(PanelBase):
                 )
             self.sim_apply_btn.setEnabled(has_rec)
             self._render_sim_results()
+            self._refresh_coverage_warnings()
         finally:
             self._refreshing = False
 
@@ -341,3 +352,22 @@ class SimulatePanel(PanelBase):
             lbl = QLabel(ln)
             lbl.setWordWrap(True)
             self.sim_results_layout.addWidget(lbl)
+
+    def _refresh_coverage_warnings(self) -> None:
+        """Populate the 'Coverage warnings' list from the cached RoomCoverage.caveats."""
+        self.sim_warnings_list.clear()
+        try:
+            caveats = self.state.room_coverage().caveats
+        except Exception:
+            return
+        for line in caveats:
+            self.sim_warnings_list.addItem(line)
+        self.sim_warnings_box.setVisible(bool(caveats))
+
+    def warnings_text(self) -> str:
+        """Return all caveat lines joined by newline (empty string when there are none).
+        Used by the headless probe test to assert caveat content without painting."""
+        return "\n".join(
+            self.sim_warnings_list.item(i).text()
+            for i in range(self.sim_warnings_list.count())
+        )
