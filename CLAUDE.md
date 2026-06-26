@@ -47,6 +47,15 @@ QT_QPA_PLATFORM=offscreen ./.venv/Scripts/python.exe -m pytest -q
 - CI (`.github/workflows/ci.yml`) runs pytest across Python 3.10–3.13 and mypy on 3.12. Pinned dev
   deps live in `requirements-dev.txt`; loose ranges in `pyproject.toml`.
 
+### Git & PRs
+
+- The git remote is **`New`** (there is **no `origin`**). Branch off `master`; commit/push **only when
+  explicitly asked**. The workflow is feature-branch → PR.
+- The `gh` CLI is installed + authed (account `AnistonTechnologiesLLP`). Open a PR with:
+  `gh pr create --repo AnistonTechnologiesLLP/Confrencing_Audio_Python --base master --head <branch> --body-file <file>`
+  — pass `--repo` explicitly **because the remote isn't `origin`** (gh's auto-detect prefers `origin`),
+  and use `--body-file` to avoid shell-escaping backticks/glyphs.
+
 ### Optional extras (heavy deps, gated)
 
 `pip install -e ".[control]"` (numpy + sounddevice + scipy) enables live beamforming; `".[sim]"` /
@@ -98,6 +107,26 @@ the chain; dropped in `reset_transient`; fanned out through `BeamEngine._clean_c
 (`peq.py` `StreamingPeq`, `transient.py`, `voice_gate.py`, `streaming_cleaner.py`,
 `deepfilter_cleaner.py`, `streaming_aec.py`) share a `process(block[, noise_gate]) -> block` /
 `reset()` contract; shared state they mutate is rebound atomically, never reset in place (see below).
+
+### Live POLARIS gotchas (host-audio reality, not discoverable from the code)
+
+These cost real debugging time:
+- **A live edit to GUI/DSP code needs a FULL app relaunch.** Python doesn't hot-reload, and the GUI's
+  Disconnect→Connect re-runs the *same* in-memory code — a "fix that didn't take" is usually a stale
+  process, not a wrong fix.
+- **The array can silently deliver only a SUBSET of its 8 capsules** (e.g. 2 of 8 live, the rest at the
+  noise floor) → the beam goes hollow / low-passed / "electric" while each *raw* channel still sounds
+  fine (beamforming needs all 8 coherent). Before trusting live output, check per-capsule RMS
+  (`scripts/device_check.py`) / a capsule-health probe. An *offline* A/B clip can look clean while the
+  *live* stream is broken — they capture via different paths.
+- **Standalone `sd.rec` / `sd.InputStream(channels=8)` FAIL on the POLARIS** (WDM-KS/DirectSound:
+  "Invalid number of channels"). Only the engine's own `InputStream` opens all 8 — drive capture
+  through the engine, not ad-hoc scripts.
+- **The live monitor is two independent-clock streams** (mic in + headphone out) joined by a queue, so
+  clock drift / scheduling jitter can click; and **Bluetooth headphones flip to the low-quality HFP
+  profile** (buzzy ~8 kHz) whenever a capture session is open → **monitor on wired headphones**. The
+  recorded WAV is written upstream of the monitor, so "clean file but buzzy live" points at the monitor
+  path, not the DSP.
 
 ## Hard invariants (don't break these)
 
