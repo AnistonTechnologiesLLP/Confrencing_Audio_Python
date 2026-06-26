@@ -44,6 +44,8 @@ class DeviceCapabilities:
     supported_blocks: list[DspBlockKind]
     max_coverage_zones: int
     coverage_angle_deg: Optional[float] = None  # full pickup cone (arrays only); None = no coverage geometry
+    aperture_m: Optional[float] = None          # physical array aperture (m); enables honest beamwidth. None = legacy 35 deg
+    element_spacing_m: Optional[float] = None    # adjacent-capsule spacing (m); sets the spatial-aliasing ceiling
     camera: Optional[CameraSpec] = None         # FOV/range (camera profiles only)
     speaker: Optional[SpeakerSpec] = None       # dispersion/range (loudspeaker profiles)
 
@@ -57,16 +59,19 @@ class DeviceProfile:
     port_defaults: dict = field(default_factory=dict)
 
 
-def _cap(aec, automix, mute, blocks, zones, coverage_angle=None, camera=None, speaker=None):
+def _cap(aec, automix, mute, blocks, zones, coverage_angle=None, aperture_m=None,
+         element_spacing_m=None, camera=None, speaker=None):
     return DeviceCapabilities(
         aec=aec, automix=automix, mute=mute, supported_blocks=list(blocks),
-        max_coverage_zones=zones, coverage_angle_deg=coverage_angle, camera=camera, speaker=speaker,
+        max_coverage_zones=zones, coverage_angle_deg=coverage_angle,
+        aperture_m=aperture_m, element_spacing_m=element_spacing_m, camera=camera, speaker=speaker,
     )
 
 
 DEVICE_PROFILES: dict[str, DeviceProfile] = {
     "generic-ceiling-array": DeviceProfile("generic-ceiling-array", "Generic ceiling array", ["microphoneArray"], _cap(True, True, True, _MIC, 8, coverage_angle=120.0), {"danteOutputs": 1}),
     "generic-table-array": DeviceProfile("generic-table-array", "Generic table array", ["microphoneArray"], _cap(True, True, True, _MIC, 8, coverage_angle=130.0), {"danteOutputs": 1}),
+    "polaris-8": DeviceProfile("polaris-8", "sensiBel POLARIS (8-capsule, 40 mm)", ["microphoneArray"], _cap(True, True, True, _MIC, 8, coverage_angle=150.0, aperture_m=0.08, element_spacing_m=0.0306), {"danteOutputs": 1}),
     "generic-wireless-mic": DeviceProfile("generic-wireless-mic", "Generic wireless mic", ["wirelessMic"], _cap(True, True, True, ["gain", "mute", "peq4"], 0), {"danteOutputs": 1}),
     "generic-wired-mic": DeviceProfile("generic-wired-mic", "Generic wired mic", ["wiredMic"], _cap(True, True, True, ["gain", "mute", "peq4"], 0), {"analogOutputs": 1}),
     "generic-hardware-dsp": DeviceProfile("generic-hardware-dsp", "Generic hardware DSP", ["processor"], _cap(True, True, True, _FULL, 0), {"danteInputs": 8, "danteOutputs": 8, "analogInputs": 2, "analogOutputs": 2}),
