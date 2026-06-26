@@ -9,6 +9,7 @@ import math
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QFormLayout,
     QGroupBox,
@@ -269,13 +270,37 @@ class DesignPanel(PanelBase):
             rm.clicked.connect(lambda: self.state.set_config(cp.remove_coverage_zone(cfg, sel["array_id"], sel["zone_id"])))
             self.sel_layout.addWidget(rm)
 
+    def _toggle_zone_cut(self, checked: bool) -> None:
+        """Flip the selected zone between dynamic and exclusion (one undo step)."""
+        sel = self.state.selection
+        if not sel or sel.get("kind") != "zone":
+            return
+        array_id = sel["array_id"]
+        zone_id = sel["zone_id"]
+        new_type = "exclusion" if checked else "dynamic"
+        try:
+            self.state.set_config(cp.set_zone_type(self.state.config, array_id, zone_id, new_type))
+        except cp.CoverageError as exc:
+            self._toast(f"⚠ {exc}")
+
     def _zone_props(self, array_id, zone_id):
         """Per-coverage-area output channel + gain (Designer steerable coverage)."""
         cfg = self.state.config
         arr = next((d for d in cfg.devices if d.id == array_id), None)
         zone = next((z for z in arr.zones if z.id == zone_id), None) if arr else None
-        if zone is None or zone.type == "exclusion":
-            return  # exclusion zones carry no output channel
+        if zone is None:
+            return
+
+        # "Cut (no pickup)" checkbox — available for all zone types
+        cut_cb = QCheckBox("Cut (no pickup)")
+        cut_cb.setToolTip("Exclude this area: no audio is picked up here")
+        cut_cb.setChecked(zone.type == "exclusion")
+        cut_cb.toggled.connect(lambda checked: None if self._refreshing else self._toggle_zone_cut(checked))
+        self.sel_layout.addWidget(cut_cb)
+
+        if zone.type == "exclusion":
+            return  # exclusion zones carry no output channel or gain controls
+
         form = QFormLayout()
         ch = QComboBox()
         ch.addItem("— (mixed only)", None)

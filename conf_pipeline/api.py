@@ -18,6 +18,7 @@ from .model import (
     ControlConfig,
     CoverageMode,
     CoverageZone,
+    CoverageZoneType,
     Crosspoint,
     Device,
     MatrixMixer,
@@ -263,6 +264,12 @@ def set_zone_output_channel(config: SystemConfig, array_id: str, zone_id: str, c
 def set_zone_gain_db(config: SystemConfig, array_id: str, zone_id: str, gain_db: Optional[float]) -> SystemConfig:
     """Set (or clear with ``None``) a coverage area's per-area gain trim (dB)."""
     return _array_fn(config, array_id, lambda d: cov.set_zone_gain_db(d, zone_id, gain_db))  # type: ignore[arg-type]
+
+
+def set_zone_type(config: SystemConfig, array_id: str, zone_id: str, zone_type: CoverageZoneType) -> SystemConfig:
+    """Change a coverage zone's type. Flipping to ``"exclusion"`` marks it no-pickup
+    ("cut") — it is then excluded from steer targets and nulled by the live cut toggle."""
+    return _array_fn(config, array_id, lambda d: cov.set_zone_type(d, zone_id, zone_type))  # type: ignore[arg-type]
 
 
 def auto_assign_zone_channels(config: SystemConfig, array_id: str) -> SystemConfig:
