@@ -230,6 +230,11 @@ the TS sibling is at matching v5 parity. The desktop app is presented as
   cut) for the talker+interferer A/B. Pure offline math (reuses `apply_design_offline`); hardware-free and
   deterministic. (+2 tests.) Note: live capture from POLARIS still needs the engine's own input stream —
   `record_clip`/`sd.rec` can't open these WDM-KS/DirectSound endpoints at 8 ch.
+- **"Cut (no pickup)" zone toggle** (`cp.set_zone_type`). One click in DESIGN flips a coverage zone
+  between active (`dynamic`) and cut (`exclusion`), so you can silence a problem area (a hallway, an
+  HVAC corner, an auto-generated zone over a doorway) without deleting and redrawing it. A cut zone is
+  excluded from steer targets and nulled live by the existing "Cut the door…" auto-steer toggle. No
+  schema change.
 
 ## [1.18.0] - 2026-06-17
 

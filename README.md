@@ -137,7 +137,7 @@ conf_pipeline_control/ host-side array-microphone control (optional [control] ex
   virtual_mic_grid.py    Nureva-style fixed near-field virtual-mic grid, loudest selected
   beam_engine.py      A/B engine: steered + grid back-ends on one shared input stream
   tracking.py         swappable smoothers (EMA + constant-velocity/Kalman-family hook)
-tests/                pytest suite (605 tests; incl. headless GUI smoke)
+tests/                pytest suite (1036 tests; incl. headless GUI smoke)
 run_gui.py            launcher
 ```
 
@@ -355,6 +355,21 @@ the same JSON as before (so existing files and the TS version are unaffected).
   (`CONTROL_MUTE_GROUP_INVALID`). The design report gains **Coverage areas** and
   **Mute groups** sections, and the GUI's **Routing** tab has a **Mute groups**
   editor (create over the mute-capable mics, toggle mute, remove).
+- **"Cut (no pickup)" zone toggle** — `cp.set_zone_type(config, array_id, zone_id, zone_type)` flips a
+  coverage zone between active (`dynamic`) and cut (`exclusion`) with one API call. In the GUI: selecting
+  a zone in DESIGN shows a **"Cut (no pickup)"** checkbox that toggles it in-place (one undo step). Use
+  it to silence a problem area — a hallway, an HVAC corner, an auto-generated zone over a doorway —
+  without deleting and redrawing the zone.
+
+  Two "cut" concepts to keep straight:
+  - **Design-time zone type** (this feature): marks a zone `exclusion` at design time so it is never a
+    steer target and never gets an output channel. The checkbox is the design intent.
+  - **Runtime "Cut the door & anyone outside the pickup area"** toggle (existing auto-steer behaviour):
+    decides whether the live engine actively **nulls** all `exclusion` zones during auto-steer sessions.
+    A cut zone is excluded from steer targets regardless; it is actively nulled only when this runtime
+    toggle is on.
+
+  No schema change (the `type` field was already serialized in config v5).
 
 ## Live array-microphone control (1.11.0)
 
