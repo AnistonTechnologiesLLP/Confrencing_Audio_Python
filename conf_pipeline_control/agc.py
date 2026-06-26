@@ -84,3 +84,15 @@ class TargetLoudnessAgc:
         """Drop the slew state (atomic rebind of the tracker; an audio thread reads it lock-free)."""
         self._tracker = ExponentialTracker(self._alpha)
         self._lim = 1.0          # drop any held limiter duck so a reconnect starts clean
+
+
+def _apply_zone_gain(mono: Any, *, enabled: bool, lin: Any) -> Any:
+    """Post-AGC per-zone trim.  Bit-exact pass-through when disabled or no trim set
+    (returns the SAME array object so the off path is byte-identical).
+
+    Realtime-safe: one multiply + cast when active, zero alloc/lock when off.
+    ``lin`` is the linear gain scalar (e.g. ``10**(gain_db/20)``); ``None`` or ``1.0`` = no-op.
+    """
+    if not enabled or lin is None or lin == 1.0:
+        return mono
+    return (mono * float(lin)).astype(mono.dtype)

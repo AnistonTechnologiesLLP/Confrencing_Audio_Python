@@ -120,6 +120,7 @@ class AutoSteerController:
         config: Any = None,                     # room config — enables the zone cut (needs array bearing + zones)
         array_id: Optional[str] = None,         # which array's zones to honour
         zone_cut: bool = False,                 # cut the door + anyone outside the pickup area
+        zone_gain_enabled: bool = False,        # apply the active pickup zone's gain_db live (post-AGC, default OFF)
     ):
         self.geometry = geometry
         # Canonical coverage state is a LIST of sectors. A talker is "in coverage" if it falls
@@ -130,6 +131,7 @@ class AutoSteerController:
         self._config = config
         self._array_id = array_id
         self.zone_cut = bool(zone_cut)
+        self.zone_gain_enabled = bool(zone_gain_enabled)
         self.off_nadir_deg = off_nadir_deg
         self.max_talkers = max_talkers
         self.grid_step_deg = grid_step_deg
@@ -173,6 +175,7 @@ class AutoSteerController:
             preamp_gain_db=preamp_gain_db,
             preamp_auto=preamp_auto,
             agc_target_db=agc_target_db,
+            live_zone_gain=bool(zone_gain_enabled),
         )
         self._thread: Optional[threading.Thread] = None
         self._stop = threading.Event()
@@ -318,6 +321,19 @@ class AutoSteerController:
         # zone cut: keep only looks inside a pickup zone; null the door + anyone outside the pickup area
         if self.zone_cut and self._config is not None and self._array_id:
             in_az, out_az = _apply_zone_cut(self._config, self._array_id, in_az, out_az)
+
+        # per-zone gain: apply the active pickup zone's gain_db to the output (post-AGC, opt-in)
+        if self.zone_gain_enabled and self._config is not None and self._array_id:
+            try:
+                from conf_pipeline.seat_mapper import active_zone_gain_db as _azgd
+                az_for_gain = in_az[0] if in_az else None
+                if az_for_gain is not None:
+                    g = _azgd(self._config, self._array_id, az_for_gain)
+                    self.ctrl.set_zone_gain_lin(10 ** (g / 20.0) if g is not None else None)
+                else:
+                    self.ctrl.set_zone_gain_lin(None)
+            except Exception:
+                pass   # realtime-safe: never throw into the control tick
 
         # hysteresis: hold the last look set briefly when detections drop out
         if in_az:

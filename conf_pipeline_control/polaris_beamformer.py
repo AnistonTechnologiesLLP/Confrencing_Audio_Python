@@ -60,7 +60,7 @@ from .beamformer import _unit_from_az_offnadir
 from .control import MicController
 from .geometry import SOUND_SPEED_MPS, ArrayGeometry, sensibel_8, with_active_channels
 from .tracking import ExponentialTracker, Tracker
-from .agc import TargetLoudnessAgc
+from .agc import TargetLoudnessAgc, _apply_zone_gain
 from .preamp import PreampHost
 from ._stage_metrics import StageActivity, StageMeter, ZERO_ACTIVITY, loudness_matched_raw
 from . import doa
@@ -1148,6 +1148,7 @@ class PolarisBeamformer(PreampHost, MicController):
         aec_n_taps: int = 16,                                            # AEC echo-tail length (taps × hop ≈ 93 ms)
         aec_mu: float = 0.3,                                             # AEC NLMS step
         aec_ref_device: Optional[int] = None,                           # manual far-end reference device (None=auto)
+        live_zone_gain: bool = False,                                    # post-AGC per-zone gain trim (default OFF)
         output_callback: Optional[Callable[[Any], None]] = None,
         output_queue_size: int = 8,
         output_device: Optional[int] = None,
@@ -1207,6 +1208,11 @@ class PolarisBeamformer(PreampHost, MicController):
         self._explicit_nulls: list = []      # caller-supplied seat/manual bearings (set_nulls); DOA reads
         self._exclusion_nulls: list = []     # user-drawn exclusion-zone (door) bearings (set_exclusion_nulls)
         self._active_nulls: list = []        # bearings actually nulled this tick (telemetry)
+        # post-AGC per-zone gain trim (B2): opt-in, default OFF.  The trim scalar is rebound atomically
+        # (plain assignment); the audio thread reads it lock-free.  set_zone_gain_lin(None) / lin==1.0 ⇒
+        # bit-exact pass-through (_apply_zone_gain returns the SAME array object).
+        self._zone_gain: bool = bool(live_zone_gain)
+        self._zone_gain_lin: Optional[float] = None
         self.beam_bandlimit_hz = beam_bandlimit_hz
         # target-loudness AGC on the beam OUTPUT (control-pure: driven by output RMS, NOT distance/room).
         # OFF unless agc_target_db is set; sits below the user's set_gain_db (metering-only here), so manual
@@ -1507,6 +1513,15 @@ class PolarisBeamformer(PreampHost, MicController):
         empty-seat nulls and below measured interferers in :func:`compose_nulls`. ``None``/``[]`` clears them.
         Frequency-domain modes only (the time-domain tiers have no null degrees of freedom)."""
         self._exclusion_nulls = [float(b) for b in (bearings or [])]
+
+    def set_zone_gain_lin(self, lin: Optional[float]) -> None:
+        """Set the per-zone gain trim scalar (linear, e.g. ``10**(gain_db/20)``).
+
+        Rebinds the scalar atomically (plain assignment) so the audio thread reads it lock-free.
+        ``None`` or ``1.0`` disables the trim (bit-exact pass-through even when ``live_zone_gain``
+        is True). B3 (auto-steer wiring) calls this each tick; the trim is applied after AGC in
+        :meth:`process_block`. Mirrors how ``_active_nulls`` is a lock-free scalar write."""
+        self._zone_gain_lin = None if lin is None else float(lin)
 
     def set_peq_bands(self, bands: Optional[Sequence[dict]] = None) -> None:
         """Set/replace the parametric-EQ bands live (``[{freqHz,gainDb,q,type}]``); ``None``/``[]`` disables
@@ -1854,6 +1869,7 @@ class PolarisBeamformer(PreampHost, MicController):
                 agc_on=self._agc is not None, agc_gain_lin=agc_gain_lin)
         if self._bypass_cleaning:                     # monitor the RAW beam at matched loudness (the chain still ran)
             mono = loudness_matched_raw(pre_cleaner, agc_gain_lin if agc_gain_lin is not None else 1.0)
+        mono = _apply_zone_gain(mono, enabled=self._zone_gain, lin=self._zone_gain_lin)  # post-AGC zone trim (B2; no-op when off)
         if self._lp_kernel is not None:
             mono = self._band_limit(mono)             # runs ONCE on the chosen branch (single FIR-tail state)
         if self._voice_gate is not None and not self._bypass_cleaning:

@@ -488,6 +488,14 @@ class LivePanel(PanelBase):
         )
         self.live_autosteer_zonecut.setEnabled(False)        # enabled when auto-steer is ticked (pre-connect)
         asf.addRow("Zone cut", self.live_autosteer_zonecut)
+        self.live_autosteer_zonegain = QCheckBox("Apply per-zone gain (live)")
+        self.live_autosteer_zonegain.setToolTip(
+            "After AGC, scale the followed talker's output by the gain_db configured on the active pickup zone "
+            "(DESIGN → zone → Gain). Opt-in, default OFF — enable only when you have zone gains set in DESIGN. "
+            "Needs the array's bearing set + a pickup zone with a gain_db value. Fixed at Connect."
+        )
+        self.live_autosteer_zonegain.setEnabled(False)       # enabled when auto-steer is ticked (pre-connect)
+        asf.addRow("Zone gain", self.live_autosteer_zonegain)
         self.live_autosteer_aec = QCheckBox("Cancel echo (needs far-end playout)")
         self.live_autosteer_aec.setToolTip(
             "Cancel the room's loudspeaker echo from the followed talker using the PC's playback (the far-end "
@@ -1007,6 +1015,7 @@ class LivePanel(PanelBase):
         self.live_autosteer_transient.setEnabled(on)
         self.live_autosteer_voicegate.setEnabled(on)
         self.live_autosteer_zonecut.setEnabled(on)
+        self.live_autosteer_zonegain.setEnabled(on)
         self.live_autosteer_aec.setEnabled(on)
 
     def _iter_autosteer_widgets(self):
@@ -1594,6 +1603,7 @@ class LivePanel(PanelBase):
                 config=self.state.config,                               # room zones for the door / out-of-area cut
                 array_id=self._live_array_id(),
                 zone_cut=self.live_autosteer_zonecut.isChecked(),
+                zone_gain_enabled=self.live_autosteer_zonegain.isChecked(),   # post-AGC per-zone gain (opt-in)
             )
             ctrl.ctrl.set_gain_db(float(self.live_gain.value()))
             ctrl.start()

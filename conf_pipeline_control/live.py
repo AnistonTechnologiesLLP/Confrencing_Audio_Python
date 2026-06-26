@@ -48,6 +48,7 @@ from .agc import (
     DEFAULT_AGC_SILENCE_DB,
     DEFAULT_AGC_SLEW_ALPHA,
     TargetLoudnessAgc,
+    _apply_zone_gain,
 )
 from ._stage_metrics import StageActivity, StageMeter, ZERO_ACTIVITY, loudness_matched_raw
 from .steering import Direction
@@ -111,6 +112,7 @@ class LiveBeamController(PreampHost, MicController):
         agc_max_gain_db: float = DEFAULT_AGC_MAX_GAIN_DB,
         agc_slew_alpha: float = DEFAULT_AGC_SLEW_ALPHA,
         agc_silence_db: float = DEFAULT_AGC_SILENCE_DB,
+        live_zone_gain: bool = False,           # post-AGC per-zone gain trim (default OFF)
     ):
         super().__init__(geometry, n_channels=geometry.n_channels)
         self.device = device
@@ -198,6 +200,19 @@ class LiveBeamController(PreampHost, MicController):
         self._stage_metrics: Optional[StageMeter] = None
         self._stage_activity: StageActivity = ZERO_ACTIVITY
         self._bypass_cleaning = False
+        # post-AGC per-zone gain trim (B2): opt-in, default OFF.  Scalar rebound atomically (plain
+        # assignment); the audio thread reads it lock-free.  None / lin==1.0 ⇒ bit-exact pass-through.
+        self._zone_gain: bool = bool(live_zone_gain)
+        self._zone_gain_lin: Optional[float] = None
+
+    def set_zone_gain_lin(self, lin: Optional[float]) -> None:
+        """Set the per-zone gain trim scalar (linear, e.g. ``10**(gain_db/20)``).
+
+        Rebinds the scalar atomically (plain assignment) so the audio thread reads it lock-free.
+        ``None`` or ``1.0`` disables the trim (bit-exact pass-through even when ``live_zone_gain``
+        is True). B3 (auto-steer wiring) calls this each tick; the trim is applied after AGC in
+        :meth:`_process_block`."""
+        self._zone_gain_lin = None if lin is None else float(lin)
 
     # ---- weight computation (per FFT bin, broadband) ----
     def _compute_weights(self):
@@ -605,6 +620,7 @@ class LiveBeamController(PreampHost, MicController):
         if self._agc is not None and not self._bypass_cleaning:
             out = self._agc.process(out, freeze=self._agc_freeze())   # normalize loudness (frozen while muted / on a tap duck)
             agc_gain_lin = float(self._agc.tracker.value or 1.0)
+        out = _apply_zone_gain(out, enabled=self._zone_gain, lin=self._zone_gain_lin)  # post-AGC zone trim (B2; no-op when off)
         if self._voice_gate is not None and not self._bypass_cleaning:
             out = self._voice_gate.process(out)       # 'voice only' — mute non-speech (last stage)
         if raw_ab is not None:

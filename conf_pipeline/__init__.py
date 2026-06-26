@@ -194,9 +194,11 @@ from .coverage_sim import (  # noqa: F401
 # ---- room-aware seat mapping export ----
 from .seat_mapper import (  # noqa: F401
     SeatMatch,
+    active_zone_gain_db,
     azimuth_for_array_point,
     azimuth_in_pickup_zone,
     exclusion_zone_azimuths,
+    learn_bearing,
     nearest_seat,
     nearest_seat_for_array,
     room_seats,

@@ -251,6 +251,24 @@ the TS sibling is at matching v5 parity. The desktop app is presented as
   HVAC corner, an auto-generated zone over a doorway) without deleting and redrawing it. A cut zone is
   excluded from steer targets and nulled live by the existing "Cut the door…" auto-steer toggle. No
   schema change.
+- **Learn array orientation from a DOA measurement** (`cp.learn_bearing(array_pos, ref_point,
+  measured_az_deg) -> float`; `cp.set_array_bearing`; DESIGN-panel **"Learn bearing from a reference…"**
+  button; `scripts/learn_bearing.py`) — infers a mic array's `bearingDeg` from a single DOA measurement
+  of a reference talker at a known room point (the inverse of the array→azimuth mapping). The pure
+  geometric solve is fully tested; the GUI button reuses the existing **calibrate-front DOA-capture
+  worker** and defaults the reference to a point 2 m straight ahead (+Y) of the array (a seat-picker for
+  arbitrary room points is a follow-up). The CLI takes explicit `--ref-x` / `--ref-y`. **No schema
+  change** — sets the existing v5 `bearingDeg` field. Live DOA capture is the hardware part; pending
+  validation at the kit.
+- **Per-zone live gain trim on the mono beam** (`cp.active_zone_gain_db(config, array_id, azimuth_deg)
+  -> Optional[float]`; **"Apply per-zone gain (live)"** checkbox, default **off**) — returns the
+  `gain_db` of whichever pickup zone an array-relative azimuth points into and applies it as a
+  post-AGC static trim in the auto-steer path (both `PolarisBeamformer` and `LiveBeamController`).
+  Opt-in and **off by default**; applied after the AGC so it is a level offset the AGC does not fight.
+  **Auto-steer-scoped in v1** — the A/B engine and zone-beam paths are unaffected. **No schema change**
+  — reads the existing per-zone `gain_db` field. Per-zone gain's primary home remains the multi-output
+  Dante plane (one output channel per zone); this surfaces it for the single live mono feed. Live A/B
+  pending at the kit.
 
 ## [1.18.0] - 2026-06-17
 

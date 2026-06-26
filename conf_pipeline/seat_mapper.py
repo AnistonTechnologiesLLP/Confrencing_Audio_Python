@@ -213,6 +213,20 @@ def azimuth_for_array_point(config: SystemConfig, array_id: str, point: Point2D)
     return _array_relative_azimuth(array.position, array.bearing_deg, point)
 
 
+def learn_bearing(array_pos: Point2D, ref_point: Point2D, measured_az_deg: float) -> float:
+    """Infer the array's ``bearing_deg`` (0°=+Y, CW) from a DOA measurement.
+
+    A reference at ``ref_point`` is observed at ``measured_az_deg`` in the array's
+    DOA / steering frame. Since ``measured_az = bearing_to_deg(array, ref) − bearing``
+    (see :func:`_array_relative_azimuth`), the array bearing is the inverse::
+
+        bearing = bearing_to_deg(array_pos, ref_point) − measured_az_deg   (mod 360)
+
+    Pure geometry — no hardware. The caller supplies ``measured_az_deg`` from a live
+    DOA capture (e.g. the calibrate-front worker)."""
+    return _norm_bearing(bearing_to_deg(array_pos, ref_point) - measured_az_deg)
+
+
 # --------------------------------------------------------------------------- #
 # Zone geometry — exclusion (door) nulls + "is this detection inside a pickup zone?"
 # These feed the live "cut the door / anyone outside the pickup area" behaviour in the auto-follow modes.
@@ -280,3 +294,40 @@ def azimuth_in_pickup_zone(config: SystemConfig, array_id: str, azimuth_deg: flo
         if angular_separation_deg(az, center) <= half + margin_deg:
             return True
     return False
+
+
+def active_zone_gain_db(
+    config: SystemConfig,
+    array_id: str,
+    azimuth_deg: float,
+    *,
+    margin_deg: float = 8.0,
+) -> Optional[float]:
+    """The ``gain_db`` of the pickup zone the given **array-relative** azimuth points into, or ``None``.
+
+    Uses the SAME angular-sector containment test as :func:`azimuth_in_pickup_zone`: each pickup zone
+    is treated as the sector its corners subtend from the array, widened by ``margin_deg`` (DOA jitter
+    / hysteresis). Returns the first matching zone's ``gain_db`` — which may itself be ``None`` if no
+    gain was set. Returns ``None`` if the array is unknown / unposed or no pickup zone matches.
+
+    Intended use: look up the zone-level trim (dB) so the live beam can apply it post-AGC.
+    """
+    posed = _posed_array(config, array_id)
+    if posed is None:
+        return None
+    array, pos, bear = posed
+    az = float(azimuth_deg)
+    for z in array.zones:
+        if not is_pickup_zone(z):
+            continue
+        corners = _shape_corners(z.shape)
+        if not corners:
+            continue
+        center = _array_relative_azimuth(pos, bear, _centroid(corners))
+        half = max(
+            (angular_separation_deg(center, _array_relative_azimuth(pos, bear, c)) for c in corners),
+            default=0.0,
+        )
+        if angular_separation_deg(az, center) <= half + margin_deg:
+            return z.gain_db
+    return None
