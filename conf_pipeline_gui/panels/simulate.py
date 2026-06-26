@@ -118,14 +118,14 @@ class SimulatePanel(PanelBase):
         self.sim_backend_hint.setWordWrap(True)
         lay.addWidget(self.sim_backend_hint)
 
-        cov_box = QGroupBox("Coverage warnings")
-        cov_lay = QVBoxLayout(cov_box)
+        self.sim_warnings_box = QGroupBox("Coverage warnings")
+        cov_lay = QVBoxLayout(self.sim_warnings_box)
         cov_lay.setContentsMargins(6, 4, 6, 4)
         self.sim_warnings_list = QListWidget()
         self.sim_warnings_list.setWordWrap(True)
         self.sim_warnings_list.setMaximumHeight(120)
         cov_lay.addWidget(self.sim_warnings_list)
-        lay.addWidget(cov_box)
+        lay.addWidget(self.sim_warnings_box)
 
         lay.addStretch(1)
         return w
@@ -362,7 +362,7 @@ class SimulatePanel(PanelBase):
             return
         for line in caveats:
             self.sim_warnings_list.addItem(line)
-        self.sim_warnings_list.parentWidget().setVisible(bool(caveats))
+        self.sim_warnings_box.setVisible(bool(caveats))
 
     def warnings_text(self) -> str:
         """Return all caveat lines joined by newline (empty string when there are none).

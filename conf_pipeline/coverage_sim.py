@@ -37,7 +37,12 @@ from .model import (
     point_in_polygon,
     point_in_sector,
 )
-from .directivity import SIM_SPEECH_FREQ_HZ, steered_beamwidth_deg
+from .directivity import (
+    SIM_SPEECH_FREQ_HZ,
+    alias_ceiling_hz,
+    separable,
+    steered_beamwidth_deg,
+)
 from .profiles import device_capabilities
 
 # Per-zone steered-beam half-angle for the geometric mic tier (deg). The profile's
@@ -382,8 +387,6 @@ def coverage_caveats(config: SystemConfig) -> list[str]:
     Returns an empty list for arrays whose profile has no *aperture_m*
     (ceiling/table/legacy), so existing configs produce no new warnings.
     """
-    from .directivity import alias_ceiling_hz, separable, steered_beamwidth_deg, SIM_SPEECH_FREQ_HZ
-
     out: list[str] = []
     for device in config.devices:
         if device.type != "microphoneArray":
@@ -412,8 +415,8 @@ def coverage_caveats(config: SystemConfig) -> list[str]:
                 if not separable(sep, worst_half):
                     out.append(
                         f"{device.label}: zones '{looks[i][0]}' and '{looks[j][0]}' are "
-                        f"{sep:.0f}° apart but this array's steered beam is "
-                        f"~{worst_half:.0f}° half-width — it cannot separate them."
+                        f"{sep:.0f} deg apart but this array's steered beam is "
+                        f"~{worst_half:.0f} deg half-width - it cannot separate them."
                     )
 
         # Grating-lobe / spatial-aliasing note
