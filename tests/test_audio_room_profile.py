@@ -138,6 +138,17 @@ def test_attach_calibration_sets_path_not_enabled():
     assert p.calibration.enabled is False                     # attaching is not enabling
 
 
+def test_preferred_listening_profile_id_roundtrips_and_is_backwards_compatible():
+    p = AudioRoomProfile()
+    assert p.preferred_listening_profile_id == ""           # default; never auto-applied
+    p.preferred_listening_profile_id = "clean_audio"
+    d = p.to_dict()
+    assert d["preferredListeningProfileId"] == "clean_audio"
+    assert AudioRoomProfile.from_dict(d) == p
+    old = {k: v for k, v in p.to_dict().items() if k != "preferredListeningProfileId"}
+    assert AudioRoomProfile.from_dict(old).preferred_listening_profile_id == ""   # old JSON still loads
+
+
 def test_room_profile_exported_from_root():
     import conf_pipeline_control as cc
     assert cc.AudioRoomProfile is AudioRoomProfile

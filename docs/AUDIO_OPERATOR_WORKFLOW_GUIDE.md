@@ -98,6 +98,21 @@ room-specific setup profiles (calibration ref, placement result + suggestions, p
 egress/transcription prefs). It is **management only** and never applies anything to the running engine.
 See [AUDIO_ROOM_PROFILE_GUIDE.md](AUDIO_ROOM_PROFILE_GUIDE.md).
 
+**Listening Processing Profiles (Phase 10):** the LIVE panel shows a read-only **flow summary** under the
+"Listening mode" dropdown — a plain-language description of what each mode does to the audio (spatial,
+denoise, dereverb, AGC). The summary model is **descriptive only** (the real chain is fixed at Connect).
+Phase 10 also pre-ticks the **recommended** cleanup in the LIVE panel — AGC + OM-LSA denoise +
+tap-suppression (AEC/voice-gate stay opt-in) — a GUI-default change; engine/CLI defaults stay OFF.
+**Dereverb is not global**: its global checkbox stays OFF and it is auto-enabled only on the Follow /
+Clean auto-steer path. Every toggle is still unticked-able before Connect. See
+[LISTENING_PROFILES_GUIDE.md](LISTENING_PROFILES_GUIDE.md).
+
+**Apply a calibration profile:** the LIVE panel's Hardware card has **"Load calibration profile…"** —
+pick a saved per-capsule CalibrationProfile JSON to apply it to the live engine (validated on load;
+applied at Connect, rebuilds if already live). Calibration is **OFF by default** (raw capsules); after you
+apply one, this window's **Calibration** section shows *ON* with the profile details. See
+[CALIBRATION_GUIDE.md](CALIBRATION_GUIDE.md).
+
 `conf_pipeline_gui/panels/operator.py` `OperatorStatusPanel` is the small read-only `QWidget` that renders
 `OperatorStatus.to_dict()` (wrapped by `OperatorDiagnosticsWindow` for the menu action above):
 

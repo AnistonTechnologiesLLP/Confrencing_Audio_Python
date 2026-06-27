@@ -6,7 +6,74 @@
 
 ---
 
-Current Phase: **9 — Audio Room Profile Manager — DONE** (profile management only; Phases 0–8 pushed/PR #31).
+Current Phase: **10 — Listening Processing Profiles** (descriptive layer; keeps Phase 9 Room Profiles as-is).
+
+Phase 10 plan (after discovery — see `reports/audio/phase10_listening_profiles_discovery.md`): the LIVE
+listening-mode dropdown is a **pre-Connect facade** (DSP fixed at Connect, AGC off-by-default in every
+mode, "Clean audio" = OM-LSA denoiser ONLY). So Phase 10 is **descriptive**, not a new apply path:
+- NEW `conf_pipeline_control/listening_profile.py` — `ListeningProfile` (nested spatial/calibration/
+  cleanup{preNr,postNr,peq,agc,voiceGate}/output/safety, camelCase JSON) + `BUILTIN_LISTENING_PROFILES`
+  for the 6 modes (`table`/`follow`/`seat`/`clean`/`manual`/`twokit`) with **honest flags** +
+  `flow_summary()` + `warnings()` + `listening_profile_for_mode(mode, manual_flags=…)`. mypy-clean.
+- EDIT `conf_pipeline_gui/panels/live.py` — add a read-only **flow-summary `QLabel`** under the dropdown;
+  `_update_listening_flow_summary()` called at init + at the top of `_on_listening_mode_changed` (before
+  the busy guard, additively). Manual mode's summary reads the live toggles (`_current_manual_flags`).
+  **No change to Connect/apply behaviour; existing modes untouched.**
+- EDIT `conf_pipeline_control/room_profile.py` — add backwards-compatible `preferred_listening_profile_id`
+  (stored, NEVER auto-applied). Export the model; docs + report + guide.
+
+### Phase 10 OUTCOME (DONE locally; NOT committed/pushed):
+- **Cycle 1 — model:** `conf_pipeline_control/listening_profile.py` + `tests/test_listening_profiles.py`
+  (now 17) + backwards-compat `preferred_listening_profile_id` on `room_profile.py` (+1 test → 18). mypy clean.
+- **Cycle 2 — GUI flow summary:** read-only flow-summary `QLabel` under the LIVE dropdown
+  (`_update_listening_flow_summary` / `_current_manual_flags`), `tests/test_gui_listening_profiles.py` (10).
+- **ADDENDUM (user-requested, this session): enable the recommended settings that are off by default.**
+  User chose **"pre-tick recommended toggles in LIVE"** (GUI-default change only — engine/CLI/library
+  defaults stay OFF; byte-identical engine tests untouched) + **"follow my recommended flow"** = the 4
+  stages AGC + dereverb + OM-LSA denoise + tap-suppression (AEC/voice-gate stay opt-in).
+  - GUI defaults flipped in `live.py`: `live_beameng_postnr`+`live_beameng_transient` ON;
+    `live_autosteer_clean`→OM-LSA + `live_autosteer_transient` ON; `live_twokit_clean`→OM-LSA +
+    `live_twokit_agc` ON. (`live_agc` was already ON.)
+  - **Discovery correction:** the Phase-10 model wrongly claimed "AGC off in every mode"; in fact
+    `live_agc` ships ON (live.py:280, asserted by `test_gui_live_seat.py`). Built-ins corrected.
+- **DEREVERB POLICY REVISION (user follow-up, this session): dereverb is NOT global.** User confirmed
+  "do NOT leave dereverb ON globally." Final policy: dereverb recommended ON only for **Follow + Clean**;
+  OFF for Whole table / Lock-to-seat / Manual / Two kits.
+  - `live.py`: global `live_dereverb` default reverted to **OFF**; `_on_listening_mode_changed` now sets
+    the **auto-steer path's own** `live_autosteer_dereverb` ON for `follow`/`clean` only (per-profile apply,
+    never the global switch; Manual untouched → user's toggle is source of truth).
+  - Model built-ins: `_recommended_cleanup(dereverb=…)` default → **False**; only `follow`/`clean` pass
+    `dereverb=True` (→ flow shows "dereverb ON" + naturalness warning). table/seat/manual/twokit = off.
+  - Tests: model `test_dereverb_is_restricted_to_steering_modes`; GUI `test_dereverb_is_not_globally_preticked`
+    + `test_follow_and_clean_enable_dereverb_on_autosteer_path` + `test_table_and_manual_do_not_force_dereverb`;
+    reverted the 2 `test_gui_live_seat.py` global-dereverb assertions. OM-LSA/transient/AGC pre-ticks kept.
+
+### Phase 10 default impact: **GUI defaults changed (intended)** — the LIVE panel now Connects with the
+recommended cleanup on; **engine/CLI/library defaults unchanged** (cleaners still default OFF in code).
+Local-safe suite **1177 passed** (excl. 4 MainWindow files: live_seat/smoke/coverage/twokit → CI), mypy clean.
+
+### Out of scope (still honoured): no engine/CLI default change, no DSP/calibration/placement/DFN3 code
+change, no removed/renamed modes or controls, no auto-apply, no real ASR/virtual-mic, no push/merge.
+Audio Room Profile Manager kept exactly as-is.
+
+### FOLLOW-UP — "Load calibration profile…" GUI action (this session; NOT committed):
+Apply an existing per-capsule CalibrationProfile JSON to the live engine from the LIVE panel (Hardware
+card). `apply_calibration_profile(path)` validates via `CalibrationProfile.load` (rejects a bad file,
+no state change), stores `_calibration_path` (None ⇒ OFF, **no auto-enable on startup**), plumbs
+`calibration_path=` into all three engine builds (zone `LiveBeamController` / `AutoSteerController` /
+A-B `BeamEngine` steered+grid cfg), and `_live_reconnect()`s if live (the repo's "fixed at Connect"
+rebuild path — no runtime calibration setter exists). `AutoSteerController` gained `calibration` /
+`calibration_path` params (forwarded to its inner `LiveBeamController`; default None). app.py
+`_operator_status` passes the path so diagnostics shows *Calibration: ON* + details. Calibration **math
+unchanged**; **no DSP defaults changed** (calibration_path defaults None everywhere = byte-identical).
+Tests: `tests/test_calibration_apply.py` (6 — off-by-default, on-after-apply, autosteer forwarding,
+neutral/bad-path stay off) + `tests/test_gui_calibration_apply.py` (4 — default None, apply valid/invalid,
+cfg plumbing). Non-GUI suite **1076 passed**, GUI listening/calib/operator/room/stage **39 passed**, mypy clean.
+
+---
+
+### [Phase 9 status archived]
+Current Phase (pre-10): **9 — Audio Room Profile Manager — DONE** (profile management only; Phases 0–8 pushed/PR #31).
 
 Outcome: NEW `conf_pipeline_control/room_profile.py` (`AudioRoomProfile` — saveable room-specific setup
 doc, camelCase JSON, non-throwing `validate()`, `attach_calibration`/`copy_placement_suggestions`,

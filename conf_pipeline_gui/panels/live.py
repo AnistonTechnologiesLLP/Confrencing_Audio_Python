@@ -123,6 +123,7 @@ class LivePanel(PanelBase):
         self._probe_workers = set()      # strong refs to capsule-probe runnables
         self._ab_workers = set()         # strong refs to A/B-test runnables
         self._calib_workers = set()      # strong refs to front-calibration runnables
+        self._calibration_path = None    # applied per-capsule CalibrationProfile JSON path; None ⇒ OFF (raw capsules)
         self._clean_monitor = None       # CleanMonitor while OCTOVOX cleaning is live
         self._autosteer = None           # AutoSteerController while auto-following talkers
         self._beam_engine = None         # BeamEngine while running the steered/grid A/B
@@ -198,6 +199,17 @@ class LivePanel(PanelBase):
         lm_row.addWidget(QLabel("Listening mode"))
         lm_row.addWidget(self.live_listening_mode, 1)
         lay.addLayout(lm_row)
+        # A read-only "what this mode does" summary (Phase 10 listening processing profile). Descriptive
+        # only: it mirrors the dropdown's existing behaviour in words — it changes no DSP and applies nothing.
+        self.live_flow_summary = QLabel()
+        self.live_flow_summary.setObjectName("flowSummary")
+        self.live_flow_summary.setWordWrap(True)
+        self.live_flow_summary.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.live_flow_summary.setToolTip(
+            "Plain-language summary of the processing flow for the selected listening mode. Descriptive "
+            "only — the actual chain is fixed when you Connect, exactly as before.")
+        lay.addWidget(self.live_flow_summary)
+        self._update_listening_flow_summary()
 
         # --- HARDWARE: arrays (per-array Use + device), audio settings, capsules ---
         hw = Card("Hardware — arrays & audio device")
@@ -278,9 +290,28 @@ class LivePanel(PanelBase):
             "Real-time dereverberation: suppress the room's late-reverb tail so the voice sounds closer and "
             "drier. THIS is the tool for 'my voice echoes in the room' — NOT 'Cancel echo' (which only removes "
             "far-end loudspeaker echo, and needs the room speakers playing the far end). Applies to every live "
-            "mode. Off by default (it can colour the voice if the room is dry). Fixed at Connect."
+            "mode. Off by default — it is NOT a global default (it can colour a dry room); it is recommended "
+            "and auto-enabled only for Follow / Clean audio (on the auto-steer path). Fixed at Connect."
         )
         hw.body_lay.addWidget(self.live_dereverb)
+        # Per-capsule calibration (Phase 1): load an existing CalibrationProfile JSON and apply it to the
+        # live engine. Validated on load; applied at Connect (rebuilds the engine if already live). Default
+        # OFF — the array runs on raw capsules until a profile is explicitly applied (no auto-enable).
+        calib_row = QHBoxLayout()
+        self.live_load_calib_btn = QPushButton("Load calibration profile…")
+        self.live_load_calib_btn.setToolTip(
+            "Apply a saved per-capsule calibration JSON (gain / polarity / delay alignment, from "
+            "scripts/calibrate_capsules.py) to the live engine. The file is validated on load; calibration "
+            "is applied at Connect and the running engine is rebuilt if you apply it live. OFF by default — "
+            "the array runs on raw capsules until you load one."
+        )
+        self.live_load_calib_btn.clicked.connect(self._on_load_calibration_profile_clicked)
+        self.live_calib_profile_status = QLabel("Calibration: none (raw capsules)")
+        self.live_calib_profile_status.setWordWrap(True)
+        self.live_calib_profile_status.setToolTip("The applied per-capsule calibration profile, or none.")
+        calib_row.addWidget(self.live_load_calib_btn)
+        calib_row.addWidget(self.live_calib_profile_status, 1)
+        hw.body_lay.addLayout(calib_row)
 
         lay.addWidget(hw)
 
@@ -438,7 +469,8 @@ class LivePanel(PanelBase):
         self.live_autosteer_clean.addItem("AI voice cleaning (OM-LSA)", "omlsa")
         self.live_autosteer_clean.addItem("DeepFilterNet3 (AI, ~60 ms)", "dfn3")
         self.live_autosteer_clean.addItem("Light gate (fast)", "gate")
-        self.live_autosteer_clean.setCurrentIndex(0)         # opt-in (Off by default, like the A/B engine)
+        self.live_autosteer_clean.setCurrentIndex(           # recommended-on: the OM-LSA cleaner
+            self.live_autosteer_clean.findData("omlsa"))
         self.live_autosteer_clean.setToolTip(
             "Clean the followed talker's voice on the auto-steer output: suppress steady background noise "
             "(fans / AC / HVAC) learned by minimum statistics — no silence needed — without muting speech. "
@@ -467,6 +499,7 @@ class LivePanel(PanelBase):
         self.live_autosteer_dereverb.setEnabled(False)       # enabled when auto-steer is ticked (pre-connect)
         asf.addRow("Dereverb", self.live_autosteer_dereverb)
         self.live_autosteer_transient = QCheckBox("Suppress taps / knocks")
+        self.live_autosteer_transient.setChecked(True)       # recommended-on (low-risk de-thump)
         self.live_autosteer_transient.setToolTip(
             "Duck impulsive table taps / knocks on the followed talker (a de-thump). Preserves speech "
             "plosives via a short lookahead. Fixed at Connect."
@@ -570,6 +603,7 @@ class LivePanel(PanelBase):
         self.live_beameng_nullseats.setEnabled(False)        # enabled when the engine is ticked
         ef.addRow("Seat nulling", self.live_beameng_nullseats)
         self.live_beameng_postnr = QCheckBox("Suppress steady noise (fans/AC)")
+        self.live_beameng_postnr.setChecked(True)            # recommended-on (engine below defaults to OM-LSA)
         self.live_beameng_postnr.setToolTip(
             "Reduce steady background noise (fans, AC, HVAC hum) on the beam output: it continuously learns "
             "the noise floor by minimum statistics — no silence needed — and attenuates it without muting "
@@ -612,6 +646,7 @@ class LivePanel(PanelBase):
         self.live_beameng_dereverb.setEnabled(False)         # enabled when the engine is ticked
         ef.addRow("Dereverb", self.live_beameng_dereverb)
         self.live_beameng_transient = QCheckBox("Suppress taps / knocks")
+        self.live_beameng_transient.setChecked(True)         # recommended-on (low-risk de-thump)
         self.live_beameng_transient.setToolTip(
             "Duck impulsive table taps / knocks — a temporal de-thump before the dereverb / noise reducer. "
             "Preserves speech plosives via a short lookahead (adds ~12 ms latency). Fixed at Connect."
@@ -703,10 +738,12 @@ class LivePanel(PanelBase):
         self.live_twokit_clean.addItem("AI voice cleaning (OM-LSA)", "omlsa")
         self.live_twokit_clean.addItem("DeepFilterNet3 (AI, ~60 ms)", "dfn3")
         self.live_twokit_clean.addItem("Light gate (fast)", "gate")
+        self.live_twokit_clean.setCurrentIndex(self.live_twokit_clean.findData("omlsa"))  # recommended-on
         self.live_twokit_clean.setToolTip("Per-kit voice cleaning (fans/AC) on each kit's stream; applied to "
                                           "both. The selected kit is what you hear.")
         tkf.addRow("Clean voice", self.live_twokit_clean)
         self.live_twokit_agc = QCheckBox("Normalize output loudness (AGC)")
+        self.live_twokit_agc.setChecked(True)                # recommended-on: one AGC on the combined output
         self.live_twokit_agc.setToolTip("One target-loudness AGC on the combined output so a near vs far "
                                         "talker land at a consistent level.")
         tkf.addRow("Loudness", self.live_twokit_agc)
@@ -973,12 +1010,17 @@ class LivePanel(PanelBase):
         cards that don't apply. A convenience facade over the existing mode checkboxes — 'Manual (advanced)'
         leaves the checkboxes alone and reveals every card. Ignored mid-session (modes are fixed at Connect)."""
         self._listening_mode_touched = True   # a genuine user pick (this slot is gated off programmatic refresh)
+        self._update_listening_flow_summary()  # keep the descriptive flow summary in step with the selection
         if self._live_busy():
             return
         mode = self.live_listening_mode.currentData()
         # set the underlying mode checkbox(es); their toggled handlers enforce mutual exclusion + enabling
         if mode in ("follow", "clean"):
             self.live_autosteer.setChecked(True)
+            # Dereverb is recommended ONLY here (Follow / Clean): enable it on the auto-steer path's OWN
+            # checkbox — never the global switch — so Whole table / Lock-to-seat / Two kits stay dry. Manual
+            # is never touched below, so the user's own dereverb toggle stays the source of truth there.
+            self.live_autosteer_dereverb.setChecked(True)
         elif mode == "seat":
             self.live_beameng.setChecked(True)
             i = self.live_beameng_mode.findData("steered")
@@ -1004,6 +1046,57 @@ class LivePanel(PanelBase):
             show = set(self._live_cards)          # advanced: every card (stays correct as cards are added)
         for key, card in self._live_cards.items():
             card.set_open(key in show)
+
+    def _current_manual_flags(self) -> dict:
+        """The current state of the A/B-engine cleanup toggles, as a flags dict for a Manual-mode
+        ListeningProfile. Read-only snapshot of the checkboxes; defensive (any missing widget reads False)."""
+        def ck(name: str) -> bool:
+            w = getattr(self, name, None)
+            try:
+                return bool(w is not None and w.isChecked())
+            except Exception:
+                return False
+        engine = None
+        w = getattr(self, "live_beameng_nr_engine", None)
+        if w is not None:
+            try:
+                engine = w.currentData()
+            except Exception:
+                engine = None
+        return {
+            "post_nr": ck("live_beameng_postnr") and engine is not None,
+            "post_nr_engine": engine or "none",
+            "dereverb": ck("live_beameng_dereverb") or ck("live_dereverb"),
+            "transient": ck("live_beameng_transient"),
+            "voice_gate": ck("live_beameng_voicegate"),
+            "aec": ck("live_beameng_aec"),
+            "agc": ck("live_agc"),
+            "auto_steer": ck("live_autosteer"),
+        }
+
+    def _update_listening_flow_summary(self) -> None:
+        """Refresh the read-only processing-flow summary under the Listening-mode dropdown (Phase 10).
+
+        Purely descriptive: it asks the model layer for the built-in ListeningProfile that matches the
+        selected mode (for Manual, built from the live toggles) and prints its flow + any notes. It never
+        touches the engine, never flips a checkbox, and never applies anything — the real chain is still
+        fixed at Connect. Defensive: a summary must never be able to break the panel."""
+        try:
+            from conf_pipeline_control.listening_profile import listening_profile_for_mode
+            mode = self.live_listening_mode.currentData() or "table"
+            flags = self._current_manual_flags() if mode == "manual" else None
+            prof = listening_profile_for_mode(mode, manual_flags=flags)
+            lines = [f"Profile: {prof.name}", "", f"Flow:  {prof.flow_summary()}"]
+            notes = prof.warnings()
+            if notes:
+                lines += ["", "Notes:"] + [f"  • {n}" for n in notes]
+            lines += ["", "Descriptive only — applied when you Connect (nothing changes now)."]
+            self.live_flow_summary.setText("\n".join(lines))
+        except Exception:
+            try:
+                self.live_flow_summary.setText("")
+            except Exception:
+                pass
 
     def _sync_autosteer_nr_enabled(self) -> None:
         """Enable auto-steer's own OCTOVOX-cleaning controls when auto-steer is selected and not yet
@@ -1456,6 +1549,45 @@ class LivePanel(PanelBase):
             out.append(bars[min(len(bars) - 1, int(t * (len(bars) - 1)))])
         return "".join(out)
 
+    def _on_load_calibration_profile_clicked(self):
+        """Pick a calibration JSON via a file dialog, then validate + apply it (apply_calibration_profile)."""
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Load calibration profile", "", "Calibration JSON (*.json);;All files (*)")
+        if path:
+            self.apply_calibration_profile(path)
+
+    def apply_calibration_profile(self, path: str) -> bool:
+        """Validate a per-capsule calibration JSON and apply it to the live engine.
+
+        Loads + validates via ``CalibrationProfile.load`` (raises ``CalibrationError`` on a bad / malformed
+        file); on success stores the path so every engine build (zone / auto-steer / A-B) constructs with
+        ``calibration_path=<path>``, and rebuilds the running engine so it takes effect now. Returns True on
+        success, False on a validation failure (the previously applied path is kept). Changes no DSP
+        default — calibration stays OFF until a real profile is applied here."""
+        from conf_pipeline_control.calibration import CalibrationError, CalibrationProfile
+        try:
+            prof = CalibrationProfile.load(path)
+        except CalibrationError as exc:
+            self.live_calib_profile_status.setText(f"Invalid calibration profile — not applied: {exc}")
+            return False
+        self._calibration_path = str(path)
+        name = str(path).replace("\\", "/").rsplit("/", 1)[-1]
+        neutral = " · neutral (no correction)" if prof.is_neutral else ""
+        where = "applied — engine rebuilt" if self._live_busy() else "applies at Connect"
+        self.live_calib_profile_status.setText(
+            f"Calibration: {name} · {prof.channels}ch @ {float(prof.sample_rate):.0f} Hz, "
+            f"ref {prof.reference_channel}{neutral} — {where}")
+        if self._live_busy():
+            self._live_reconnect()
+        return True
+
+    def _live_reconnect(self):
+        """Tear down + rebuild the live engine so a construct-time setting (e.g. calibration) takes effect —
+        the repo's standard 'fixed at Connect' settings apply this way. No-op when not connected."""
+        if self._live_busy():
+            self._live_disconnect()
+            self._live_toggle_connect()     # not busy now ⇒ reconnects with the current settings
+
     def _live_toggle_connect(self):
         if self._live_busy():
             self._live_disconnect()
@@ -1489,6 +1621,7 @@ class LivePanel(PanelBase):
                     output_device=self.live_out_device.currentData(),
                     agc_target_db=(-20.0 if self.live_agc.isChecked() else None),   # normalize loudness
                     dereverb=self.live_dereverb.isChecked(),                        # reduce room echo
+                    calibration_path=self._calibration_path,                        # per-capsule align (None ⇒ OFF)
                 )
             else:
                 ctl = cc.SimulatedMicController(geom)
@@ -1597,6 +1730,7 @@ class LivePanel(PanelBase):
                 post_nr_amount=_clean_amount(self.live_autosteer_depth),  # cleaning amount (keeps the voice full-bodied)
                 dereverb=self.live_autosteer_dereverb.isChecked() or self.live_dereverb.isChecked(),   # room-echo suppression
                 agc_target_db=(-20.0 if self.live_agc.isChecked() else None),   # normalize loudness
+                calibration_path=self._calibration_path,                        # per-capsule align (None ⇒ OFF)
                 transient_suppress=self.live_autosteer_transient.isChecked(),   # de-thump table taps / knocks
                 voice_gate=self.live_autosteer_voicegate.isChecked(),           # mute non-speech (gaps & noise)
                 aec=self.live_autosteer_aec.isChecked(),                # cancel far-end loudspeaker echo
@@ -1637,6 +1771,8 @@ class LivePanel(PanelBase):
         outer BeamEngine mode is always "steered" — RTF is a sub-mode of the steered back-end); the
         post-beam noise gate is independent of the mode."""
         cfg = dict(base)
+        if self._calibration_path:
+            cfg["calibration_path"] = self._calibration_path   # per-capsule align on the A/B steered back-end
         if self.live_beameng_mode.currentData() == cc.MODE_RTF_MVDR:
             cfg["mode"] = cc.MODE_RTF_MVDR            # steered back-end learns the talker's RTF signature
         elif self.live_beameng_adaptnull.isChecked():
@@ -1672,6 +1808,8 @@ class LivePanel(PanelBase):
         cfg: dict = {"radius_m": float(self.live_radius.value())}
         if any(mask) and not all(mask):
             cfg["active_mask"] = list(mask)          # exclude the dead capsule on both back-ends
+        if self._calibration_path:
+            cfg["calibration_path"] = self._calibration_path   # per-capsule align on the grid back-end too
         steered_cfg = self._beameng_steered_cfg(cfg)
         monitor_on = self.live_monitor.isChecked()
         try:

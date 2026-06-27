@@ -99,6 +99,7 @@ class AudioRoomProfile:
     created_at: str = ""
     updated_at: str = ""
     notes: str = ""
+    preferred_listening_profile_id: str = ""   # a ListeningProfile id to PREFER for this room; never auto-applied
     calibration: RoomCalibrationRef = field(default_factory=RoomCalibrationRef)
     placement: RoomPlacementRef = field(default_factory=RoomPlacementRef)
     pre_nr_cleanup: RoomPreNr = field(default_factory=RoomPreNr)
@@ -175,6 +176,7 @@ class AudioRoomProfile:
             "version": int(self.version), "name": str(self.name), "device": str(self.device),
             "sampleRate": float(self.sample_rate), "channels": int(self.channels),
             "createdAt": str(self.created_at), "updatedAt": str(self.updated_at), "notes": str(self.notes),
+            "preferredListeningProfileId": str(self.preferred_listening_profile_id),
             "calibration": {"enabled": bool(c.enabled), "profilePath": str(c.profile_path),
                             "summary": str(c.summary)},
             "placement": {
@@ -219,6 +221,7 @@ class AudioRoomProfile:
                 channels=int(d.get("channels", DEFAULT_CHANNELS)),
                 created_at=str(d.get("createdAt", "")), updated_at=str(d.get("updatedAt", "")),
                 notes=str(d.get("notes", "")),
+                preferred_listening_profile_id=str(d.get("preferredListeningProfileId", "")),
                 calibration=RoomCalibrationRef(
                     enabled=bool(c.get("enabled", False)), profile_path=str(c.get("profilePath", "")),
                     summary=str(c.get("summary", ""))),

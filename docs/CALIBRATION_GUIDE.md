@@ -109,10 +109,21 @@ lc = cc.LiveBeamController(geom, calibration=prof)
 ```
 
 The corrected 8-channel stream feeds the beamformer **and** the DOA covariance, so steering, nulls
-and the beam all see aligned capsules.
+and the beam all see aligned capsules. `AutoSteerController` also accepts `calibration` / `calibration_path`
+and forwards them to its inner `LiveBeamController`.
 
 **A/B (calibrated vs uncalibrated):** construct two engines — one with `calibration=…`, one without —
-and compare. (A GUI toggle lands in Phase 6.)
+and compare.
+
+### In the app (LIVE panel)
+The Hardware card has a **"Load calibration profile…"** button. Pick a saved profile JSON: it is
+**validated on load** (a bad file is rejected with a status message and nothing changes), then the path
+is applied to the live engine — every connect (zone / auto-steer / A-B) is built with
+`calibration_path=<file>`. If you apply it while already live, the engine is **rebuilt** (a clean
+disconnect + reconnect — the repo's standard "fixed at Connect" path). Calibration is **OFF by default**
+(no profile, raw capsules) and only turns on after you explicitly apply one; the **Audio Operator
+Diagnostics** window then shows *Calibration: ON* with the profile details. A *neutral* profile (all
+identity) validates but stays a no-op (correctly OFF).
 
 ---
 

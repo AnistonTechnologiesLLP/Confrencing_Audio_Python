@@ -15,13 +15,18 @@ the app: **menu (☰) → "Audio room profiles…"**, or in code via
 ## 2. What it stores
 | section | fields |
 |---|---|
-| top | `name`, `device`, `sampleRate`, `channels`, `createdAt`, `updatedAt`, `notes` |
+| top | `name`, `device`, `sampleRate`, `channels`, `createdAt`, `updatedAt`, `notes`, `preferredListeningProfileId` |
 | `calibration` | `enabled`, `profilePath` (a saved capsule-calibration JSON), `summary` |
 | `placement` | `resultPath`, `lastStatus`, `lastScore`, `detectedTonesHz`, `notchSuggestionsHz`, `hpfSuggestionHz`, `autoApplySuggestions` |
 | `preNrCleanup` | `enabled`, `hpfHz`, `notchesHz` |
 | `egress` | `cleanMono48k`, `asr16k`, `wavRecording`, `externalSink` |
 | `transcription` | `enabled`, `provider`, `sampleRate`, `vadEnabled` |
 | `safety` | `dfn3ForcedOn`, `dereverbForcedOn`, `placementSuggestionsAutoApplied`, `realAsrNetworkCall`, `virtualMicDriverBundled` (all default **false**) |
+
+> **`preferredListeningProfileId`** (optional, added in Phase 10) is a *reference* to a Listening
+> Processing Profile id (e.g. `"clean_audio"`) you'd prefer for this room. It is a preference only —
+> **never auto-applied** and never changes a default. It defaults to `""`, and old profile JSON without
+> it still loads. See [LISTENING_PROFILES_GUIDE.md](LISTENING_PROFILES_GUIDE.md).
 
 ## 3. What it does **not** do
 - It does **not** apply anything to the running audio engine (loading is preview + validate only).

@@ -608,7 +608,8 @@ class MainWindow(QMainWindow):
             eng = self.panels["live"].active_engine()
         except Exception:
             eng = None
-        return OperatorStatus.build(engine=eng, generated_at=now_iso())
+        calib_path = getattr(self.panels["live"], "_calibration_path", None)   # show the applied profile path
+        return OperatorStatus.build(engine=eng, calibration_path=calib_path, generated_at=now_iso())
 
     def _show_operator_diagnostics(self):
         """Open the read-only Audio Operator Diagnostics window (Device / Calibration / Placement /
