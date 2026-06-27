@@ -2650,6 +2650,15 @@ class LivePanel(PanelBase):
             silent_capsules=silent,
         )
 
+    def active_engine(self):
+        """The running, flag-bearing beam engine (read-only) for the operator diagnostics panel, or
+        None when not live. Unwraps the A/B engine to its steered core and the auto-steer controller to
+        its inner controller so the engine's calibration / pre-NR / cleaner flags are visible."""
+        obj = self._ab_target()
+        if obj is None:
+            return None
+        return getattr(obj, "_steered", None) or getattr(obj, "ctrl", None) or obj
+
     # ---- A/B proof (raw beam vs cleaned) ----
     def _ab_target(self):
         """The live object that can capture an A/B proof (A/B engine / auto-steer / zone controller).

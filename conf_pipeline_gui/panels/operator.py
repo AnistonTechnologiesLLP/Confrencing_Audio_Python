@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
-from PySide6.QtWidgets import QLabel, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget
 
 
 class OperatorStatusPanel(QWidget):
@@ -62,3 +62,76 @@ class OperatorStatusPanel(QWidget):
         ]
         lines += [f"⚠ {w}" for w in s.get("warnings", [])]
         return "\n".join(lines)
+
+
+class OperatorDiagnosticsWindow(QWidget):
+    """A separate, read-only diagnostics window: the :class:`OperatorStatusPanel` plus a **Refresh**
+    button and an **Export** button. Opened from the app menu ("Audio operator diagnostics…"); on
+    refresh it rebuilds an ``OperatorStatus`` from ``status_provider`` (which reads the running engine)
+    and renders it. Read-only — it has **no DSP controls and applies nothing**; export reuses
+    ``OperatorStatus.save`` to write ``operator_diagnostics_<stamp>.{json,md}``.
+
+    ``status_provider`` is a zero-arg callable returning an ``OperatorStatus`` (or ``None`` when nothing
+    is running). Kept Qt-only here; the status model lives in ``conf_pipeline_control.operator``."""
+
+    def __init__(self, parent=None, *, status_provider=None, export_dir: str = "reports/audio") -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Audio Operator Diagnostics")
+        self._provider = status_provider
+        self._export_dir = export_dir
+        self._status = None                      # the latest OperatorStatus object (for export)
+        self.panel = OperatorStatusPanel()
+        self._refresh_btn = QPushButton("Refresh")
+        self._export_btn = QPushButton("Export JSON + Markdown")
+        self._line = QLabel("")
+        self._line.setWordWrap(True)
+        self._refresh_btn.clicked.connect(self.refresh)
+        self._export_btn.clicked.connect(self._do_export)
+        row = QHBoxLayout()
+        row.addWidget(self._refresh_btn)
+        row.addWidget(self._export_btn)
+        row.addStretch(1)
+        lay = QVBoxLayout(self)
+        lay.addWidget(QLabel("Read-only diagnostics — no live controls; suggestions are not auto-applied."))
+        lay.addWidget(self.panel)
+        lay.addLayout(row)
+        lay.addWidget(self._line)
+        self.resize(500, 380)
+
+    def refresh(self) -> None:
+        """Rebuild the status from the provider and render it. Safe when nothing is running."""
+        status = None
+        if self._provider is not None:
+            try:
+                status = self._provider()
+            except Exception as exc:                 # a diagnostics read must never crash the app
+                self._line.setText(f"Could not read status: {exc}")
+        self._status = status
+        self.panel.set_status(status.to_dict() if status is not None else {})
+        self._export_btn.setEnabled(status is not None)
+        if status is None:
+            self._line.setText("No running engine — connect a beam to see live status.")
+        else:
+            self._line.setText("")
+
+    def _do_export(self) -> None:
+        if self._status is None:
+            self._line.setText("Nothing to export — refresh while a beam is running.")
+            return
+        from datetime import datetime
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        try:
+            paths = self._status.save(self._export_dir, stamp=stamp)
+            self._line.setText(f"Saved → {paths[0]}  +  {paths[1]}")
+        except Exception as exc:
+            self._line.setText(f"Export failed: {exc}")
+
+    # ---- test / introspection passthrough ----
+    def section(self, name: str):
+        return self.panel.section(name)
+
+    def summary(self) -> str:
+        return self.panel.summary()
+
+    def warnings(self):
+        return self.panel.warnings()

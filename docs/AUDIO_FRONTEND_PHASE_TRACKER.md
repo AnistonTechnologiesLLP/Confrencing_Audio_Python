@@ -6,7 +6,33 @@
 
 ---
 
-Current Phase: **7 — Final verification, docs, deployment guide — DONE. ALL PHASES (0–7) COMPLETE.**
+Current Phase: **8 — Wire OperatorStatusPanel into the main app — DONE** (wiring only; Phases 0–7 complete).
+
+Outcome: added a read-only **"Audio operator diagnostics…"** app-menu action → opens an
+`OperatorDiagnosticsWindow` (panel + Refresh + Export) built from `LivePanel.active_engine()`. 8 operator
+GUI tests green offscreen; full non-GUI suite **1034 passed** (unchanged); mypy clean; `app.py` wiring
+verified without constructing MainWindow. No DSP/default change; all edits in `conf_pipeline_gui`.
+**Staged/UNCOMMITTED** on `feat/audio-frontend-hardening` (PR #31 open) — awaiting an explicit commit
+instruction. See `reports/audio/phase8_gui_integration_report.md`.
+
+Phase 8 plan (written before coding): the existing read-only `OperatorStatusPanel` is not mounted in the
+running app. Lowest-risk wiring = **Option B (menu action opens a window)**, mirroring the existing
+"Export commissioning report…" action. Add: (1) `LivePanel.active_engine()` — a public read-only
+accessor returning the running flag-bearing engine (`_ab_target()` unwrapped: BeamEngine→`_steered`,
+AutoSteer→`ctrl`, else the LiveBeamController) or None; (2) `OperatorDiagnosticsWindow(QWidget)` in
+`panels/operator.py` = `OperatorStatusPanel` + Refresh + Export(→`OperatorStatus.save`) + a
+`status_provider`; (3) a MainWindow menu action "Audio operator diagnostics…" → builds
+`OperatorStatus.build(engine=active_engine())` and shows the window. **Read-only; no DSP control, no
+default change, no auto-apply.** Testable offscreen via the single-panel pattern (LivePanel + the new
+window); the MainWindow menu action is verified by inspection + CI (MainWindow hangs headless here).
+mypy scope (conf_pipeline + conf_pipeline_control) is unaffected — all edits are in `conf_pipeline_gui`.
+
+(Phases 0–7 plans + outcomes retained below.)
+
+---
+
+### [Phases 0–7 status archived below — all DONE]
+Current Phase (pre-8): **7 — Final verification, docs, deployment guide — DONE. ALL PHASES (0–7) COMPLETE.**
 
 Outcome: end-to-end verification green — 7 phase test files + GUI probe = **137 passed**; full non-GUI
 suite **1034 passed** (900 baseline + 134 new, zero regressions); **mypy clean (71 files)**; 3 CLIs

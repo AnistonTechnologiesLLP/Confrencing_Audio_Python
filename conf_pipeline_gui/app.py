@@ -226,6 +226,8 @@ class MainWindow(QMainWindow):
         m.addAction("Export design report…", self._export_report)
         a_comm = m.addAction("Export commissioning report…", self._export_commissioning)
         a_comm.setToolTip("As-built config + measured live state (latency, AEC/ERLE, A/B noise proof) + sign-off")
+        a_diag = m.addAction("Audio operator diagnostics…", self._show_operator_diagnostics)
+        a_diag.setToolTip("Read-only Device / Calibration / Placement / Pipeline / Egress / Transcription status + export")
         m.addSeparator()
 
         self.act_optimize = QAction("✨ Optimize room", self)
@@ -595,6 +597,30 @@ class MainWindow(QMainWindow):
         with open(path, "w", encoding="utf-8") as f:
             f.write(cp.commissioning_report(self.state.config, info, fmt))
         self.toast("Commissioning report exported")
+
+    def _operator_status(self):
+        """Build a read-only OperatorStatus from the running engine (or all-off defaults when not live).
+        Reads flags only — changes no default and applies nothing."""
+        from conf_pipeline_control.operator import OperatorStatus
+        try:
+            eng = self.panels["live"].active_engine()
+        except Exception:
+            eng = None
+        return OperatorStatus.build(engine=eng, generated_at=now_iso())
+
+    def _show_operator_diagnostics(self):
+        """Open the read-only Audio Operator Diagnostics window (Device / Calibration / Placement /
+        Pipeline / Egress / Transcription + warnings), built from the running engine. No DSP controls,
+        no auto-apply — diagnostics only."""
+        from .panels.operator import OperatorDiagnosticsWindow
+        win = getattr(self, "_operator_diag_win", None)
+        if win is None:
+            win = OperatorDiagnosticsWindow(status_provider=self._operator_status)
+            self._operator_diag_win = win
+        win.refresh()
+        win.show()
+        win.raise_()
+        win.activateWindow()
 
     def _import(self):
         path, _ = QFileDialog.getOpenFileName(self, "Import config", "", "JSON (*.json)")

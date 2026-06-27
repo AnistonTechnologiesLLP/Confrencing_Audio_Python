@@ -87,8 +87,14 @@ status.save("reports/audio")         # writes operator_diagnostics_<stamp>.{json
 
 ## 4. GUI panel
 
-`conf_pipeline_gui/panels/operator.py` `OperatorStatusPanel` is a small read-only `QWidget` that renders
-`OperatorStatus.to_dict()`:
+**In the running app (Phase 8):** launch `python run_gui.py`, open the **app menu (☰) → "Audio operator
+diagnostics…"**. A separate read-only **Audio Operator Diagnostics** window opens, built from the running
+engine, with **Refresh** and **Export JSON + Markdown** buttons. It has no DSP controls and applies
+nothing; when no beam is connected it shows all-off defaults (connect a beam, then Refresh for live
+status). Export writes `reports/audio/operator_diagnostics_<stamp>.{json,md}` (same as the CLI).
+
+`conf_pipeline_gui/panels/operator.py` `OperatorStatusPanel` is the small read-only `QWidget` that renders
+`OperatorStatus.to_dict()` (wrapped by `OperatorDiagnosticsWindow` for the menu action above):
 
 ```python
 panel = OperatorStatusPanel()
