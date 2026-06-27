@@ -392,7 +392,9 @@ class LivePanel(PanelBase):
         self.live_lobe_warnings = QLabel()                  # honest warnings (null/calibration/placement)
         self.live_lobe_warnings.setWordWrap(True)
         lobe.body_lay.addWidget(self.live_lobe_warnings)
-        self.live_lobe_preview = LobePreview()              # minimal schematic preview
+        self.live_lobe_preview = LobePreview()              # schematic preview + drag-to-aim dial
+        self.live_lobe_preview.aimed.connect(
+            lambda az: None if self._refreshing else self._on_lobe_dragged(az))   # drag the preview to aim
         lobe.body_lay.addWidget(self.live_lobe_preview)
         self._lobe_apply_timer = QTimer(self)               # debounce the live set_steering/set_nulls
         self._lobe_apply_timer.setSingleShot(True)
@@ -1643,9 +1645,7 @@ class LivePanel(PanelBase):
         m = self.live_listening_mode.currentData()
         if m in ("follow", "clean"):
             return "follow"
-        if m == "seat":
-            return "seat"
-        if m == "manual":
+        if m in ("seat", "manual"):                          # A/B-engine paths: a seat ⇒ seat, else a fixed manual angle
             return "seat" if self.live_lobe_seat.currentData() else "fixed"
         return "table"
 
@@ -1693,6 +1693,11 @@ class LivePanel(PanelBase):
             placement = self._lobe_placement_status
             self.live_lobe_summary.setText(lc.summary(calibration_on=cal_on, placement_status=placement))
             warns = lc.warnings(calibration_on=cal_on, placement_status=placement)
+            # honest feedback: manual direction/nulls can only steer the A/B (steered) engine; if it isn't
+            # running, say so rather than silently doing nothing (Whole table / Follow steer their own way).
+            if lc.mode in ("fixed", "seat") and self._beam_engine is None:
+                warns = warns + ["Manual lobe direction/nulls steer the A/B engine — run it (Lock to a seat, "
+                                 "or tick 'Use the A/B engine'), then Connect, to steer live."]
             self.live_lobe_warnings.setText("  ".join("⚠ " + w for w in warns))
             self.live_lobe_angle.setEnabled(lc.mode == "fixed")          # manual angle only in fixed-look
             self.live_lobe_null_angle.setEnabled(self.live_lobe_null_mode.currentData() is not None)
@@ -1714,6 +1719,38 @@ class LivePanel(PanelBase):
         except Exception:
             pass
 
+    def _on_lobe_dragged(self, az_deg) -> None:
+        """The operator dragged to aim (lobe preview, or the room map) — set the manual angle FROM the drag
+        and steer, with no sidebar dial / degree typing. Switches the direction to 'Manual angle' so the
+        drag is the source of truth, then runs the normal lobe apply (summary + preview + debounced steer)."""
+        from conf_pipeline_control.lobe_control import LobeControl
+        az = LobeControl.clamp_angle(float(az_deg))
+        prev = self._refreshing
+        self._refreshing = True
+        try:
+            i = self.live_lobe_seat.findData(None)          # 'Manual angle' — the drag drives a fixed look
+            if i >= 0:
+                self.live_lobe_seat.setCurrentIndex(i)
+            self.live_lobe_angle.setValue(round(az, 0))
+        finally:
+            self._refreshing = prev
+        self._on_lobe_changed()                             # summary + preview + debounced steer
+
+    def _reflect_lobe_angle(self, az_deg) -> None:
+        """Mirror an aim that ALREADY steered elsewhere (the room-map drag, which steers via the A/B lock)
+        into the Lobe card's preview + summary — visual only, no re-steer."""
+        from conf_pipeline_control.lobe_control import LobeControl
+        prev = self._refreshing
+        self._refreshing = True
+        try:
+            i = self.live_lobe_seat.findData(None)
+            if i >= 0:
+                self.live_lobe_seat.setCurrentIndex(i)
+            self.live_lobe_angle.setValue(round(LobeControl.clamp_angle(float(az_deg)), 0))
+        finally:
+            self._refreshing = prev
+        self._update_lobe_summary()
+
     def _apply_lobe_now(self) -> None:
         """Push the current lobe direction + nulls to a running steered engine (the A/B engine), if any.
         Safe no-op when not connected; `set_steering`/`set_nulls` publish atomically (no audio-thread
@@ -1727,6 +1764,13 @@ class LivePanel(PanelBase):
             if hasattr(eng, "set_nulls"):
                 bearings = [float(n.angle_deg) for n in lc.effective_nulls()]
                 eng.set_nulls(bearings or None)
+            try:                                             # confirm to the operator that it actually steered
+                where = "auto-follow" if lc.auto_steer else f"{float(lc.main_angle_deg):.0f}°"
+                nulls = (" · null " + ", ".join(f"{float(n.angle_deg):.0f}°" for n in lc.effective_nulls())
+                         ) if lc.effective_nulls() else ""
+                self.live_status.setText(f"Lobe steered → {where}{nulls}")
+            except Exception:
+                pass
         except Exception:
             pass
 
@@ -2151,6 +2195,7 @@ class LivePanel(PanelBase):
         finally:
             self._refreshing = prev
         self._on_beameng_lockseat_changed()                   # ...then pin once via the manual branch (clears any seat lock)
+        self._reflect_lobe_angle(az)                          # mirror the dragged aim into the Lobe card (preview + summary)
         return True
 
     def _push_locked_steering(self):

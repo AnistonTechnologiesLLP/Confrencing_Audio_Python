@@ -89,6 +89,7 @@ class Canvas(QWidget):
         self.connect_from = None
         self.coord_cb = None      # optional callback(str) for coordinate readout
         self.click_cb = None      # optional callback(Point2D) -> bool; consumes a 2D click when it returns True
+        self._aiming = False      # True while a click-to-aim press is held → mouse-move keeps re-aiming (drag)
         self._bg_pixmap = None    # cached floor-plan QPixmap
         self._bg_pixmap_key = None
         self._diff_cache = None       # cached deployment diff for DEPLOY badges
@@ -1463,7 +1464,8 @@ class Canvas(QWidget):
             return self.update()
         v = self.view2d()
         w = self.s2w(pos.x(), pos.y(), v)
-        if self.click_cb is not None and self.click_cb(w):   # live "click to aim"; consumes the click
+        if self.click_cb is not None and self.click_cb(w):   # live "click/drag to aim"; consumes the press
+            self._aiming = True                              # …and keep re-aiming while the button is held (drag)
             return self.update()
         psnap = Point2D(self.snap(w.x), self.snap(w.y))
         tool = self.state.tool
@@ -1550,6 +1552,9 @@ class Canvas(QWidget):
             self.setCursor(Qt.ArrowCursor)
 
     def _move2d(self, pos):
+        if self._aiming and self.click_cb is not None:       # drag-to-aim: keep steering toward the cursor
+            self.click_cb(self.s2w(pos.x(), pos.y(), self.view2d()))
+            return self.update()
         if self.drag and self.drag.get("kind") == "calibrate":
             self.drag["b"] = pos
             return self.update()
@@ -1598,6 +1603,9 @@ class Canvas(QWidget):
         self.update()
 
     def _up2d(self):
+        if self._aiming:                                     # end a click/drag-to-aim gesture
+            self._aiming = False
+            return
         d = self.drag
         self.drag = None
         if not d:

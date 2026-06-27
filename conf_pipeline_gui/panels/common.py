@@ -141,9 +141,14 @@ class LobePreview(QWidget):
     """A minimal, non-blocking **top-down PREVIEW** of the beamformer lobe: the array at centre, a main-lobe
     wedge toward the main angle (its spread hints the width preset), an optional dashed null line, and a seat
     dot. Schematic only — NOT to scale and NOT a measured beam pattern — it paints from cached state set by
-    :meth:`set_lobe` and runs no DSP. Always labelled 'preview'. Azimuth 0° = up, clockwise."""
+    :meth:`set_lobe` and runs no DSP. Always labelled 'preview'. Azimuth 0° = up, clockwise.
+
+    It is also a **drag-to-aim dial**: press/drag inside it and it emits :attr:`aimed` (the azimuth from the
+    centre to the cursor) so the operator aims by dragging on screen — no sidebar dial / degree typing."""
 
     _HALF = {"wide": 60.0, "medium": 38.0, "narrow": 22.0}     # display half-angles (schematic, not measured)
+
+    aimed = Signal(float)     # emitted on press/drag: the aimed azimuth (deg, -180..180; 0° = up, clockwise)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -154,7 +159,9 @@ class LobePreview(QWidget):
         self._null: "float | None" = None
         self._mode = "table"
         self._auto = False
-        self.setToolTip("Lobe preview — schematic pickup pattern (not to scale, not a measured beam).")
+        self.setToolTip("Lobe preview — DRAG to aim (0° = up, clockwise). Schematic pickup pattern, "
+                        "not to scale and not a measured beam.")
+        self.setCursor(Qt.CrossCursor)
 
     def set_lobe(self, *, angle_deg: float = 0.0, width: str = "medium", null_deg=None,
                  mode: str = "table", auto_steer: bool = False) -> None:
@@ -164,6 +171,37 @@ class LobePreview(QWidget):
         self._mode = str(mode)
         self._auto = bool(auto_steer)
         self.update()
+
+    # --- drag-to-aim ---
+    def _az_for_point(self, x: float, y: float) -> float:
+        """Azimuth (deg, 0° = up, clockwise) from the widget centre to a point — the geometry the drag uses
+        to aim. Returns 0° at the exact centre."""
+        import math
+        r = self.rect()
+        dx = float(x) - r.center().x()
+        dy = float(y) - r.center().y()
+        if dx == 0.0 and dy == 0.0:
+            return 0.0
+        a = math.degrees(math.atan2(dx, -dy))
+        if a > 180.0:
+            a -= 360.0
+        elif a <= -180.0:
+            a += 360.0
+        return a
+
+    def _emit_aim(self, e) -> None:
+        try:
+            pos = e.position()
+            self.aimed.emit(self._az_for_point(pos.x(), pos.y()))
+        except Exception:
+            pass
+
+    def mousePressEvent(self, e):
+        self._emit_aim(e)
+
+    def mouseMoveEvent(self, e):
+        if e.buttons():
+            self._emit_aim(e)
 
     def paintEvent(self, _):  # pragma: no cover - pure painting
         import math
