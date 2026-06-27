@@ -228,6 +228,8 @@ class MainWindow(QMainWindow):
         a_comm.setToolTip("As-built config + measured live state (latency, AEC/ERLE, A/B noise proof) + sign-off")
         a_diag = m.addAction("Audio operator diagnostics…", self._show_operator_diagnostics)
         a_diag.setToolTip("Read-only Device / Calibration / Placement / Pipeline / Egress / Transcription status + export")
+        a_rp = m.addAction("Audio room profiles…", self._show_room_profiles)
+        a_rp.setToolTip("Save / load / validate room-specific audio setup profiles (not applied to the engine)")
         m.addSeparator()
 
         self.act_optimize = QAction("✨ Optimize room", self)
@@ -618,6 +620,18 @@ class MainWindow(QMainWindow):
             win = OperatorDiagnosticsWindow(status_provider=self._operator_status)
             self._operator_diag_win = win
         win.refresh()
+        win.show()
+        win.raise_()
+        win.activateWindow()
+
+    def _show_room_profiles(self):
+        """Open the Audio Room Profiles window (save / load / validate room-specific audio setup).
+        Profile management only — it never applies anything to the running audio engine."""
+        from .panels.room_profile import AudioRoomProfilesWindow
+        win = getattr(self, "_room_profiles_win", None)
+        if win is None:
+            win = AudioRoomProfilesWindow()
+            self._room_profiles_win = win
         win.show()
         win.raise_()
         win.activateWindow()

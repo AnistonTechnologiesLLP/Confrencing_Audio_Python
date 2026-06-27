@@ -6,7 +6,48 @@
 
 ---
 
-Current Phase: **8 — Wire OperatorStatusPanel into the main app — DONE** (wiring only; Phases 0–7 complete).
+Current Phase: **9 — Audio Room Profile Manager — DONE** (profile management only; Phases 0–8 pushed/PR #31).
+
+Outcome: NEW `conf_pipeline_control/room_profile.py` (`AudioRoomProfile` — saveable room-specific setup
+doc, camelCase JSON, non-throwing `validate()`, `attach_calibration`/`copy_placement_suggestions`,
+all-safe defaults) + NEW `conf_pipeline_gui/panels/room_profile.py` (`AudioRoomProfilesWindow`: New/Load/
+Save/Import/Export/Validate/Copy-placement + safety note) + a MainWindow menu action "Audio room
+profiles…". **Inert — never applies to the engine, never forces a feature on, never auto-applies
+suggestions, no network, no driver.** 17 model + 7 window tests green; full non-GUI suite **1051 passed**
+(zero regressions); mypy clean (72); app wiring verified without building MainWindow.
+**Staged/UNCOMMITTED** on `feat/audio-frontend-hardening` — awaiting an explicit commit instruction. See
+`reports/audio/phase9_audio_room_profiles_report.md`, `docs/AUDIO_ROOM_PROFILE_GUIDE.md`.
+
+Phase 9 plan (written before coding): a GUI-managed room-profile system that saves/loads/validates/
+imports/exports room-specific audio setup — **never auto-applies to the live engine**.
+- NEW `conf_pipeline_control/room_profile.py` — mutable `AudioRoomProfile` (editable draft) with nested
+  sections `calibration` / `placement` / `preNrCleanup` / `egress` / `transcription` / `safety` (the
+  user's camelCase JSON shape). `to_dict`/`from_dict`/`to_json`/`from_json`/`load`/`save`,
+  `RoomProfileError` (malformed JSON only), and **non-throwing `validate(...) -> list[str]`** (warns on
+  version/device/rate/channel mismatch, missing referenced files, any True safety flag, auto-apply set).
+  Helpers: `attach_calibration(path)`, `copy_placement_suggestions(result)` — fill the placement +
+  pre-NR DRAFT from a `PlacementResult` but **never enable pre-NR or set any auto-apply flag**. Safety
+  flags default all-False. (mypy-checked — keep type-clean.)
+- NEW `conf_pipeline_gui/panels/room_profile.py` — `AudioRoomProfilesWindow(QWidget)`: New / Load… /
+  Save… / Import… / Export… / Validate + profile-name field + read-only summary + warnings + the
+  required "not applied automatically / room-specific / re-measure per room" safety note + an optional
+  "Copy placement suggestions" (draft-only). Path-taking methods (`load_path`/`save_path`/…) are
+  offscreen-testable; the buttons are thin `QFileDialog` wrappers.
+- NEW MainWindow menu action "Audio room profiles…" → opens the window (mirrors the Phase-8
+  "Audio operator diagnostics…" wiring). MainWindow itself not testable headless (hangs) → inspection + CI.
+- Export model + the new window from package roots; docs + report.
+
+### Phase 9 default impact: NONE — profiles are an inert, persisted document; nothing touches the DSP
+engine, no default changes, no suggestion auto-applied, no network, no driver. Tests:
+`tests/test_audio_room_profile.py` (model, in the suite) + `tests/test_gui_room_profile.py` (window probe).
+
+### Out of scope (phase-locked): no DSP change, no force-on, no auto-apply, no apply-to-engine controls,
+no real ASR vendor, no virtual-mic driver, no rebuild of Phase 1–8 code, no push/merge.
+
+---
+
+### [Phase 8 status archived]
+Current Phase (pre-9): **8 — Wire OperatorStatusPanel into the main app — DONE** (wiring only; Phases 0–7 complete).
 
 Outcome: added a read-only **"Audio operator diagnostics…"** app-menu action → opens an
 `OperatorDiagnosticsWindow` (panel + Refresh + Export) built from `LivePanel.active_engine()`. 8 operator

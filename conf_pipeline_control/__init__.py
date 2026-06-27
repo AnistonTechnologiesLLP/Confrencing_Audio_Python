@@ -164,6 +164,7 @@ from .transcription import (  # noqa: F401  (transcription-ready clean stream: V
     TranscriptResult,
 )
 from .operator import OperatorStatus  # noqa: F401  (operator workflow status model: 7-section diagnostics)
+from .room_profile import AudioRoomProfile, RoomProfileError  # noqa: F401  (saveable room-specific audio setup)
 from .multikit import KitSpec, KitStatus, MultiKitController  # noqa: F401  (dual-POLARIS cross-array automix)
 from .multibeam import BeamStatus, MultiBeamController, MultiTrackRecorder  # noqa: F401  (single-array multi-talker "capture everyone")
 from .multiroom import MultiRoomController, RoomKitSpec, RoomKitStatus  # noqa: F401  (combine N arrays → room-wide capture)
@@ -225,7 +226,7 @@ __all__ = [
     "resample_mono", "to_pcm16", "pcm16_bytes", "ASR_RATE",
     "TranscriptionStream", "TranscriptionProvider", "MockTranscriptionProvider", "SpeechChunker",
     "TranscriptionSession", "AudioChunk", "TranscriptResult", "TranscriptionError",
-    "OperatorStatus",
+    "OperatorStatus", "AudioRoomProfile", "RoomProfileError",
     "MultiBeamController", "BeamStatus", "MultiTrackRecorder",
     "MultiRoomController", "RoomKitSpec", "RoomKitStatus",
     "FenceConfigError", "FenceDecider", "FenceDecision", "FusedSource",

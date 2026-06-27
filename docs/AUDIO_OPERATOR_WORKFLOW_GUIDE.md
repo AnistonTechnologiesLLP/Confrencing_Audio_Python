@@ -93,6 +93,11 @@ engine, with **Refresh** and **Export JSON + Markdown** buttons. It has no DSP c
 nothing; when no beam is connected it shows all-off defaults (connect a beam, then Refresh for live
 status). Export writes `reports/audio/operator_diagnostics_<stamp>.{json,md}` (same as the CLI).
 
+**Audio Room Profiles (Phase 9):** the app menu also has **"Audio room profiles…"** — save/load/validate
+room-specific setup profiles (calibration ref, placement result + suggestions, pre-NR notches/HPF,
+egress/transcription prefs). It is **management only** and never applies anything to the running engine.
+See [AUDIO_ROOM_PROFILE_GUIDE.md](AUDIO_ROOM_PROFILE_GUIDE.md).
+
 `conf_pipeline_gui/panels/operator.py` `OperatorStatusPanel` is the small read-only `QWidget` that renders
 `OperatorStatus.to_dict()` (wrapped by `OperatorDiagnosticsWindow` for the menu action above):
 
