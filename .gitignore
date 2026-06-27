@@ -15,3 +15,11 @@ shot_*.png
 
 # SDD subagent scratch (not part of the project)
 .sdd/
+profiles/
+
+# reports/: the phase .md reports are TRACKED (phase0..N); ignore captured-audio + scratch run artifacts
+reports/**/*.wav
+reports/**/*.flac
+reports/**/*.npy
+reports/**/*.npz
+reports/**/*.json

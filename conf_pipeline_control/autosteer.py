@@ -116,6 +116,8 @@ class AutoSteerController:
         aec_ref_device: Optional[int] = None,
         preamp_gain_db: float = 0.0,            # mic-INPUT preamp gain (dB); 0 = no-op
         preamp_auto: bool = False,              # auto headroom stager (analog track)
+        calibration: Optional[Any] = None,      # per-capsule gain/polarity/delay align (default OFF)
+        calibration_path: Optional[str] = None,  # ...or load that CalibrationProfile from a JSON file
         agc_target_db: Optional[float] = None,  # target output RMS (dBFS); None = AGC off
         config: Any = None,                     # room config — enables the zone cut (needs array bearing + zones)
         array_id: Optional[str] = None,         # which array's zones to honour
@@ -174,6 +176,8 @@ class AutoSteerController:
             aec_ref_device=aec_ref_device,
             preamp_gain_db=preamp_gain_db,
             preamp_auto=preamp_auto,
+            calibration=calibration,                # per-capsule align (default OFF); forwarded as-is
+            calibration_path=calibration_path,
             agc_target_db=agc_target_db,
             live_zone_gain=bool(zone_gain_enabled),
         )

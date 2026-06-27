@@ -8,7 +8,7 @@ are coalesced onto the next event-loop tick.
 from __future__ import annotations
 
 from PySide6.QtCore import QObject, QPointF, QRectF, QRunnable, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QFont, QPainter, QPen
+from PySide6.QtGui import QColor, QFont, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import (
     QDoubleSpinBox,
     QFrame,
@@ -134,6 +134,128 @@ class LevelMeter(QWidget):
             p.setPen(Qt.NoPen)
             p.setBrush(QColor(pal["err"]))
             p.drawRoundedRect(QRectF(r.right() - 7, r.y(), 7, r.height()), 2, 2)
+        p.end()
+
+
+class LobePreview(QWidget):
+    """A minimal, non-blocking **top-down PREVIEW** of the beamformer lobe: the array at centre, a main-lobe
+    wedge toward the main angle (its spread hints the width preset), an optional dashed null line, and a seat
+    dot. Schematic only — NOT to scale and NOT a measured beam pattern — it paints from cached state set by
+    :meth:`set_lobe` and runs no DSP. Always labelled 'preview'. Azimuth 0° = up, clockwise.
+
+    It is also a **drag-to-aim dial**: press/drag inside it and it emits :attr:`aimed` (the azimuth from the
+    centre to the cursor) so the operator aims by dragging on screen — no sidebar dial / degree typing."""
+
+    _HALF = {"wide": 60.0, "medium": 38.0, "narrow": 22.0}     # display half-angles (schematic, not measured)
+
+    aimed = Signal(float)     # emitted on press/drag: the aimed azimuth (deg, -180..180; 0° = up, clockwise)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setMinimumHeight(120)
+        self.setMinimumWidth(150)
+        self._angle = 0.0
+        self._width = "medium"
+        self._null: "float | None" = None
+        self._mode = "table"
+        self._auto = False
+        self.setToolTip("Lobe preview — DRAG to aim (0° = up, clockwise). Schematic pickup pattern, "
+                        "not to scale and not a measured beam.")
+        self.setCursor(Qt.CrossCursor)
+
+    def set_lobe(self, *, angle_deg: float = 0.0, width: str = "medium", null_deg=None,
+                 mode: str = "table", auto_steer: bool = False) -> None:
+        self._angle = float(angle_deg)
+        self._width = str(width)
+        self._null = None if null_deg is None else float(null_deg)
+        self._mode = str(mode)
+        self._auto = bool(auto_steer)
+        self.update()
+
+    # --- drag-to-aim ---
+    def _az_for_point(self, x: float, y: float) -> float:
+        """Azimuth (deg, 0° = up, clockwise) from the widget centre to a point — the geometry the drag uses
+        to aim. Returns 0° at the exact centre."""
+        import math
+        r = self.rect()
+        dx = float(x) - r.center().x()
+        dy = float(y) - r.center().y()
+        if dx == 0.0 and dy == 0.0:
+            return 0.0
+        a = math.degrees(math.atan2(dx, -dy))
+        if a > 180.0:
+            a -= 360.0
+        elif a <= -180.0:
+            a += 360.0
+        return a
+
+    def _emit_aim(self, e) -> None:
+        try:
+            pos = e.position()
+            self.aimed.emit(self._az_for_point(pos.x(), pos.y()))
+        except Exception:
+            pass
+
+    def mousePressEvent(self, e):
+        self._emit_aim(e)
+
+    def mouseMoveEvent(self, e):
+        if e.buttons():
+            self._emit_aim(e)
+
+    def paintEvent(self, _):  # pragma: no cover - pure painting
+        import math
+        st = getattr(self.window(), "state", None)
+        pal = _palette(getattr(st, "theme", "dark") if st is not None else "dark")
+        accent = QColor(pal.get("accent", pal["ok"]))
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing, True)
+        r = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor(pal["surface"]))
+        p.drawRoundedRect(r, 4, 4)
+        cx, cy = r.center().x(), r.center().y()
+        rad = min(r.width(), r.height()) * 0.42
+
+        def pt(deg: float, rr: float) -> QPointF:
+            a = math.radians(deg)
+            return QPointF(cx + rr * math.sin(a), cy - rr * math.cos(a))
+
+        if self._mode == "follow" or self._auto:               # auto: the look moves ⇒ broad/ambiguous
+            half, center = 72.0, self._angle
+        elif self._mode == "table":                            # whole table ⇒ broad
+            half, center = 78.0, 0.0
+        else:                                                  # fixed / seat ⇒ width preset
+            half, center = self._HALF.get(self._width, 38.0), self._angle
+        path = QPainterPath(QPointF(cx, cy))
+        steps = 24
+        for i in range(steps + 1):
+            path.lineTo(pt(center - half + (2 * half) * i / steps, rad))
+        path.lineTo(QPointF(cx, cy))
+        fill = QColor(accent)
+        fill.setAlpha(70)
+        p.setBrush(fill)
+        p.setPen(QPen(accent, 1))
+        p.drawPath(path)
+        p.setPen(QPen(accent, 2))                              # main direction line
+        p.drawLine(QPointF(cx, cy), pt(center, rad))
+        if self._mode == "seat":                               # seat target dot
+            p.setPen(Qt.NoPen)
+            p.setBrush(QColor(pal.get("text", "#ffffff")))
+            p.drawEllipse(pt(center, rad), 4, 4)
+        if self._null is not None:                             # null line (dashed)
+            pen = QPen(QColor(pal["warn"]), 2)
+            pen.setStyle(Qt.DashLine)
+            p.setPen(pen)
+            p.drawLine(QPointF(cx, cy), pt(self._null, rad))
+        p.setPen(Qt.NoPen)                                     # array at centre
+        p.setBrush(QColor(pal.get("text_dim", pal["text"])))
+        p.drawEllipse(QPointF(cx, cy), 3, 3)
+        f = QFont()
+        f.setPointSize(7)
+        p.setFont(f)
+        p.setPen(QPen(QColor(pal.get("faint", pal.get("text_dim", pal["text"]))), 1))
+        p.drawText(r.adjusted(4, 2, -4, -2), int(Qt.AlignTop | Qt.AlignLeft), "preview")
         p.end()
 
 

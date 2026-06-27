@@ -373,10 +373,11 @@ def test_transient_suppress_flows_to_steered_cfg(win):
     """The A/B-card 'Suppress taps / knocks' checkbox adds transient_suppress to the steered back-end cfg."""
     panel = win.panels["live"]
     base = {"radius_m": 0.04}
+    panel.live_beameng_transient.setChecked(False)        # recommended-on by default; reset to test the toggle
     assert "transient_suppress" not in panel._beameng_steered_cfg(base)
     panel.live_beameng_transient.setChecked(True)
     assert panel._beameng_steered_cfg(base)["transient_suppress"] is True
-    panel.live_beameng_transient.setChecked(False)
+    panel.live_beameng_transient.setChecked(True)         # restore the recommended default
 
 
 def test_global_agc_and_dereverb_flow_to_steered_cfg(win):
@@ -384,15 +385,15 @@ def test_global_agc_and_dereverb_flow_to_steered_cfg(win):
     toggles flow into the A/B steered cfg — the fix for AGC-not-working + room-echo in the single-array modes."""
     panel = win.panels["live"]
     base = {"radius_m": 0.04}
-    assert panel.live_agc.isChecked()                         # AGC ON by default
-    assert not panel.live_dereverb.isChecked()                # dereverb off by default
+    assert panel.live_agc.isChecked()                         # AGC ON by default (recommended)
+    assert not panel.live_dereverb.isChecked()                # dereverb OFF by default (per-profile, not global)
     assert panel._beameng_steered_cfg(base).get("agc_target_db") == -20.0
     panel.live_agc.setChecked(False)
     assert "agc_target_db" not in panel._beameng_steered_cfg(base)
     panel.live_agc.setChecked(True)
     panel.live_dereverb.setChecked(True)
     assert panel._beameng_steered_cfg(base).get("dereverb") is True
-    panel.live_dereverb.setChecked(False)
+    panel.live_dereverb.setChecked(False)                     # restore the default (off)
 
 
 def test_voice_gate_flows_to_steered_cfg(win):
@@ -718,6 +719,11 @@ def test_beameng_noise_suppression_steered_cfg(win):
     import conf_pipeline_control as cc
     panel = win.panels["live"]
     base = {"radius_m": 0.04}
+    # the recommended cleanup is pre-ticked by default; this test exercises the cfg-building LOGIC, so
+    # reset to a known all-off baseline and drive each toggle explicitly below.
+    for _w in (panel.live_beameng_postnr, panel.live_beameng_transient, panel.live_beameng_dereverb,
+               panel.live_dereverb):
+        _w.setChecked(False)
     assert "post_nr" not in panel._beameng_steered_cfg(base)
     assert "mode" not in panel._beameng_steered_cfg(base)               # default: plain steered beam
     assert "post_nr_engine" not in panel._beameng_steered_cfg(base)     # absent until post-NR is on
@@ -757,7 +763,7 @@ def test_beameng_noise_suppression_steered_cfg(win):
 
 def test_autosteer_has_its_own_octovox_cleaning_controls(win):
     """Auto-steer exposes its OWN OCTOVOX-cleaning controls (Clean voice + Strength) in its section —
-    enabled only when auto-steer is the selected live mode, defaulting to Off (opt-in)."""
+    enabled only when auto-steer is the selected live mode, defaulting to the OM-LSA cleaner (recommended)."""
     panel = win.panels["live"]
     panel.live_beameng.setChecked(False)
     panel.live_autosteer.setChecked(False)
@@ -766,7 +772,7 @@ def test_autosteer_has_its_own_octovox_cleaning_controls(win):
     assert panel.live_autosteer_clean.isEnabled() and panel.live_autosteer_depth.isEnabled()
     assert panel.live_autosteer_dereverb.isEnabled()        # dereverb toggle reachable in auto-steer
     assert panel.live_autosteer_aec.isEnabled()             # echo-cancel toggle reachable in auto-steer
-    assert panel.live_autosteer_clean.currentData() is None  # Off by default (opt-in)
+    assert panel.live_autosteer_clean.currentData() == "omlsa"  # OM-LSA by default (recommended)
     panel.live_autosteer_clean.setCurrentIndex(panel.live_autosteer_clean.findData("omlsa"))
     assert panel.live_autosteer_clean.currentData() == "omlsa"   # the OCTOVOX cleaner is selectable here
     panel.live_beameng.setChecked(True)                     # switching modes is mutually exclusive

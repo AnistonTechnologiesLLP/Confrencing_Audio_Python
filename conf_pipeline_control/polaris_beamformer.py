@@ -62,6 +62,7 @@ from .geometry import SOUND_SPEED_MPS, ArrayGeometry, sensibel_8, with_active_ch
 from .tracking import ExponentialTracker, Tracker
 from .agc import TargetLoudnessAgc, _apply_zone_gain
 from .preamp import PreampHost
+from .calibration import CalibrationHost, CalibrationProfile
 from ._stage_metrics import StageActivity, StageMeter, ZERO_ACTIVITY, loudness_matched_raw
 from . import doa
 
@@ -1068,7 +1069,7 @@ def _resolve_active_mask(active_mask: Optional[Sequence[bool]], dead_capsule: Op
     return None
 
 
-class PolarisBeamformer(PreampHost, MicController):
+class PolarisBeamformer(CalibrationHost, PreampHost, MicController):
     """Live delay-and-sum beam + dominant-talker DOA for the POLARIS 8-array.
 
     Subclasses :class:`~conf_pipeline_control.control.MicController` for lifecycle,
@@ -1122,6 +1123,8 @@ class PolarisBeamformer(PreampHost, MicController):
         agc_silence_db: float = DEFAULT_AGC_SILENCE_DB,                   # hold gain below this output RMS
         preamp_gain_db: float = 0.0,                                     # mic-INPUT preamp gain (dB); 0 = no-op
         preamp_auto: bool = False,                                       # auto headroom stager (analog track)
+        calibration: Optional[CalibrationProfile] = None,                # per-capsule gain/polarity/delay align (default OFF)
+        calibration_path: Optional[str] = None,                          # ...or load that profile from a JSON file
         post_nr: bool = False,                                           # post-beam spectral-gate NR (local fallback)
         post_nr_floor_db: float = DEFAULT_POST_NR_FLOOR_DB,              # NR residual floor / suppression depth
         post_nr_oversub: float = DEFAULT_POST_NR_OVERSUB,               # NR Wiener over-subtraction strength
@@ -1132,6 +1135,8 @@ class PolarisBeamformer(PreampHost, MicController):
         post_nr_engine: str = DEFAULT_POST_NR_ENGINE,                   # "gate" | "omlsa" | "wiener" (OCTOVOX cleaner)
         post_nr_amount: float = DEFAULT_POST_NR_AMOUNT,                 # cleaning amount (1.0 full; <1 gentler/less muffled)
         post_nr_preserve_level: bool = DEFAULT_POST_NR_PRESERVE_LEVEL,  # restore the level the cleaner removes (no weak voice)
+        pre_nr: bool = False,                                           # pre-NR linear cleanup (speech HPF + notches) BEFORE the denoiser
+        pre_nr_bands: Optional[Sequence[dict]] = None,                  # pre-NR PEQ bands [{freqHz,gainDb,q,type}]; None/[] = no-op
         peq: bool = False,                                              # parametric EQ (tone) on the cleaned mono, after NR / before AGC
         peq_bands: Optional[Sequence[dict]] = None,                     # PEQ bands [{freqHz,gainDb,q,type}]; None/[] = no-op
         transient_suppress: bool = False,                              # duck impulsive table taps / knocks (after AEC, before dereverb)
@@ -1232,6 +1237,12 @@ class PolarisBeamformer(PreampHost, MicController):
         # see test_preamp_spatial_neutrality). OFF unless gain != 0 / auto / a hw_gain is injected, so
         # the default path is a zero-overhead no-op. Built numpy-free (deterministic unit tests).
         self._init_preamp(gain_db=preamp_gain_db, auto=preamp_auto)
+        # per-capsule calibration (Phase 1): gain / polarity / integer-sample-delay alignment of the raw
+        # block BEFORE the beam + covariance, so DOA, beamforming and null steering all see aligned
+        # capsules. Default OFF; a missing / malformed / channel-mismatched profile degrades to OFF (never
+        # crashes the runtime). Honors the dead-capsule mask so a masked capsule is never gained up.
+        self._init_calibration(calibration=calibration, calibration_path=calibration_path,
+                               channels=POLARIS_N_MICS, sample_rate=self.sample_rate, active_mask=mask)
         # post-beam noise suppression (P3): a light single-channel spectral gate on the mono output, a
         # LOCAL fallback for when the OCTOVOX cloud cleaning path isn't running. OFF unless post_nr; the
         # suppressor object is built in _setup_runtime (needs numpy) and reset in reset_transient.
@@ -1251,6 +1262,12 @@ class PolarisBeamformer(PreampHost, MicController):
         self.peq = bool(peq)
         self._peq_bands = list(peq_bands) if peq_bands else None
         self._peq: Optional[Any] = None
+        # pre-NR linear cleanup (Phase 2): a SECOND StreamingPeq (speech HPF + notch cascade) that runs
+        # BEFORE the post-NR/DFN3 denoiser, so cheap linear filters remove rumble/tonal HVAC before the
+        # neural/spectral stage. Reuses the PEQ biquad math; default OFF (no bands ⇒ bit-exact no-op).
+        self.pre_nr = bool(pre_nr)
+        self._pre_nr_bands = list(pre_nr_bands) if pre_nr_bands else None
+        self._pre_nr_peq: Optional[Any] = None
         # transient (table-tap / knock) suppressor: a temporal de-thump on the mono, AFTER AEC and BEFORE
         # dereverb (kill the impulse before the reverb/NR smear it). OFF by default; built in _setup_runtime.
         # Its duck_active flag FREEZES the AGC so the AGC doesn't chase the dip (Invariant B).
@@ -1770,6 +1787,9 @@ class PolarisBeamformer(PreampHost, MicController):
         # it live; runs on the cleaned mono AFTER the noise reducer, BEFORE the AGC.
         from .peq import StreamingPeq
         self._peq = StreamingPeq(self.sample_rate, self._peq_bands if self.peq else None)
+        # pre-NR linear cleanup: a second StreamingPeq (HPF + notches) applied BEFORE post-NR (a true
+        # no-op when no bands), so it can engage live and reuses the exact same biquad math.
+        self._pre_nr_peq = StreamingPeq(self.sample_rate, self._pre_nr_bands if self.pre_nr else None)
         # transient suppressor (de-thump): built only when enabled (needs numpy/scipy).
         if self.transient_suppress:
             from .transient import StreamingTransientSuppressor
@@ -1818,6 +1838,7 @@ class PolarisBeamformer(PreampHost, MicController):
         :meth:`prepare_external`. Realtime-safe: no device, no thread joins, and only bounded
         per-block numpy work (a few small array allocations, like the rest of the DSP path)."""
         block = self._apply_preamp(block)          # uniform mic-input gain BEFORE beam + covariance (no-op when off)
+        block = self._apply_calibration(block)     # per-capsule gain/polarity/delay align BEFORE beam + covariance (no-op when off)
         np = self._np
         with self._beam_lock:
             mono = self._beam.process(block)
@@ -1847,6 +1868,8 @@ class PolarisBeamformer(PreampHost, MicController):
             mono = self._dereverb.process(mono, self._noise_gate)  # suppress late reverb BEFORE the noise reducer
             if metering:
                 derev_out = float(np.sqrt(np.mean(mono * mono))) if mono.size else 0.0
+        if self._pre_nr_peq is not None:
+            mono = self._pre_nr_peq.process(mono)     # pre-NR linear cleanup (speech HPF + notches) BEFORE the denoiser
         denoise_in = denoise_out = 0.0
         if self._post_nr is not None:
             if metering:
@@ -1970,6 +1993,8 @@ class PolarisBeamformer(PreampHost, MicController):
             names.append("AEC")
         if self._dereverb is not None:
             names.append("dereverb")
+        if self.pre_nr and self._pre_nr_bands:
+            names.append("HPF/notch")                 # pre-NR linear cleanup (Phase 2), runs before the denoiser
         if self._post_nr is not None:
             names.append("AI cleaner" if getattr(self._post_nr, "mode", "gate") in ("omlsa", "wiener")
                          else "noise gate")
@@ -2002,6 +2027,8 @@ class PolarisBeamformer(PreampHost, MicController):
             hold_seconds=self._tracker.hold_seconds,
             switch_margin_deg=self._tracker.switch_margin_deg,
         )
+        if self._calib is not None:
+            self._calib.reset()           # drop the per-capsule delay-line tail on re-activation
         with self._cov_lock:
             if self._cov is not None:
                 self._cov[...] = 0.0
@@ -2029,6 +2056,8 @@ class PolarisBeamformer(PreampHost, MicController):
             self._post_nr.reset()          # drop NR streaming + floor history; its lock serializes vs an in-flight process()
         if self._peq is not None:
             self._peq.reset()              # drop the biquad ring (fresh state on re-activation)
+        if self._pre_nr_peq is not None:
+            self._pre_nr_peq.reset()       # drop the pre-NR biquad ring too
         if self._transient is not None:
             self._transient.reset()        # drop the de-thump envelope + lookahead tail
         if self._voice_gate is not None:

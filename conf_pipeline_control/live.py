@@ -29,6 +29,7 @@ from .audio import controls_available, missing_dependencies
 from .beamformer import BeamDesign
 from .control import MicController
 from .preamp import PreampHost
+from .calibration import CalibrationHost, CalibrationProfile
 from .geometry import SOUND_SPEED_MPS, ArrayGeometry
 from .polaris_beamformer import (
     DEFAULT_DEREVERB_BETA,
@@ -66,7 +67,7 @@ def _install_hint() -> str:
     )
 
 
-class LiveBeamController(PreampHost, MicController):
+class LiveBeamController(CalibrationHost, PreampHost, MicController):
     """Drive a physical array: capture → per-bin beamform → metered mono output."""
 
     backend = "live"
@@ -90,6 +91,8 @@ class LiveBeamController(PreampHost, MicController):
         post_nr_minstat: bool = DEFAULT_POST_NR_MINSTAT,
         post_nr_amount: float = DEFAULT_POST_NR_AMOUNT,
         post_nr_preserve_level: bool = DEFAULT_POST_NR_PRESERVE_LEVEL,
+        pre_nr: bool = False,                   # pre-NR linear cleanup (speech HPF + notches) BEFORE the denoiser
+        pre_nr_bands: Optional[Sequence[dict]] = None,   # pre-NR PEQ bands [{freqHz,gainDb,q,type}]; None/[] = no-op
         peq: bool = False,                      # parametric EQ (tone) on the cleaned mono, after NR
         peq_bands: Optional[Sequence[dict]] = None,   # PEQ bands [{freqHz,gainDb,q,type}]; None/[] = no-op
         transient_suppress: bool = False,       # duck impulsive table taps / knocks (after AEC, before dereverb)
@@ -108,6 +111,8 @@ class LiveBeamController(PreampHost, MicController):
         aec_ref_device: Optional[int] = None,
         preamp_gain_db: float = 0.0,            # mic-INPUT preamp gain (dB); 0 = no-op
         preamp_auto: bool = False,              # auto headroom stager (analog track)
+        calibration: Optional[CalibrationProfile] = None,   # per-capsule gain/polarity/delay align (default OFF)
+        calibration_path: Optional[str] = None,             # ...or load that profile from a JSON file
         agc_target_db: Optional[float] = None,  # target output RMS (dBFS); None = AGC off
         agc_max_gain_db: float = DEFAULT_AGC_MAX_GAIN_DB,
         agc_slew_alpha: float = DEFAULT_AGC_SLEW_ALPHA,
@@ -124,6 +129,13 @@ class LiveBeamController(PreampHost, MicController):
         self.track_covariance = track_covariance
         # mic-INPUT preamp: uniform front-end gain on the raw block before the STFT beamformer (no-op when off).
         self._init_preamp(gain_db=preamp_gain_db, auto=preamp_auto)
+        # per-capsule calibration (Phase 1): gain / polarity / integer-sample-delay alignment of the raw
+        # block BEFORE the STFT beamformer + covariance (so DOA / beam / nulls see aligned capsules).
+        # Default OFF; a missing / malformed / channel-mismatched profile degrades to OFF (never crashes).
+        # Honors the geometry's dead-capsule mask so a masked capsule is never gained up.
+        self._init_calibration(calibration=calibration, calibration_path=calibration_path,
+                               channels=geometry.n_channels, sample_rate=self.samplerate,
+                               active_mask=geometry.active or None)
         # post-beam noise reducer on the mono output (the same engine the A/B BeamEngine uses), so the
         # auto-steer / zone live paths get OCTOVOX-style cleaning too. OFF by default. "gate" = light
         # spectral gate; "omlsa"/"wiener" = the OCTOVOX-derived StreamingCleaner. Built in _build_post_nr().
@@ -140,6 +152,10 @@ class LiveBeamController(PreampHost, MicController):
         # _build_post_nr(), live-tweakable via set_peq_bands. No-op when no bands.
         self.peq = bool(peq)
         self._peq_bands = list(peq_bands) if peq_bands else None
+        # pre-NR linear cleanup (Phase 2): a SECOND StreamingPeq (speech HPF + notches) BEFORE the
+        # denoiser — cheap linear filters remove rumble/tonal HVAC before the post-NR/DFN3 stage. Default OFF.
+        self.pre_nr = bool(pre_nr)
+        self._pre_nr_bands = list(pre_nr_bands) if pre_nr_bands else None
         # transient (table-tap) suppressor on the mono, AFTER AEC and BEFORE dereverb. OFF by default.
         self.transient_suppress = bool(transient_suppress)
         self._transient_threshold_db = float(transient_threshold_db)
@@ -188,6 +204,7 @@ class LiveBeamController(PreampHost, MicController):
         self._ola: Any = None      # numpy (FRAME,) overlap-add tail
         self._post_nr: Any = None  # post-beam noise reducer (StreamingCleaner / _PostNoiseSuppressor), or None
         self._peq: Any = None      # parametric EQ (StreamingPeq) on the cleaned mono, or None
+        self._pre_nr_peq: Any = None  # pre-NR linear cleanup (StreamingPeq: HPF + notches), runs BEFORE the denoiser, or None
         self._transient: Any = None  # transient (table-tap) suppressor, runs after AEC before dereverb, or None
         self._voice_gate: Any = None # 'voice only' output gate (VoiceOnlyGate), runs last, or None
         self._dereverb: Any = None # real-time dereverb (StreamingDereverb), runs before the noise reducer, or None
@@ -332,6 +349,8 @@ class LiveBeamController(PreampHost, MicController):
         # parametric EQ: always built (a true no-op when no bands) so set_peq_bands can engage it live.
         from .peq import StreamingPeq
         self._peq = StreamingPeq(self.samplerate, self._peq_bands if self.peq else None)
+        # pre-NR linear cleanup: a second StreamingPeq (HPF + notches) applied BEFORE post-NR (no-op when off).
+        self._pre_nr_peq = StreamingPeq(self.samplerate, self._pre_nr_bands if self.pre_nr else None)
         if self.transient_suppress:
             from .transient import StreamingTransientSuppressor
             self._transient = StreamingTransientSuppressor(
@@ -420,6 +439,8 @@ class LiveBeamController(PreampHost, MicController):
             names.append("AEC")
         if self._dereverb is not None:
             names.append("dereverb")
+        if self.pre_nr and self._pre_nr_bands:
+            names.append("HPF/notch")                 # pre-NR linear cleanup (Phase 2), runs before the denoiser
         if self._post_nr is not None:
             names.append("AI cleaner" if getattr(self._post_nr, "mode", "gate") in ("omlsa", "wiener")
                          else "noise gate")
@@ -484,6 +505,8 @@ class LiveBeamController(PreampHost, MicController):
             self._out_channels = 0
             self._monitor_q = None
 
+        if self._calib is not None:
+            self._calib.reset()            # fresh per-capsule delay-line for the new session
         self._stream = sd.InputStream(
             samplerate=self.samplerate,
             channels=self.n_channels,
@@ -555,6 +578,7 @@ class LiveBeamController(PreampHost, MicController):
         updates the (pre-gain) meter level and writes the WAV if recording."""
         np = self._np
         indata = self._apply_preamp(indata)            # uniform mic-input gain BEFORE the STFT + covariance (no-op when off)
+        indata = self._apply_calibration(indata)       # per-capsule gain/polarity/delay align BEFORE the STFT + covariance (no-op when off)
         # slide a FRAME-long window: drop oldest HOP, append new HOP
         self._inbuf[:-_HOP, :] = self._inbuf[_HOP:, :]
         self._inbuf[-_HOP:, :] = indata[:_HOP, :]
@@ -607,6 +631,8 @@ class LiveBeamController(PreampHost, MicController):
             out = self._dereverb.process(out, False)
             if metering:
                 derev_out = float(np.sqrt(np.mean(out * out))) if out.size else 0.0
+        if self._pre_nr_peq is not None:
+            out = self._pre_nr_peq.process(out)        # pre-NR linear cleanup (speech HPF + notches) BEFORE the denoiser
         denoise_in = denoise_out = 0.0
         if self._post_nr is not None:
             if metering:

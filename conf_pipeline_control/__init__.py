@@ -123,6 +123,63 @@ from .virtual_mic_grid import VirtualMicGrid  # noqa: F401  (optional module —
 from .beam_engine import BeamEngine, Location  # noqa: F401  (optional A/B wrapper — safe to delete)
 from .agc import TargetLoudnessAgc  # noqa: F401  (shared target-loudness AGC)
 from .preamp import HwGain, InputPreamp, PreampHost  # noqa: F401  (shared mic-input preamp / front-end gain)
+from .calibration import (  # noqa: F401  (per-capsule gain/polarity/delay alignment BEFORE the beam)
+    CalibrationError,
+    CalibrationEstimate,
+    CalibrationHost,
+    CalibrationProfile,
+    CapsuleCalibrator,
+    estimate_calibration,
+)
+from .pre_nr import (  # noqa: F401  (pre-NR linear cleanup: speech HPF + notch band builders / preset)
+    build_pre_nr_bands,
+    hpf_band,
+    notch_band,
+    office_ac_preset,
+)
+from .placement import (  # noqa: F401  (auto live placement check: scored room-noise diagnostics)
+    PlacementError,
+    PlacementResult,
+    analyze_placement,
+    compare_placements,
+)
+from .egress import (  # noqa: F401  (clean-mono egress router: 48k PCM / 16k ASR / WAV / virtual-mic hook)
+    ASR_RATE,
+    EgressError,
+    EgressRouter,
+    ExternalPcmSink,
+    WavMonoSink,
+    pcm16_bytes,
+    resample_mono,
+    to_pcm16,
+)
+from .transcription import (  # noqa: F401  (transcription-ready clean stream: VAD chunker + provider interface)
+    AudioChunk,
+    MockTranscriptionProvider,
+    SpeechChunker,
+    TranscriptionError,
+    TranscriptionProvider,
+    TranscriptionSession,
+    TranscriptionStream,
+    TranscriptResult,
+)
+from .operator import OperatorStatus  # noqa: F401  (operator workflow status model: 7-section diagnostics)
+from .room_profile import AudioRoomProfile, RoomProfileError  # noqa: F401  (saveable room-specific audio setup)
+from .listening_profile import (  # noqa: F401  (descriptive live-processing recipe per LIVE listening mode)
+    BUILTIN_LISTENING_PROFILES,
+    ListeningProfile,
+    listening_profile_for_mode,
+)
+from .lobe_control import (  # noqa: F401  (operator beamformer pickup-pattern: direction/width/nulls/follow)
+    LOBE_MODES,
+    LOBE_WIDTHS,
+    LobeControl,
+    LobeControlError,
+    LobeNull,
+    LobeSafety,
+    default_lobe_for_mode,
+    loading_for_width,
+)
 from .multikit import KitSpec, KitStatus, MultiKitController  # noqa: F401  (dual-POLARIS cross-array automix)
 from .multibeam import BeamStatus, MultiBeamController, MultiTrackRecorder  # noqa: F401  (single-array multi-talker "capture everyone")
 from .multiroom import MultiRoomController, RoomKitSpec, RoomKitStatus  # noqa: F401  (combine N arrays → room-wide capture)
@@ -176,6 +233,18 @@ __all__ = [
     "VirtualMicGrid",
     "BeamEngine", "Location",
     "TargetLoudnessAgc", "InputPreamp", "HwGain", "PreampHost", "MultiKitController", "KitSpec", "KitStatus",
+    "CalibrationProfile", "CapsuleCalibrator", "CalibrationHost", "CalibrationEstimate",
+    "estimate_calibration", "CalibrationError",
+    "build_pre_nr_bands", "hpf_band", "notch_band", "office_ac_preset",
+    "PlacementResult", "PlacementError", "analyze_placement", "compare_placements",
+    "EgressRouter", "EgressError", "ExternalPcmSink", "WavMonoSink",
+    "resample_mono", "to_pcm16", "pcm16_bytes", "ASR_RATE",
+    "TranscriptionStream", "TranscriptionProvider", "MockTranscriptionProvider", "SpeechChunker",
+    "TranscriptionSession", "AudioChunk", "TranscriptResult", "TranscriptionError",
+    "OperatorStatus", "AudioRoomProfile", "RoomProfileError",
+    "ListeningProfile", "listening_profile_for_mode", "BUILTIN_LISTENING_PROFILES",
+    "LobeControl", "LobeNull", "LobeSafety", "LobeControlError", "default_lobe_for_mode",
+    "loading_for_width", "LOBE_MODES", "LOBE_WIDTHS",
     "MultiBeamController", "BeamStatus", "MultiTrackRecorder",
     "MultiRoomController", "RoomKitSpec", "RoomKitStatus",
     "FenceConfigError", "FenceDecider", "FenceDecision", "FusedSource",
