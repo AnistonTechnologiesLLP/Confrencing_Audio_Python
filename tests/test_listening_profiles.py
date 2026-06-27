@@ -144,6 +144,26 @@ def test_two_kits_flow_is_automix():
     assert "denoise OM-LSA" in f and "AGC ON" in f      # recommended per-kit cleaning + one combined AGC
 
 
+def test_listening_profiles_include_lobe_width_fields():
+    # every built-in carries a lobe beam_width, round-tripping as camelCase "beamWidth" (Phase 11)
+    for prof in BUILTIN_LISTENING_PROFILES.values():
+        assert prof.spatial.beam_width in ("wide", "medium", "narrow")
+        d = prof.to_dict()
+        assert d["spatial"]["beamWidth"] == prof.spatial.beam_width
+        assert ListeningProfile.from_dict(d) == prof                       # round-trips losslessly
+
+
+def test_whole_table_lobe_is_not_narrow():
+    assert BUILTIN_LISTENING_PROFILES["table"].spatial.beam_width == "wide"   # never forced narrow
+
+
+def test_manual_profile_lobe_is_neutral_not_overriding():
+    sp = listening_profile_for_mode("manual").spatial
+    assert sp.beam_width == "medium" and sp.auto_steer is False             # neutral; user controls win
+    # manual flags drive auto-steer, NOT a forced lobe width
+    assert listening_profile_for_mode("manual", manual_flags={"auto_steer": True}).spatial.beam_width == "medium"
+
+
 def test_listening_profile_for_mode_returns_builtin_and_safe_default():
     assert listening_profile_for_mode("clean").id == "clean_audio"
     assert listening_profile_for_mode("twokit").id == "two_kits"

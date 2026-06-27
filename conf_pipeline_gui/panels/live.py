@@ -47,6 +47,7 @@ def _clean_amount(depth_combo) -> float:
 from .common import (
     Card,
     LevelMeter,
+    LobePreview,
     NoWheelDoubleSpinBox,
     NoWheelSpinBox,
     PanelBase,
@@ -124,6 +125,7 @@ class LivePanel(PanelBase):
         self._ab_workers = set()         # strong refs to A/B-test runnables
         self._calib_workers = set()      # strong refs to front-calibration runnables
         self._calibration_path = None    # applied per-capsule CalibrationProfile JSON path; None ⇒ OFF (raw capsules)
+        self._lobe_placement_status = None  # operator placement status for the lobe warning (None ⇒ unknown)
         self._clean_monitor = None       # CleanMonitor while OCTOVOX cleaning is live
         self._autosteer = None           # AutoSteerController while auto-following talkers
         self._beam_engine = None         # BeamEngine while running the steered/grid A/B
@@ -314,6 +316,89 @@ class LivePanel(PanelBase):
         hw.body_lay.addLayout(calib_row)
 
         lay.addWidget(hw)
+
+        # --- LOBE CONTROL: operator controls for the beamformer pickup pattern (Phase 11) ---
+        # Shapes the beam AFTER calibration: where it listens (angle/seat), how focused (width preset),
+        # which direction to suppress (null), fixed vs auto-follow. Direction + nulls apply LIVE (debounced)
+        # to a running steered engine; a width MODE change applies at Connect. Honest labels only — a null
+        # REDUCES pickup, it does not mute. Nothing here changes a DSP default until the operator touches it.
+        lobe = Card("Lobe control — where the mic listens (pickup focus / suppress direction)", collapsed=True)
+        lf = QFormLayout()
+        lf.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+        dir_row = QHBoxLayout()                              # 1. main direction: seat OR manual angle
+        self.live_lobe_seat = QComboBox()
+        self.live_lobe_seat.addItem("Manual angle", None)
+        try:
+            for _seat_id, _anchor in cp.room_seats(self.state.config):
+                self.live_lobe_seat.addItem(f"Seat {_seat_id}", _seat_id)
+        except Exception:
+            pass
+        self.live_lobe_seat.setToolTip("Aim the pickup at a seat (resolved from the room map + the array's "
+                                       "bearing) or use the manual angle. Lock-to-seat needs the array bearing set.")
+        self.live_lobe_seat.currentIndexChanged.connect(
+            lambda *_a: None if self._refreshing else self._on_lobe_changed())
+        self.live_lobe_angle = NoWheelDoubleSpinBox()
+        self.live_lobe_angle.setRange(-180.0, 180.0)
+        self.live_lobe_angle.setSingleStep(5.0)
+        self.live_lobe_angle.setDecimals(0)
+        self.live_lobe_angle.setSuffix("°")
+        self.live_lobe_angle.setToolTip("Main pickup direction, array-relative (0° = the array's front "
+                                        "reference, clockwise). Used with 'Manual angle' when the mode allows a "
+                                        "fixed look. Applies live (debounced) to a running steered beam.")
+        self.live_lobe_angle.valueChanged.connect(
+            lambda *_a: None if self._refreshing else self._on_lobe_changed())
+        dir_row.addWidget(self.live_lobe_seat, 1)
+        dir_row.addWidget(self.live_lobe_angle)
+        lf.addRow("Listen toward", dir_row)
+        self.live_lobe_width = QComboBox()                  # 2. pickup focus / width preset
+        self.live_lobe_width.addItem("Wide (whole table, robust)", "wide")
+        self.live_lobe_width.addItem("Medium (default)", "medium")
+        self.live_lobe_width.addItem("Narrow (focused)", "narrow")
+        self.live_lobe_width.setCurrentIndex(self.live_lobe_width.findData("medium"))
+        self.live_lobe_width.setToolTip("Pickup focus preset. Maps to the engine's beam mode + robustness "
+                                        "(loading) — NOT a continuous physical beamwidth. Narrow is more directive "
+                                        "(but more self-noise). A mode change applies at Connect.")
+        self.live_lobe_width.currentIndexChanged.connect(
+            lambda *_a: None if self._refreshing else self._on_lobe_changed())
+        lf.addRow("Pickup focus", self.live_lobe_width)
+        self.live_lobe_width_note = QLabel("Focus presets (beam mode + robustness), not a continuous beamwidth.")
+        self.live_lobe_width_note.setWordWrap(True)
+        lf.addRow("", self.live_lobe_width_note)
+        null_row = QHBoxLayout()                            # 3. suppress direction (null)
+        self.live_lobe_null_mode = QComboBox()
+        self.live_lobe_null_mode.addItem("Off", None)
+        self.live_lobe_null_mode.addItem("Angle", "angle")
+        self.live_lobe_null_mode.addItem("Seat (uses the angle)", "seat")
+        self.live_lobe_null_mode.setToolTip("Suppress (null) one direction — e.g. a projector / fan side. It is a "
+                                            "reduced-pickup zone, NOT a hard-mute zone. Capped at 2 nulls (engine limit).")
+        self.live_lobe_null_mode.currentIndexChanged.connect(
+            lambda *_a: None if self._refreshing else self._on_lobe_changed())
+        self.live_lobe_null_angle = NoWheelDoubleSpinBox()
+        self.live_lobe_null_angle.setRange(-180.0, 180.0)
+        self.live_lobe_null_angle.setSingleStep(5.0)
+        self.live_lobe_null_angle.setDecimals(0)
+        self.live_lobe_null_angle.setSuffix("°")
+        self.live_lobe_null_angle.setValue(180.0)
+        self.live_lobe_null_angle.valueChanged.connect(
+            lambda *_a: None if self._refreshing else self._on_lobe_changed())
+        null_row.addWidget(self.live_lobe_null_mode, 1)
+        null_row.addWidget(self.live_lobe_null_angle)
+        lf.addRow("Suppress direction", null_row)
+        lobe.body_lay.addLayout(lf)
+        self.live_lobe_summary = QLabel()                   # compact one-line summary
+        self.live_lobe_summary.setWordWrap(True)
+        self.live_lobe_summary.setObjectName("lobeSummary")
+        lobe.body_lay.addWidget(self.live_lobe_summary)
+        self.live_lobe_warnings = QLabel()                  # honest warnings (null/calibration/placement)
+        self.live_lobe_warnings.setWordWrap(True)
+        lobe.body_lay.addWidget(self.live_lobe_warnings)
+        self.live_lobe_preview = LobePreview()              # minimal schematic preview
+        lobe.body_lay.addWidget(self.live_lobe_preview)
+        self._lobe_apply_timer = QTimer(self)               # debounce the live set_steering/set_nulls
+        self._lobe_apply_timer.setSingleShot(True)
+        self._lobe_apply_timer.timeout.connect(self._apply_lobe_now)
+        lay.addWidget(lobe)
+        self._update_lobe_summary()
 
         # --- MIC INPUT: software level trim before the beamformer ---
         mic = Card("Mic input — level trim")
@@ -1011,6 +1096,7 @@ class LivePanel(PanelBase):
         leaves the checkboxes alone and reveals every card. Ignored mid-session (modes are fixed at Connect)."""
         self._listening_mode_touched = True   # a genuine user pick (this slot is gated off programmatic refresh)
         self._update_listening_flow_summary()  # keep the descriptive flow summary in step with the selection
+        self._update_lobe_summary()           # lobe mode derives from the listening mode — keep it in step
         if self._live_busy():
             return
         mode = self.live_listening_mode.currentData()
@@ -1548,6 +1634,107 @@ class LivePanel(PanelBase):
             t = max(0.0, min(1.0, (v - floor) / (0.0 - floor)))
             out.append(bars[min(len(bars) - 1, int(t * (len(bars) - 1)))])
         return "".join(out)
+
+    # ---- Lobe control (Phase 11): operator beamformer pickup-pattern ----
+    def _lobe_mode_from_listening(self) -> str:
+        """The lobe mode (fixed/follow/seat/table) derived from the LIVE listening-mode dropdown — Lobe
+        Control reflects the existing modes, it does not add a 7th. Manual ⇒ seat if a seat is picked,
+        else a fixed manual angle; table/twokit ⇒ whole table."""
+        m = self.live_listening_mode.currentData()
+        if m in ("follow", "clean"):
+            return "follow"
+        if m == "seat":
+            return "seat"
+        if m == "manual":
+            return "seat" if self.live_lobe_seat.currentData() else "fixed"
+        return "table"
+
+    def _resolve_seat_az(self, seat_id):
+        """Array-relative azimuth of a seat (degrees), or None when unresolvable (no live session / no
+        array bearing). Never raises."""
+        try:
+            return cp.seat_azimuth_for_array(self.state.config, self._session_array_id, seat_id)
+        except Exception:
+            return None
+
+    def _current_lobe_control(self):
+        """Build a validated `LobeControl` from the current Lobe-Control widgets + the listening mode. Pure
+        read — never touches the engine. Falls back to the safe default rather than ever raising."""
+        from conf_pipeline_control.lobe_control import LobeControl, LobeNull
+        mode = self._lobe_mode_from_listening()
+        seat = self.live_lobe_seat.currentData()
+        angle = LobeControl.clamp_angle(float(self.live_lobe_angle.value()))
+        if mode == "seat" and seat:
+            az = self._resolve_seat_az(seat)
+            if az is not None:
+                angle = LobeControl.clamp_angle(float(az))
+        nulls = []
+        if self.live_lobe_null_mode.currentData() in ("angle", "seat"):
+            nulls = [LobeNull(angle_deg=LobeControl.clamp_angle(float(self.live_lobe_null_angle.value())),
+                              enabled=True, label="suppress")]
+        lc = LobeControl(mode=mode, main_angle_deg=angle,
+                         beam_width=str(self.live_lobe_width.currentData() or "medium"),
+                         target_seat_id=(str(seat) if (mode == "seat" and seat) else None),
+                         auto_steer=(mode == "follow"), nulls=nulls)
+        try:
+            lc.validate()
+        except Exception:
+            lc = LobeControl()
+        return lc
+
+    def _update_lobe_summary(self) -> None:
+        """Refresh the lobe summary + warnings + preview from the current controls. Cheap + never raises;
+        safe to call on every change and on listening-mode change."""
+        if not hasattr(self, "live_lobe_summary"):
+            return
+        try:
+            lc = self._current_lobe_control()
+            cal_on = self._calibration_path is not None
+            placement = self._lobe_placement_status
+            self.live_lobe_summary.setText(lc.summary(calibration_on=cal_on, placement_status=placement))
+            warns = lc.warnings(calibration_on=cal_on, placement_status=placement)
+            self.live_lobe_warnings.setText("  ".join("⚠ " + w for w in warns))
+            self.live_lobe_angle.setEnabled(lc.mode == "fixed")          # manual angle only in fixed-look
+            self.live_lobe_null_angle.setEnabled(self.live_lobe_null_mode.currentData() is not None)
+            en = lc.effective_nulls()
+            self.live_lobe_preview.set_lobe(angle_deg=lc.main_angle_deg, width=lc.beam_width,
+                                            null_deg=(en[0].angle_deg if en else None),
+                                            mode=lc.mode, auto_steer=lc.auto_steer)
+        except Exception:
+            try:
+                self.live_lobe_summary.setText("")
+            except Exception:
+                pass
+
+    def _on_lobe_changed(self) -> None:
+        """A lobe control changed: refresh the summary/preview now + debounce the live apply."""
+        self._update_lobe_summary()
+        try:
+            self._lobe_apply_timer.start(150)
+        except Exception:
+            pass
+
+    def _apply_lobe_now(self) -> None:
+        """Push the current lobe direction + nulls to a running steered engine (the A/B engine), if any.
+        Safe no-op when not connected; `set_steering`/`set_nulls` publish atomically (no audio-thread
+        block) and this never raises into a UI slot."""
+        eng = self._beam_engine
+        if eng is None or not hasattr(eng, "set_steering"):
+            return
+        try:
+            lc = self._current_lobe_control()
+            eng.set_steering(None if lc.auto_steer else float(lc.main_angle_deg))
+            if hasattr(eng, "set_nulls"):
+                bearings = [float(n.angle_deg) for n in lc.effective_nulls()]
+                eng.set_nulls(bearings or None)
+        except Exception:
+            pass
+
+    def set_lobe_placement_status(self, status) -> None:
+        """Tell Lobe Control the room's placement status ('BAD'/'GOOD'/…) so it can warn the operator.
+        Descriptive only; never blocks. None ⇒ unknown (no placement warning)."""
+        self._lobe_placement_status = (None if status is None else str(status))
+        self._update_lobe_summary()
 
     def _on_load_calibration_profile_clicked(self):
         """Pick a calibration JSON via a file dialog, then validate + apply it (apply_calibration_profile)."""

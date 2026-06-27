@@ -170,6 +170,16 @@ from .listening_profile import (  # noqa: F401  (descriptive live-processing rec
     ListeningProfile,
     listening_profile_for_mode,
 )
+from .lobe_control import (  # noqa: F401  (operator beamformer pickup-pattern: direction/width/nulls/follow)
+    LOBE_MODES,
+    LOBE_WIDTHS,
+    LobeControl,
+    LobeControlError,
+    LobeNull,
+    LobeSafety,
+    default_lobe_for_mode,
+    loading_for_width,
+)
 from .multikit import KitSpec, KitStatus, MultiKitController  # noqa: F401  (dual-POLARIS cross-array automix)
 from .multibeam import BeamStatus, MultiBeamController, MultiTrackRecorder  # noqa: F401  (single-array multi-talker "capture everyone")
 from .multiroom import MultiRoomController, RoomKitSpec, RoomKitStatus  # noqa: F401  (combine N arrays → room-wide capture)
@@ -233,6 +243,8 @@ __all__ = [
     "TranscriptionSession", "AudioChunk", "TranscriptResult", "TranscriptionError",
     "OperatorStatus", "AudioRoomProfile", "RoomProfileError",
     "ListeningProfile", "listening_profile_for_mode", "BUILTIN_LISTENING_PROFILES",
+    "LobeControl", "LobeNull", "LobeSafety", "LobeControlError", "default_lobe_for_mode",
+    "loading_for_width", "LOBE_MODES", "LOBE_WIDTHS",
     "MultiBeamController", "BeamStatus", "MultiTrackRecorder",
     "MultiRoomController", "RoomKitSpec", "RoomKitStatus",
     "FenceConfigError", "FenceDecider", "FenceDecision", "FusedSource",

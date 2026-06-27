@@ -118,3 +118,10 @@ the field still loads (the field defaults to `""`). See
   byte-identical engine tests are untouched. Only the GUI checkboxes changed.
 - Every recommended toggle can be unticked before Connect; the dropdown still applies at Connect.
 - The Audio Room Profile Manager is untouched.
+
+## 8. Lobe (pickup pattern) per mode (Phase 11)
+Each profile's `spatial` also carries a **`beamWidth`** lobe-focus field describing the pickup shape:
+**Whole table = wide** (never forced narrow), Follow / Lock-seat / Clean = medium, Two-kits = wide,
+Manual = medium (neutral — the operator's own Lobe Control wins). The LIVE **"Lobe control"** card lets
+the operator aim/shape the beam (direction / focus / suppress-direction) and mirrors the chosen listening
+mode without silently rewriting the controls. See [LOBE_CONTROL_GUIDE.md](LOBE_CONTROL_GUIDE.md).

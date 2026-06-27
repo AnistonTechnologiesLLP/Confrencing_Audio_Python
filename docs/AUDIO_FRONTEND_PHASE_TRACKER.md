@@ -6,6 +6,58 @@
 
 ---
 
+Current Phase: **11 — Lobe Control** (operator controls for the beamformer pickup pattern; surfaces/reuses
+existing steering + nulls, no rewrites).
+
+Phase 11 plan (after discovery — see `reports/audio/phase11_lobe_control_discovery.md`): Lobe Control is
+NOT calibration — it shapes the beam *after* capsule alignment. Discovery confirmed: direction =
+**array-relative degrees** via `set_steering(azimuth_deg)` (LIVE, atomic `_W` publish + `_steer_gen`
+epoch); nulls via `set_nulls`/`compose_nulls` (**already capped at 2**); beam **width is NOT continuous** —
+map Wide/Medium/Narrow honestly to (beam_mode + the existing `live_robust` loading slider), mode-crossing
+changes apply at Connect; seat→angle via `cp.seat_azimuth_for_array` / `azimuth_for_array_point` (missing
+seat ⇒ None); existing seat-lock/manual-angle/click-to-aim + nullseats already drive `set_steering`/
+`set_nulls`; placement status is NOT held by the live panel (warning takes it as an explicit input);
+calibration-on = `_calibration_path is not None`. Build:
+- NEW `conf_pipeline_control/lobe_control.py` — `LobeControl` (+ `LobeNull`): enabled/mode/`main_angle_deg`
+  [−180,180]/`beam_width`{wide,medium,narrow}/`beam_mode`/`target_seat_id`/`auto_steer`/`nulls`(≤2)/safety;
+  `validate()` + `summary()` + `warnings(calibration_on, placement_status)` + camelCase JSON +
+  `default_lobe_for_mode(mode)`. Pure stdlib, mypy-clean.
+- EDIT `conf_pipeline_control/listening_profile.py` — add `beam_width` to `LpSpatial` (default "medium");
+  built-ins per mode (table=wide, follow/seat/clean=medium). Manual = user toggles (no override); Whole
+  table never narrow; Lock-to-seat tolerates missing seat.
+- EDIT `conf_pipeline_gui/panels/live.py` — compact "Lobe Control" Card: manual-angle dial + seat combo
+  (debounced → `set_steering`), Wide/Medium/Narrow focus preset (honest note, loading live / mode at
+  Connect), suppress-direction off/angle/seat (≤2, "reduces not mutes" warning), mode read-out, summary
+  label, minimal `LobePreview` widget, calibration-OFF + placement-BAD warnings. No 7th mode; existing
+  controls untouched. Honest labels only (pickup focus / suppress / reduced-pickup — never soundproof).
+
+### Phase 11 default impact: NONE until the operator touches it — `LobeControl` default is a safe,
+disabled-ish whole-table lobe; nothing auto-applies; direction/nulls reuse existing live setters; no
+DSP/engine/CLI/calibration default change. Tests: `tests/test_lobe_control.py` (model 1–13) +
+`tests/test_gui_lobe_control.py` (GUI 14–17, offscreen) + existing room/operator/listening green (18–20).
+
+### Phase 11 out of scope: no perfect audio fencing/"soundproof" claims, no continuous beamwidth DSP, no
+new beam math, no removed controls, no auto-apply, no engine/calibration default change, no push/merge.
+
+### Phase 11 OUTCOME (DONE locally; NOT committed):
+- **Model** `conf_pipeline_control/lobe_control.py` — `LobeControl`/`LobeNull`/`LobeSafety`: validate
+  (mode/width/angle[-180,180]/≤maxNulls), `clamp_angle`, `effective_nulls`, `summary`, `warnings`,
+  camelCase JSON, `default_lobe_for_mode`, `loading_for_width`. `tests/test_lobe_control.py` (14). Exported.
+- **Listening profiles** — `LpSpatial.beam_width` (default medium; table/twokit=wide, never narrow;
+  manual neutral), camelCase `beamWidth` round-trips; +3 tests.
+- **GUI** — `conf_pipeline_gui/panels/common.py` `LobePreview` (schematic, pragma-no-cover paint) +
+  live.py "Lobe control" Card (direction/focus/suppress/summary/warnings/preview), debounced
+  `set_steering`/`set_nulls` apply, `_current_lobe_control`/`_update_lobe_summary`/`set_lobe_placement_status`;
+  lobe refresh wired into `_on_listening_mode_changed`. `tests/test_gui_lobe_control.py` (8, offscreen).
+- **Reuse-not-rewrite:** no 7th listening mode; existing seat-lock/auto-steer/nullseats/"Calibrate front"
+  untouched. Honest labels (reduces-not-mutes). Calibration-OFF + placement-BAD = warnings, never blocks.
+- **Verification:** non-GUI suite **1093 passed** (+17), narrow GUI+model **78 passed**, mypy clean (74).
+  Docs: `LOBE_CONTROL_GUIDE.md` + `phase11_lobe_control_{discovery,report}.md` + listening/operator guides.
+
+---
+
+### [Phase 10 status]
+
 Current Phase: **10 — Listening Processing Profiles** (descriptive layer; keeps Phase 9 Room Profiles as-is).
 
 Phase 10 plan (after discovery — see `reports/audio/phase10_listening_profiles_discovery.md`): the LIVE

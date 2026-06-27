@@ -113,6 +113,12 @@ applied at Connect, rebuilds if already live). Calibration is **OFF by default**
 apply one, this window's **Calibration** section shows *ON* with the profile details. See
 [CALIBRATION_GUIDE.md](CALIBRATION_GUIDE.md).
 
+**Lobe Control (Phase 11):** the LIVE panel's **"Lobe control"** card aims/shapes the beamformer pickup
+*after* calibration — main direction (manual angle / seat), pickup focus (Wide/Medium/Narrow), and a
+suppress-direction null (≤2). It uses honest labels (a null **reduces** pickup, it does **not** mute — a
+reduced-pickup zone, not a hard-mute zone) and warns when calibration is OFF (less accurate) or placement
+is BAD (underperforms). It changes no DSP default until used. See [LOBE_CONTROL_GUIDE.md](LOBE_CONTROL_GUIDE.md).
+
 `conf_pipeline_gui/panels/operator.py` `OperatorStatusPanel` is the small read-only `QWidget` that renders
 `OperatorStatus.to_dict()` (wrapped by `OperatorDiagnosticsWindow` for the menu action above):
 

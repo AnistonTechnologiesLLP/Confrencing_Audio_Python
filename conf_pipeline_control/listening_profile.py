@@ -26,6 +26,7 @@ _ENGINE_LABELS = {"omlsa": "OM-LSA", "dfn3": "DeepFilterNet3", "wiener": "Wiener
 class LpSpatial:
     mode: str = "whole_table"
     beam_mode: str = "superdirective"
+    beam_width: str = "medium"          # lobe focus preset (Phase 11): wide / medium / narrow
     auto_steer: bool = False
     lock_seat: Optional[str] = None
     null_steering: bool = False
@@ -166,8 +167,9 @@ class ListeningProfile:
         return {
             "version": int(self.version), "id": str(self.id), "name": str(self.name),
             "description": str(self.description), "isBuiltIn": bool(self.is_built_in),
-            "spatial": {"mode": s.mode, "beamMode": s.beam_mode, "autoSteer": bool(s.auto_steer),
-                        "lockSeat": s.lock_seat, "nullSteering": bool(s.null_steering)},
+            "spatial": {"mode": s.mode, "beamMode": s.beam_mode, "beamWidth": s.beam_width,
+                        "autoSteer": bool(s.auto_steer), "lockSeat": s.lock_seat,
+                        "nullSteering": bool(s.null_steering)},
             "calibration": {"enabled": bool(cal.enabled), "profilePath": cal.profile_path},
             "cleanup": {
                 "aec": bool(c.aec), "transientSuppression": bool(c.transient_suppression),
@@ -206,6 +208,7 @@ class ListeningProfile:
             is_built_in=bool(d.get("isBuiltIn", True)),
             spatial=LpSpatial(mode=str(s.get("mode", "whole_table")),
                               beam_mode=str(s.get("beamMode", "superdirective")),
+                              beam_width=str(s.get("beamWidth", "medium")),
                               auto_steer=bool(s.get("autoSteer", False)), lock_seat=s.get("lockSeat", None),
                               null_steering=bool(s.get("nullSteering", False))),
             calibration=LpCalibration(enabled=bool(cal.get("enabled", False)),
@@ -266,7 +269,7 @@ BUILTIN_LISTENING_PROFILES = {
         id="whole_table", name="Whole table",
         description="Default meeting-table pickup (fixed zones). Recommended AGC + dereverb; no denoiser "
                     "on this base path.",
-        spatial=LpSpatial(mode="whole_table", beam_mode="superdirective", auto_steer=False),
+        spatial=LpSpatial(mode="whole_table", beam_mode="superdirective", beam_width="wide", auto_steer=False),
         cleanup=_recommended_cleanup(denoise=False, transient=False)),
     "follow": ListeningProfile(
         id="follow_the_room", name="Follow the room (auto-steer)",
@@ -296,7 +299,7 @@ BUILTIN_LISTENING_PROFILES = {
         id="two_kits", name="Two kits (combined room)",
         description="Combined-room automix: select the active kit + cross-fade to one output, with "
                     "recommended per-kit OM-LSA cleaning and one combined AGC.",
-        spatial=LpSpatial(mode="two_kits", beam_mode="automix", auto_steer=False),
+        spatial=LpSpatial(mode="two_kits", beam_mode="automix", beam_width="wide", auto_steer=False),
         cleanup=_recommended_cleanup(denoise=True, transient=False, dereverb=False),
         safety=LpSafety(notes=(
             "Combined-room automix (talker select + cross-fade); per-kit OM-LSA cleaning + one combined AGC.",))),

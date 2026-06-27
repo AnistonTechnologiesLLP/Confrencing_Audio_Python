@@ -8,7 +8,7 @@ are coalesced onto the next event-loop tick.
 from __future__ import annotations
 
 from PySide6.QtCore import QObject, QPointF, QRectF, QRunnable, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QFont, QPainter, QPen
+from PySide6.QtGui import QColor, QFont, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import (
     QDoubleSpinBox,
     QFrame,
@@ -134,6 +134,90 @@ class LevelMeter(QWidget):
             p.setPen(Qt.NoPen)
             p.setBrush(QColor(pal["err"]))
             p.drawRoundedRect(QRectF(r.right() - 7, r.y(), 7, r.height()), 2, 2)
+        p.end()
+
+
+class LobePreview(QWidget):
+    """A minimal, non-blocking **top-down PREVIEW** of the beamformer lobe: the array at centre, a main-lobe
+    wedge toward the main angle (its spread hints the width preset), an optional dashed null line, and a seat
+    dot. Schematic only — NOT to scale and NOT a measured beam pattern — it paints from cached state set by
+    :meth:`set_lobe` and runs no DSP. Always labelled 'preview'. Azimuth 0° = up, clockwise."""
+
+    _HALF = {"wide": 60.0, "medium": 38.0, "narrow": 22.0}     # display half-angles (schematic, not measured)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setMinimumHeight(120)
+        self.setMinimumWidth(150)
+        self._angle = 0.0
+        self._width = "medium"
+        self._null: "float | None" = None
+        self._mode = "table"
+        self._auto = False
+        self.setToolTip("Lobe preview — schematic pickup pattern (not to scale, not a measured beam).")
+
+    def set_lobe(self, *, angle_deg: float = 0.0, width: str = "medium", null_deg=None,
+                 mode: str = "table", auto_steer: bool = False) -> None:
+        self._angle = float(angle_deg)
+        self._width = str(width)
+        self._null = None if null_deg is None else float(null_deg)
+        self._mode = str(mode)
+        self._auto = bool(auto_steer)
+        self.update()
+
+    def paintEvent(self, _):  # pragma: no cover - pure painting
+        import math
+        st = getattr(self.window(), "state", None)
+        pal = _palette(getattr(st, "theme", "dark") if st is not None else "dark")
+        accent = QColor(pal.get("accent", pal["ok"]))
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing, True)
+        r = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor(pal["surface"]))
+        p.drawRoundedRect(r, 4, 4)
+        cx, cy = r.center().x(), r.center().y()
+        rad = min(r.width(), r.height()) * 0.42
+
+        def pt(deg: float, rr: float) -> QPointF:
+            a = math.radians(deg)
+            return QPointF(cx + rr * math.sin(a), cy - rr * math.cos(a))
+
+        if self._mode == "follow" or self._auto:               # auto: the look moves ⇒ broad/ambiguous
+            half, center = 72.0, self._angle
+        elif self._mode == "table":                            # whole table ⇒ broad
+            half, center = 78.0, 0.0
+        else:                                                  # fixed / seat ⇒ width preset
+            half, center = self._HALF.get(self._width, 38.0), self._angle
+        path = QPainterPath(QPointF(cx, cy))
+        steps = 24
+        for i in range(steps + 1):
+            path.lineTo(pt(center - half + (2 * half) * i / steps, rad))
+        path.lineTo(QPointF(cx, cy))
+        fill = QColor(accent)
+        fill.setAlpha(70)
+        p.setBrush(fill)
+        p.setPen(QPen(accent, 1))
+        p.drawPath(path)
+        p.setPen(QPen(accent, 2))                              # main direction line
+        p.drawLine(QPointF(cx, cy), pt(center, rad))
+        if self._mode == "seat":                               # seat target dot
+            p.setPen(Qt.NoPen)
+            p.setBrush(QColor(pal.get("text", "#ffffff")))
+            p.drawEllipse(pt(center, rad), 4, 4)
+        if self._null is not None:                             # null line (dashed)
+            pen = QPen(QColor(pal["warn"]), 2)
+            pen.setStyle(Qt.DashLine)
+            p.setPen(pen)
+            p.drawLine(QPointF(cx, cy), pt(self._null, rad))
+        p.setPen(Qt.NoPen)                                     # array at centre
+        p.setBrush(QColor(pal.get("text_dim", pal["text"])))
+        p.drawEllipse(QPointF(cx, cy), 3, 3)
+        f = QFont()
+        f.setPointSize(7)
+        p.setFont(f)
+        p.setPen(QPen(QColor(pal.get("faint", pal.get("text_dim", pal["text"]))), 1))
+        p.drawText(r.adjusted(4, 2, -4, -2), int(Qt.AlignTop | Qt.AlignLeft), "preview")
         p.end()
 
 
